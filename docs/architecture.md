@@ -72,6 +72,17 @@ Legacy `anthropic-api-key` migrates to profile `anthropic-default` on first load
 
 App UI: **Settings → Providers**
 
+## Session persistence (Phase 4)
+
+JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.
+
+- `JSONLSessionStore` — encode/decode header + tree entries
+- `SessionManager` — create, list, rebuild messages from branch
+- `AgentSession.attachPersistence` — saves on each `contextSnapshot`
+- App sidebar — session list + resume
+
+Resume currently uses the default provider profile; restoring the saved profile is tracked in `docs/TODO.md` (P4-RESUME-PROVIDER).
+
 ## Phase roadmap
 
 | Phase | Scope | Status |
@@ -80,7 +91,6 @@ App UI: **Settings → Providers**
 | 2 | AnthropicProvider + Keychain | Done |
 | 3 | read/write/edit/bash + ToolPolicy | Done |
 | 3.5 | Provider profiles + BYOK + multi-vendor | Done |
-| 4a | JSONL SessionStore + SessionManager | Done |
-| 4 | SessionManager App wiring + UI | In progress |
-| 5 | AGENTS.md, Skills, Compaction | Planned |
+| 4 | JSONL session persistence + resume UI | Done |
+| 5 | AGENTS.md, Skills, Compaction | Next |
 | 6 | NewPi SwiftUI polish | In progress |

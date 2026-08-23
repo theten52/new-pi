@@ -9,6 +9,9 @@ public actor AgentSession {
     private var runTask: Task<Void, Never>?
     private var eventContinuations: [UUID: AsyncStream<AgentEvent>.Continuation] = [:]
     private var steeringQueue: [AgentMessage] = []
+    private var persistenceFileURL: URL?
+    private var persistenceHeader: SessionHeader?
+    private var jsonlStore = JSONLSessionStore()
 
     public init(context: AgentContext, config: AgentLoopConfig) {
         self.context = context
@@ -49,6 +52,7 @@ public actor AgentSession {
             ) {
                 if case let .contextSnapshot(snapshot) = event {
                     context = snapshot
+                    persistIfNeeded()
                 }
                 broadcast(event)
             }
@@ -80,6 +84,21 @@ public actor AgentSession {
         self.config = configured
     }
 
+    public func attachPersistence(fileURL: URL, header: SessionHeader) {
+        persistenceFileURL = fileURL
+        persistenceHeader = header
+    }
+
+    public var attachedSessionHeader: SessionHeader? {
+        persistenceHeader
+    }
+
+    private func persistIfNeeded() {
+        guard let fileURL = persistenceFileURL, let header = persistenceHeader else { return }
+        let rebuilt = SessionManager.rebuildContext(from: context.messages, header: header)
+        try? jsonlStore.save(rebuilt, to: fileURL)
+    }
+
     private func dequeueSteering() -> AgentMessage? {
         guard !steeringQueue.isEmpty else { return nil }
         return steeringQueue.removeFirst()
@@ -101,7 +120,8 @@ public enum AgentSessionFactory {
         workingDirectory: URL,
         llm: any LLMProvider,
         model: ModelConfig,
-        toolPolicy: ToolPolicyRules = .codingAgentDefault
+        toolPolicy: ToolPolicyRules = .codingAgentDefault,
+        restoredMessages: [AgentMessage] = []
     ) -> AgentSession {
         let config = AgentLoopConfig(
             model: model,
@@ -111,6 +131,7 @@ public enum AgentSessionFactory {
         )
         let context = AgentContext(
             systemPrompt: BuiltInTools.defaultSystemPrompt,
+            messages: restoredMessages,
             workingDirectory: workingDirectory
         )
         return AgentSession(context: context, config: config)

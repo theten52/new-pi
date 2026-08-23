@@ -24,14 +24,17 @@ final class NewPiViewModel: ObservableObject {
     @Published var pendingToolApproval: ToolApprovalRequest?
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
+    @Published var savedSessions: [SessionSummary] = []
     @Published var activeProviderName = "Anthropic"
     @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
 
     private var session: AgentSession?
     private var eventTask: Task<Void, Never>?
+    private var currentSessionFileURL: URL?
     private let providerConfigStore = ProviderConfigStore()
     private let providerCredentialResolver = ProviderCredentialResolver()
+    private let jsonlStore = JSONLSessionStore()
 
     init() {
         Task {
@@ -49,7 +52,8 @@ final class NewPiViewModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         projectURL = url
         Task {
-            await resetSession()
+            await refreshSessionList()
+            await startNewSession()
         }
     }
 
@@ -57,10 +61,21 @@ final class NewPiViewModel: ObservableObject {
         do {
             providerConfig = try providerConfigStore.load()
             await refreshProviderList()
-            await resetSession()
+            if projectURL != nil {
+                await refreshSessionList()
+                await startNewSession()
+            }
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
+    }
+
+    func refreshSessionList() async {
+        guard let projectURL else {
+            savedSessions = []
+            return
+        }
+        savedSessions = (try? SessionManager.listSessions(for: projectURL)) ?? []
     }
 
     func refreshProviderList() async {
@@ -83,7 +98,7 @@ final class NewPiViewModel: ObservableObject {
         do {
             try providerConfigStore.save(providerConfig)
             await refreshProviderList()
-            await resetSession()
+            await startNewSession()
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
@@ -95,7 +110,6 @@ final class NewPiViewModel: ObservableObject {
             let trimmedKey = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             try await providerCredentialResolver.saveAPIKey(apiKeyDraft, for: profile)
 
-            // Prefer a profile with a key when the current default has none.
             var setAsDefault = isNew
             if !setAsDefault,
                !trimmedKey.isEmpty,
@@ -111,7 +125,7 @@ final class NewPiViewModel: ObservableObject {
                 setAsDefault: setAsDefault
             )
             await refreshProviderList()
-            await resetSession()
+            await startNewSession()
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
@@ -121,13 +135,30 @@ final class NewPiViewModel: ObservableObject {
         do {
             try providerConfigStore.deleteProfile(id: id, from: &providerConfig)
             await refreshProviderList()
-            await resetSession()
+            await startNewSession()
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
     }
 
     func resetSession() async {
+        await startNewSession()
+    }
+
+    func startNewSession() async {
+        await beginSession(restoredContext: nil, fileURL: nil)
+    }
+
+    func resumeSession(_ summary: SessionSummary) async {
+        do {
+            let context = try jsonlStore.load(from: summary.fileURL)
+            await beginSession(restoredContext: context, fileURL: summary.fileURL)
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
         eventTask?.cancel()
         transcript.removeAll()
         pendingToolApproval = nil
@@ -136,22 +167,44 @@ final class NewPiViewModel: ObservableObject {
 
         do {
             let profile = try providerConfig.defaultProfile()
+            let messages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
+            rebuildTranscript(from: messages)
+
             let llm = try LLMProviderFactory.make(
                 profile: profile,
                 credentialResolver: providerCredentialResolver
             )
-            session = AgentSessionFactory.codingSession(
+            let agentSession = AgentSessionFactory.codingSession(
                 workingDirectory: projectURL,
                 llm: llm,
-                model: profile.modelConfig
+                model: profile.modelConfig,
+                restoredMessages: messages
             )
+
+            let sessionFileURL: URL
+            let header: SessionHeader
+            if let restoredContext, let fileURL {
+                sessionFileURL = fileURL
+                header = restoredContext.header
+            } else {
+                let created = try SessionManager.createSession(
+                    workingDirectory: projectURL,
+                    providerProfileID: profile.id,
+                    modelID: profile.modelID
+                )
+                sessionFileURL = created.fileURL
+                header = created.context.header
+            }
+
+            await agentSession.attachPersistence(fileURL: sessionFileURL, header: header)
+            session = agentSession
+            currentSessionFileURL = sessionFileURL
             activeProviderName = profile.name
             activeProviderModel = profile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
 
-            if let session {
-                subscribe(to: session)
-            }
+            subscribe(to: agentSession)
+            await refreshSessionList()
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
             activeProviderReady = false
@@ -224,12 +277,31 @@ final class NewPiViewModel: ObservableObject {
         case .agentEnd:
             isStreaming = false
             pendingToolApproval = nil
+            Task { await refreshSessionList() }
         case let .error(error):
             appendTranscript(title: "Error", body: error.localizedDescription)
             isStreaming = false
             pendingToolApproval = nil
         default:
             break
+        }
+    }
+
+    private func rebuildTranscript(from messages: [AgentMessage]) {
+        for message in messages {
+            switch message {
+            case let .user(user):
+                appendTranscript(title: "You", body: user.content)
+            case let .assistant(assistant):
+                appendTranscript(title: "NewPi", body: assistant.text)
+            case let .toolResult(result):
+                appendTranscript(
+                    title: "Tool \(result.toolName)",
+                    body: result.isError ? "Error: \(result.content)" : result.content
+                )
+            case let .compactionSummary(summary):
+                appendTranscript(title: "Summary", body: summary)
+            }
         }
     }
 

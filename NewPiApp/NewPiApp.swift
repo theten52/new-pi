@@ -57,6 +57,33 @@ struct NewPiRootView: View {
                     }
                 }
 
+                Section("Sessions") {
+                    Button("New Session") {
+                        Task { await viewModel.startNewSession() }
+                    }
+                    .disabled(viewModel.projectURL == nil)
+
+                    if viewModel.savedSessions.isEmpty {
+                        Text("No saved sessions")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(viewModel.savedSessions) { summary in
+                            Button {
+                                Task { await viewModel.resumeSession(summary) }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(summary.label ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.subheadline)
+                                    Text("\(summary.messageCount) messages")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
                 Section("Provider") {
                     Label(viewModel.activeProviderName, systemImage: "cpu")
                     if !viewModel.activeProviderModel.isEmpty {
@@ -89,7 +116,7 @@ struct NewPiRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
-                await viewModel.resetSession()
+                await viewModel.startNewSession()
             }
         }
     }
