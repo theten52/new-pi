@@ -15,9 +15,9 @@ Tracked blockers and follow-ups discovered during autonomous development.
 
 | ID | Item | Notes |
 |---|---|---|
-| P5-AGENTS | AGENTS.md loader | Planned after Phase 4 |
-| P5-SKILLS | Swift Skills protocol | |
-| P5-COMPACT | Context compaction | |
+| P5-AGENTS | AGENTS.md loader | done | `.new-pi/AGENTS.md` then project root |
+| P5-SKILLS | Swift Skills protocol | pending | |
+| P5-COMPACT | Context compaction | pending | |
 
 ## Phase 6 — UI polish
 
