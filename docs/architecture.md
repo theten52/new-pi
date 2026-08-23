@@ -81,6 +81,17 @@ Search order for `AGENTS.md`:
 
 Merged into the agent system prompt via `AgentsMarkdownLoader`.
 
+## Skills (Phase 5b)
+
+Markdown skills discovered from:
+
+1. `~/.new-pi/agent/skills/<id>/SKILL.md` (user)
+2. `<project>/.new-pi/skills/<id>/SKILL.md` (project overrides same id)
+
+Optional YAML frontmatter: `name`, `description`, `enabled`. Composed via `SystemPromptComposer`.
+
+Extension protocol: `NewPiExtension` / `NewPiMarkdownSkill` for future native tools and hooks.
+
 ## Session persistence (Phase 4)
 
 JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.

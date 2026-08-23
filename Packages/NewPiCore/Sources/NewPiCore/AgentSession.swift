@@ -130,7 +130,7 @@ public enum AgentSessionFactory {
             toolPolicy: toolPolicy
         )
         let context = AgentContext(
-            systemPrompt: AgentsMarkdownLoader.composeSystemPrompt(for: workingDirectory),
+            systemPrompt: SystemPromptComposer.compose(for: workingDirectory).text,
             messages: restoredMessages,
             workingDirectory: workingDirectory
         )
