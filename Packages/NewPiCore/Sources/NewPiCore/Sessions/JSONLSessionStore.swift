@@ -243,7 +243,7 @@ public enum SessionManager {
 
         return try files.map { fileURL in
             let context = try store.load(from: fileURL)
-            let messageCount = context.entries.filter { $0.type == .message }.count
+            let messageCount = context.entries.filter { $0.type == .message || $0.type == .compaction }.count
             return SessionSummary(
                 id: context.header.id,
                 fileURL: fileURL,
@@ -254,6 +254,27 @@ public enum SessionManager {
                 modelID: context.header.modelID
             )
         }
+    }
+
+    public static func findSession(
+        matching token: String,
+        for projectURL: URL,
+        root: URL = sessionsRoot(),
+        store: JSONLSessionStore = JSONLSessionStore()
+    ) throws -> (summary: SessionSummary, context: SessionContext)? {
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+
+        let summaries = try listSessions(for: projectURL, root: root, store: store)
+        let summary = summaries.first { candidate in
+            candidate.id.uuidString.lowercased().hasPrefix(normalized)
+                || candidate.fileURL.lastPathComponent.lowercased().contains(normalized)
+                || candidate.fileURL.deletingPathExtension().lastPathComponent.lowercased() == normalized
+        }
+
+        guard let summary else { return nil }
+        let context = try store.load(from: summary.fileURL)
+        return (summary, context)
     }
 
     public static func messages(from context: SessionContext) -> [AgentMessage] {

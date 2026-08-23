@@ -51,6 +51,8 @@ new-pi/
 cd Packages/NewPiCore
 swift test
 swift run new-pi
+swift run new-pi sessions list --project /path/to/project
+swift run new-pi sessions show <session-id> --project /path/to/project
 ```
 
 ## NewPi macOS app

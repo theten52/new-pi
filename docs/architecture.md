@@ -104,8 +104,9 @@ JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.
 - `SessionManager` — create, list, rebuild messages from branch
 - `AgentSession.attachPersistence` — saves on each `contextSnapshot`
 - App sidebar — session list + resume
+- CLI — `new-pi sessions list/show [--project PATH]`
 
-Resume currently uses the default provider profile; restoring the saved profile is tracked in `docs/TODO.md` (P4-RESUME-PROVIDER).
+Resume restores provider profile from session header.
 
 ## Phase roadmap
 

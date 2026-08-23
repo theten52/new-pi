@@ -4,12 +4,47 @@ import NewPiCore
 @main
 enum NewPiCLI {
     static func main() async {
+        let args = Array(CommandLine.arguments.dropFirst())
+
+        if args.first == "sessions" {
+            await SessionCommands.run(Array(args.dropFirst()))
+            return
+        }
+
+        if args.first == "help" || args.first == "-h" || args.first == "--help" {
+            printRootUsage()
+            return
+        }
+
+        if !args.isEmpty {
+            fputs("Unknown command: \(args.joined(separator: " "))\n", stderr)
+            printRootUsage()
+            exit(1)
+        }
+
+        await printProviderStatus()
+    }
+
+    private static func printRootUsage() {
+        print(
+            """
+            Usage:
+              new-pi                         Show provider configuration status
+              new-pi sessions list [--project PATH]
+              new-pi sessions show <id> [--project PATH]
+              new-pi help
+            """
+        )
+    }
+
+    private static func printProviderStatus() async {
         let configStore = ProviderConfigStore()
         let credentialResolver = ProviderCredentialResolver()
 
         print("new-pi")
         print("config: \(NewPiConfig.defaultAgentDirectory.path)")
         print("providers: \(configStore.configURL.path)")
+        print("sessions: \(SessionManager.sessionsRoot().path)")
 
         do {
             let config = try configStore.load()
