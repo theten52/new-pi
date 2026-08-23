@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Renders assistant-style markdown in the transcript; tolerates partial input while streaming.
@@ -13,6 +14,7 @@ struct NewPiMarkdownText: View {
             }
         }
         .textSelection(.enabled)
+        .lineSpacing(3)
     }
 
     private var parsedMarkdown: AttributedString? {
@@ -29,15 +31,45 @@ struct NewPiMarkdownText: View {
 struct NewPiTranscriptRow: View {
     let item: NewPiTranscriptItem
 
+    private var isUser: Bool { item.title == "You" }
+    private var isAssistantLike: Bool {
+        item.title == "NewPi" || item.title == "Summary"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(item.title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack {
+            if isUser {
+                Spacer(minLength: 72)
+                bubble
+            } else {
+                bubble
+                Spacer(minLength: 72)
+            }
+        }
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(item.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button {
+                    copyBody()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy message")
+            }
 
             messageBody
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(bubbleBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: 640, alignment: isUser ? .trailing : .leading)
     }
 
     @ViewBuilder
@@ -45,7 +77,11 @@ struct NewPiTranscriptRow: View {
         switch item.title {
         case "NewPi", "Summary":
             NewPiMarkdownText(content: item.body)
-        case _ where item.title.hasPrefix("Tool "):
+        case "Error":
+            Text(item.body)
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+        case _ where item.title.hasPrefix("Tool"):
             Text(item.body)
                 .font(.body.monospaced())
                 .textSelection(.enabled)
@@ -53,6 +89,47 @@ struct NewPiTranscriptRow: View {
             Text(item.body)
                 .textSelection(.enabled)
         }
+    }
+
+    private var bubbleBackground: Color {
+        if item.title == "Error" {
+            return Color.red.opacity(0.08)
+        }
+        if isUser {
+            return Color.accentColor.opacity(0.16)
+        }
+        if isAssistantLike {
+            return Color(nsColor: .controlBackgroundColor)
+        }
+        return Color(nsColor: .windowBackgroundColor)
+    }
+
+    private func copyBody() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(item.body, forType: .string)
+    }
+}
+
+struct NewPiChatEmptyStateView: View {
+    var hasProject: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "sparkles.rectangle.stack")
+                .font(.system(size: 42))
+                .foregroundStyle(.secondary)
+            Text(hasProject ? "Start a session" : "Open a project")
+                .font(.title3.weight(.semibold))
+            Text(hasProject
+                ? "Ask NewPi to read, edit, or run commands in your project. Sessions are saved automatically."
+                : "Choose a project folder to load AGENTS.md, skills, and saved sessions.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+        .padding()
     }
 }
 
@@ -65,5 +142,5 @@ struct NewPiTranscriptRow: View {
         NewPiTranscriptRow(item: NewPiTranscriptItem(title: "You", body: "Plain user text"))
     }
     .padding()
-    .frame(width: 420)
+    .frame(width: 520)
 }

@@ -3,6 +3,10 @@ import SwiftUI
 
 @main
 struct NewPiApp: App {
+    init() {
+        _ = NewPiLogStore.shared
+    }
+
     var body: some Scene {
         WindowGroup {
             NewPiRootView()
@@ -16,6 +20,12 @@ struct NewPiApp: App {
                     NotificationCenter.default.post(name: .newPiNewSession, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .help) {
+                Button("Debug Logs") {
+                    NotificationCenter.default.post(name: .newPiShowLogs, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
         }
     }
@@ -36,10 +46,12 @@ final class NewPiRootViewModelStore {
 
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
+    static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
 }
 
 struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
+    @State private var showLogs = false
 
     var body: some View {
         NavigationSplitView {
@@ -114,6 +126,12 @@ struct NewPiRootView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                Section("Debug") {
+                    Button("View Logs") {
+                        showLogs = true
+                    }
+                }
             }
             .navigationTitle("NewPi")
         } detail: {
@@ -125,11 +143,27 @@ struct NewPiRootView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        showLogs = true
+                    } label: {
+                        Label("Logs", systemImage: "list.bullet.rectangle")
+                    }
+                    .help("Debug Logs")
+                }
+            }
+        }
+        .sheet(isPresented: $showLogs) {
+            NewPiLogsView(store: .shared)
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
                 await viewModel.startNewSession()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newPiShowLogs)) { _ in
+            showLogs = true
         }
     }
 }
@@ -140,13 +174,40 @@ struct NewPiChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(viewModel.transcript) { item in
-                        NewPiTranscriptRow(item: item)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if viewModel.transcript.isEmpty {
+                            NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                        }
+
+                        ForEach(viewModel.transcript) { item in
+                            NewPiTranscriptRow(item: item)
+                                .id(item.id)
+                        }
+
+                        if viewModel.isStreaming {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("NewPi is thinking…")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 4)
+                            .id("streaming-indicator")
+                        }
                     }
+                    .padding()
                 }
-                .padding()
+                .onChange(of: viewModel.transcript.count) {
+                    scrollToBottom(proxy: proxy)
+                }
+                .onChange(of: viewModel.transcript.last?.body) {
+                    scrollToBottom(proxy: proxy)
+                }
+                .onChange(of: viewModel.isStreaming) {
+                    scrollToBottom(proxy: proxy)
+                }
             }
 
             Divider()
@@ -174,6 +235,16 @@ struct NewPiChatView: View {
             .padding()
         }
         .navigationTitle("Chat")
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            if viewModel.isStreaming {
+                proxy.scrollTo("streaming-indicator", anchor: .bottom)
+            } else if let lastID = viewModel.transcript.last?.id {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+        }
     }
 }
 

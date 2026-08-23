@@ -258,6 +258,16 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     }
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let requestBody = request.httpBody ?? Data()
+                    let redactionSecrets = apiKey.isEmpty ? [] : [apiKey]
+                    let startedAt = Date()
+                    NewPiLogger.logLLMRequest(
+                        category: "openai-compatible",
+                        url: endpoint,
+                        model: model.modelID,
+                        requestBody: requestBody,
+                        secrets: redactionSecrets
+                    )
 
                     let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
@@ -266,7 +276,23 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                             errorData.append(byte)
                         }
                         let message = String(data: errorData, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                        let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+                        NewPiLogger.logLLMResponse(
+                            category: "openai-compatible",
+                            statusCode: http.statusCode,
+                            elapsedMilliseconds: elapsed,
+                            body: message,
+                            secrets: redactionSecrets
+                        )
                         throw AgentError.llmFailed(message)
+                    }
+
+                    if let http = response as? HTTPURLResponse {
+                        NewPiLogger.info(
+                            category: "openai-compatible",
+                            message: "LLM stream started",
+                            details: "HTTP \(http.statusCode)"
+                        )
                     }
 
                     var sseParser = SSEByteStreamParser()
@@ -286,12 +312,23 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         for event in parsed { continuation.yield(event) }
                     }
 
+                    NewPiLogger.logLLMStreamFinished(category: "openai-compatible", model: model.modelID)
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish(throwing: AgentError.aborted)
                 } catch let error as AgentError {
+                    NewPiLogger.error(
+                        category: "openai-compatible",
+                        message: "LLM request failed",
+                        details: error.localizedDescription
+                    )
                     continuation.finish(throwing: error)
                 } catch {
+                    NewPiLogger.error(
+                        category: "openai-compatible",
+                        message: "LLM request failed",
+                        details: error.localizedDescription
+                    )
                     continuation.finish(throwing: AgentError.llmFailed(error.localizedDescription))
                 }
             }

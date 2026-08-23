@@ -288,6 +288,16 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                     }
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let requestBody = request.httpBody ?? Data()
+                    let redactionSecrets = [apiKey]
+                    let startedAt = Date()
+                    NewPiLogger.logLLMRequest(
+                        category: "anthropic",
+                        url: baseURL,
+                        model: model.modelID,
+                        requestBody: requestBody,
+                        secrets: redactionSecrets
+                    )
 
                     let (bytes, response) = try await session.bytes(for: request)
                     if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
@@ -296,7 +306,23 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                             errorData.append(byte)
                         }
                         let message = String(data: errorData, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                        let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+                        NewPiLogger.logLLMResponse(
+                            category: "anthropic",
+                            statusCode: http.statusCode,
+                            elapsedMilliseconds: elapsed,
+                            body: message,
+                            secrets: redactionSecrets
+                        )
                         throw AgentError.llmFailed(message)
+                    }
+
+                    if let http = response as? HTTPURLResponse {
+                        NewPiLogger.info(
+                            category: "anthropic",
+                            message: "LLM stream started",
+                            details: "HTTP \(http.statusCode)"
+                        )
                     }
 
                     var sseParser = SSEByteStreamParser()
@@ -320,12 +346,24 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                         }
                     }
 
+                    NewPiLogger.logLLMStreamFinished(category: "anthropic", model: model.modelID)
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish(throwing: AgentError.aborted)
                 } catch let error as AgentError {
+                    NewPiLogger.error(
+                        category: "anthropic",
+                        message: "LLM request failed",
+                        details: error.localizedDescription,
+                        secrets: []
+                    )
                     continuation.finish(throwing: error)
                 } catch {
+                    NewPiLogger.error(
+                        category: "anthropic",
+                        message: "LLM request failed",
+                        details: error.localizedDescription
+                    )
                     continuation.finish(throwing: AgentError.llmFailed(error.localizedDescription))
                 }
             }

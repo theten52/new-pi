@@ -27,6 +27,14 @@ Tracked blockers and follow-ups discovered during autonomous development.
 | P6-TEST-CONN | Settings "Test provider" button | done |
 | P6-MARKDOWN | Transcript markdown rendering | done |
 
+## Phase 7 — From AIChatMac learnings
+
+| ID | Item | Notes |
+|---|---|---|
+| P7-LOGS | In-app debug logs | done | `NewPiLogger` + Logs sheet |
+| P7-UX | Chat UX polish | done | empty state, auto-scroll, copy, bubbles |
+| P7-MCP | MCP client | pending | deferred |
+
 ## Known environment noise (no action)
 
 - `com.apple.linkd.autoShortcut` — App Intents registration in Xcode debug; benign

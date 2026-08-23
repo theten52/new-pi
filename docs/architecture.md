@@ -96,6 +96,10 @@ Extension protocol: `NewPiExtension` / `NewPiMarkdownSkill` for future native to
 
 When estimated input tokens exceed `CompactionConfig.triggerTokenCount` (default 75% of 96k), `CompactionService` summarizes older messages via the active LLM and replaces them with a single `compactionSummary` message. Recent messages (default last 8) are kept verbatim. Tool-call pairs are not split. JSONL sessions persist compaction as `.compaction` entry type.
 
+## Debug logs (Phase 7b)
+
+`NewPiLogger` in NewPiCore records LLM requests/responses (secrets redacted), tool execution, and agent events. The macOS app exposes an in-memory log sheet (**View Logs**, `Cmd+Shift+L`) with Copy/Clear and Console.app shortcut.
+
 ## Session persistence (Phase 4)
 
 JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.

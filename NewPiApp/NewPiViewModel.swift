@@ -4,9 +4,15 @@ import NewPiCore
 import SwiftUI
 
 struct NewPiTranscriptItem: Identifiable {
-    let id = UUID()
+    let id: UUID
     let title: String
     let body: String
+
+    init(id: UUID = UUID(), title: String, body: String) {
+        self.id = id
+        self.title = title
+        self.body = body
+    }
 }
 
 struct NewPiProviderListItem: Identifiable, Equatable {
@@ -299,9 +305,15 @@ final class NewPiViewModel: ObservableObject {
         switch event {
         case .agentStart:
             isStreaming = true
+            NewPiLogger.info(category: "agent", message: "Agent run started")
         case let .messageStart(message):
             if case let .compactionSummary(summary) = message {
                 appendTranscript(title: "Summary", body: summary)
+                NewPiLogger.info(
+                    category: "agent",
+                    message: "Context compacted",
+                    details: "Summary length: \(summary.count) characters"
+                )
             }
         case let .textDelta(delta):
             appendOrUpdateAssistant(delta)
@@ -309,21 +321,42 @@ final class NewPiViewModel: ObservableObject {
             appendOrUpdateAssistant(delta)
         case let .toolApprovalRequired(request):
             pendingToolApproval = request
-        case let .toolExecutionStart(_, name, _):
+            NewPiLogger.info(
+                category: "tool",
+                message: "Tool approval required",
+                details: "\(request.toolName) — \(request.summary)"
+            )
+        case let .toolExecutionStart(_, name, arguments):
             appendTranscript(title: "Tool", body: "Running \(name)…")
+            NewPiLogger.info(
+                category: "tool",
+                message: "Tool started",
+                details: "\(name)\n\(String(describing: arguments))"
+            )
         case let .toolExecutionEnd(_, name, result):
             appendTranscript(
                 title: "Tool \(name)",
                 body: result.isError ? "Error: \(result.content)" : result.content
             )
+            NewPiLogger.info(
+                category: "tool",
+                message: result.isError ? "Tool failed" : "Tool finished",
+                details: "\(name): \(result.content)"
+            )
         case .agentEnd:
             isStreaming = false
             pendingToolApproval = nil
+            NewPiLogger.info(category: "agent", message: "Agent run finished")
             Task { await refreshSessionList() }
         case let .error(error):
             appendTranscript(title: "Error", body: error.localizedDescription)
             isStreaming = false
             pendingToolApproval = nil
+            NewPiLogger.error(
+                category: "agent",
+                message: "Agent error",
+                details: error.localizedDescription
+            )
         default:
             break
         }
@@ -379,7 +412,7 @@ final class NewPiViewModel: ObservableObject {
     private func appendOrUpdateAssistant(_ delta: String) {
         if let last = transcript.last, last.title == "NewPi" {
             let index = transcript.count - 1
-            transcript[index] = NewPiTranscriptItem(title: "NewPi", body: last.body + delta)
+            transcript[index] = NewPiTranscriptItem(id: last.id, title: "NewPi", body: last.body + delta)
         } else {
             appendTranscript(title: "NewPi", body: delta)
         }

@@ -22,6 +22,8 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 5b | Skills loader + NewPiExtension | Done |
 | 5c | Context compaction | Done |
 | 6 | NewPi SwiftUI polish | Done |
+| 7b | Debug logs | Done |
+| 7c | Chat UX polish | Done |
 
 Phase 3.5 adds:
 
