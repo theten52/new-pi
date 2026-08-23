@@ -4,14 +4,32 @@ import NewPiCore
 @main
 enum NewPiCLI {
     static func main() async {
-        let resolver = CredentialResolver()
-        let hasKey = (try? await resolver.hasAPIKey(for: .anthropic)) ?? false
+        let configStore = ProviderConfigStore()
+        let credentialResolver = ProviderCredentialResolver()
 
         print("new-pi")
         print("config: \(NewPiConfig.defaultAgentDirectory.path)")
-        print("anthropic key: \(hasKey ? "configured" : "missing")")
-        print("")
-        print("Set ANTHROPIC_API_KEY or save a key in NewPi Settings (Keychain).")
-        print("Phase 3 will add read/bash/edit/write tools to the CLI.")
+        print("providers: \(configStore.configURL.path)")
+
+        do {
+            let config = try configStore.load()
+            let profile = try config.defaultProfile()
+            let ready = await credentialResolver.hasAPIKey(for: profile)
+            print("")
+            print("default provider: \(profile.name)")
+            print("  preset: \(profile.preset.rawValue)")
+            print("  model:  \(profile.modelID)")
+            print("  key:    \(ready ? "configured" : "missing")")
+            print("")
+            print("Profiles (\(config.profiles.count)):")
+            for item in config.profiles {
+                let itemReady = await credentialResolver.hasAPIKey(for: item)
+                let mark = item.id == config.defaultProfileID ? "*" : " "
+                print(" \(mark) \(item.name) [\(item.preset.rawValue)] \(item.modelID) — key \(itemReady ? "ok" : "missing")")
+            }
+        } catch {
+            print("")
+            print("provider config error: \(error.localizedDescription)")
+        }
     }
 }

@@ -237,15 +237,18 @@ public struct AnthropicSSEDecoder: Sendable {
 public struct AnthropicProvider: LLMProvider, Sendable {
     public var apiKeyProvider: @Sendable () async throws -> String
     public var baseURL: URL
+    public var apiVersion: String
     public var session: URLSession
 
     public init(
         apiKeyProvider: @escaping @Sendable () async throws -> String,
         baseURL: URL = AnthropicAPI.defaultBaseURL,
+        apiVersion: String = AnthropicAPI.anthropicVersion,
         session: URLSession = .shared
     ) {
         self.apiKeyProvider = apiKeyProvider
         self.baseURL = baseURL
+        self.apiVersion = apiVersion
         self.session = session
     }
 
@@ -262,7 +265,7 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                     var request = URLRequest(url: baseURL)
                     request.httpMethod = "POST"
                     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-                    request.setValue(AnthropicAPI.anthropicVersion, forHTTPHeaderField: "anthropic-version")
+                    request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
                     var body: [String: Any] = [
@@ -363,14 +366,3 @@ public struct AnthropicProvider: LLMProvider, Sendable {
     }
 }
 
-public enum LLMProviderFactory {
-    public static func anthropic(apiKeyProvider: @escaping @Sendable () async throws -> String) -> AnthropicProvider {
-        AnthropicProvider(apiKeyProvider: apiKeyProvider)
-    }
-
-    public static func anthropic(resolver: CredentialResolver) -> AnthropicProvider {
-        AnthropicProvider {
-            try await resolver.apiKey(for: .anthropic)
-        }
-    }
-}

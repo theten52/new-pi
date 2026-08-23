@@ -55,6 +55,23 @@ Resolution order for Anthropic:
 
 App UI: **Settings → NewPi**
 
+## Provider configuration (Phase 3.5)
+
+Profiles stored in `~/.new-pi/agent/providers.json`. API keys in Keychain as `provider:<profile-id>:apiKey`.
+
+Supported presets (v1):
+
+| Preset | Implementation |
+|---|---|
+| anthropic | `AnthropicProvider` |
+| openai / openaiCompatible / openRouter / ollama | `OpenAICompatibleProvider` |
+
+Quick-add templates: Anthropic, OpenAI, DeepSeek, OpenRouter, Ollama, custom OpenAI-compatible.
+
+Legacy `anthropic-api-key` migrates to profile `anthropic-default` on first load.
+
+App UI: **Settings → Providers**
+
 ## Phase roadmap
 
 | Phase | Scope | Status |
@@ -62,6 +79,7 @@ App UI: **Settings → NewPi**
 | 0–1 | Types, AgentLoop, tests | Done |
 | 2 | AnthropicProvider + Keychain | Done |
 | 3 | read/write/edit/bash + ToolPolicy | Done |
+| 3.5 | Provider profiles + BYOK + multi-vendor | Done |
 | 4 | JSONL SessionManager | Next |
 | 5 | AGENTS.md, Skills, Compaction | Planned |
 | 6 | NewPi SwiftUI polish | In progress |

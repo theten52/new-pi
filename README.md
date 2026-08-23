@@ -15,9 +15,17 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 0–1 | AgentLoop, tests, AgentSession | Done |
 | 2 | AnthropicProvider, Keychain credentials | Done |
 | 3 | read/write/edit/bash + ToolPolicy | Done |
+| 3.5 | Provider profiles + BYOK (Anthropic, OpenAI-compatible, OpenRouter, Ollama) | Done |
 | 4 | JSONL SessionManager | Next |
 | 5 | AGENTS.md, Skills, Compaction | Planned |
 | 6 | NewPi SwiftUI polish | In progress |
+
+Phase 3.5 adds:
+
+- `ProviderConfigStore` — profiles in `~/.new-pi/agent/providers.json`
+- BYOK via Keychain (`provider:<id>:apiKey`) with env override
+- Presets: Anthropic, OpenAI, DeepSeek (compatible), OpenRouter, Ollama
+- Settings UI for multi-provider management
 
 Phase 2 adds:
 

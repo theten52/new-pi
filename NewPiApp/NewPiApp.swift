@@ -58,10 +58,12 @@ struct NewPiRootView: View {
                 }
 
                 Section("Provider") {
-                    if viewModel.hasAnthropicAPIKey {
-                        Label("Anthropic ready", systemImage: "key.fill")
+                    Label(viewModel.activeProviderName, systemImage: "cpu")
+                    if viewModel.activeProviderReady {
+                        Label("Ready", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
                     } else {
-                        Label("Anthropic key missing", systemImage: "exclamationmark.key.fill")
+                        Label("Key missing", systemImage: "exclamationmark.key.fill")
                             .foregroundStyle(.orange)
                     }
                     Text("Settings → NewPi")

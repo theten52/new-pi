@@ -9,22 +9,32 @@ struct NewPiTranscriptItem: Identifiable {
     let body: String
 }
 
+struct NewPiProviderListItem: Identifiable, Equatable {
+    let profile: ProviderProfile
+    var hasAPIKey: Bool
+
+    var id: String { profile.id }
+}
+
 @MainActor
 final class NewPiViewModel: ObservableObject {
     @Published var projectURL: URL?
     @Published var transcript: [NewPiTranscriptItem] = []
     @Published var isStreaming = false
-    @Published var hasAnthropicAPIKey = false
-    @Published var anthropicAPIKeyDraft = ""
     @Published var pendingToolApproval: ToolApprovalRequest?
+    @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
+    @Published var providerListItems: [NewPiProviderListItem] = []
+    @Published var activeProviderName = "Anthropic"
+    @Published var activeProviderReady = false
 
     private var session: AgentSession?
     private var eventTask: Task<Void, Never>?
-    private let credentialResolver = CredentialResolver()
+    private let providerConfigStore = ProviderConfigStore()
+    private let providerCredentialResolver = ProviderCredentialResolver()
 
     init() {
         Task {
-            await refreshCredentialState()
+            await reloadProviders()
         }
     }
 
@@ -42,6 +52,62 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    func reloadProviders() async {
+        do {
+            providerConfig = try providerConfigStore.load()
+            await refreshProviderList()
+            await resetSession()
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    func refreshProviderList() async {
+        var items: [NewPiProviderListItem] = []
+        for profile in providerConfig.profiles {
+            let hasKey = await providerCredentialResolver.hasAPIKey(for: profile)
+            items.append(NewPiProviderListItem(profile: profile, hasAPIKey: hasKey))
+        }
+        providerListItems = items
+
+        if let defaultProfile = try? providerConfig.defaultProfile() {
+            activeProviderName = defaultProfile.name
+            activeProviderReady = await providerCredentialResolver.hasAPIKey(for: defaultProfile)
+        }
+    }
+
+    func setDefaultProvider(profileID: String) async {
+        providerConfig.defaultProfileID = profileID
+        do {
+            try providerConfigStore.save(providerConfig)
+            await refreshProviderList()
+            await resetSession()
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    func saveProfile(_ profile: ProviderProfile, apiKeyDraft: String) async {
+        do {
+            try await providerCredentialResolver.saveAPIKey(apiKeyDraft, for: profile)
+            try await providerConfigStore.upsertProfile(profile, in: &providerConfig)
+            await refreshProviderList()
+            await resetSession()
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    func deleteProfile(id: String) async {
+        do {
+            try providerConfigStore.deleteProfile(id: id, from: &providerConfig)
+            await refreshProviderList()
+            await resetSession()
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
     func resetSession() async {
         eventTask?.cancel()
         transcript.removeAll()
@@ -49,31 +115,27 @@ final class NewPiViewModel: ObservableObject {
 
         guard let projectURL else { return }
 
-        let llm = LLMProviderFactory.anthropic(resolver: credentialResolver)
-        session = AgentSessionFactory.codingSession(
-            workingDirectory: projectURL,
-            llm: llm,
-            model: ModelConfig(provider: "anthropic", modelID: "claude-sonnet-4-20250514")
-        )
-
-        if let session {
-            subscribe(to: session)
-        }
-    }
-
-    func saveAnthropicAPIKey() async {
         do {
-            try await credentialResolver.saveAPIKey(anthropicAPIKeyDraft, for: .anthropic)
-            anthropicAPIKeyDraft = ""
-            await refreshCredentialState()
-            await resetSession()
+            let profile = try providerConfig.defaultProfile()
+            let llm = try LLMProviderFactory.make(
+                profile: profile,
+                credentialResolver: providerCredentialResolver
+            )
+            session = AgentSessionFactory.codingSession(
+                workingDirectory: projectURL,
+                llm: llm,
+                model: profile.modelConfig
+            )
+            activeProviderName = profile.name
+            activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+
+            if let session {
+                subscribe(to: session)
+            }
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
+            activeProviderReady = false
         }
-    }
-
-    func refreshCredentialState() async {
-        hasAnthropicAPIKey = (try? await credentialResolver.hasAPIKey(for: .anthropic)) ?? false
     }
 
     func send(_ text: String) {

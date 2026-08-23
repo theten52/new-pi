@@ -1,0 +1,184 @@
+import Foundation
+
+public enum ProviderPreset: String, Sendable, Codable, CaseIterable, Identifiable {
+    case anthropic
+    case openai
+    case openaiCompatible
+    case openRouter
+    case ollama
+
+    public var id: String { rawValue }
+}
+
+public enum ProviderOptionKey: String, Sendable, Codable, CaseIterable {
+    case baseURL
+    case apiVersion
+    case organization
+    case httpReferer
+    case appTitle
+}
+
+public struct ProviderOptionField: Sendable, Equatable {
+    public var key: ProviderOptionKey
+    public var label: String
+    public var placeholder: String
+    public var required: Bool
+
+    public init(key: ProviderOptionKey, label: String, placeholder: String = "", required: Bool = false) {
+        self.key = key
+        self.label = label
+        self.placeholder = placeholder
+        self.required = required
+    }
+}
+
+public struct ProviderPresetDefinition: Sendable, Equatable {
+    public var preset: ProviderPreset
+    public var displayName: String
+    public var systemImage: String
+    public var defaultBaseURL: String?
+    public var defaultModels: [String]
+    public var optionFields: [ProviderOptionField]
+    public var credentialRequired: Bool
+    public var environmentVariable: String?
+    public var quickSetupDefaults: [ProviderOptionKey: String]
+
+    public init(
+        preset: ProviderPreset,
+        displayName: String,
+        systemImage: String,
+        defaultBaseURL: String? = nil,
+        defaultModels: [String] = [],
+        optionFields: [ProviderOptionField] = [],
+        credentialRequired: Bool = true,
+        environmentVariable: String? = nil,
+        quickSetupDefaults: [ProviderOptionKey: String] = [:]
+    ) {
+        self.preset = preset
+        self.displayName = displayName
+        self.systemImage = systemImage
+        self.defaultBaseURL = defaultBaseURL
+        self.defaultModels = defaultModels
+        self.optionFields = optionFields
+        self.credentialRequired = credentialRequired
+        self.environmentVariable = environmentVariable
+        self.quickSetupDefaults = quickSetupDefaults
+    }
+}
+
+public enum ProviderPresetCatalog {
+    public static let anthropic = ProviderPresetDefinition(
+        preset: .anthropic,
+        displayName: "Anthropic",
+        systemImage: "sparkles",
+        defaultBaseURL: "https://api.anthropic.com/v1/messages",
+        defaultModels: [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-3-5-haiku-20241022",
+        ],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.anthropic.com/v1/messages"),
+            ProviderOptionField(key: .apiVersion, label: "API Version", placeholder: "2023-06-01"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "ANTHROPIC_API_KEY"
+    )
+
+    public static let openai = ProviderPresetDefinition(
+        preset: .openai,
+        displayName: "OpenAI",
+        systemImage: "brain.head.profile",
+        defaultBaseURL: "https://api.openai.com/v1/chat/completions",
+        defaultModels: ["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.openai.com/v1/chat/completions"),
+            ProviderOptionField(key: .organization, label: "Organization ID", placeholder: "org-…"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "OPENAI_API_KEY"
+    )
+
+    public static let openaiCompatible = ProviderPresetDefinition(
+        preset: .openaiCompatible,
+        displayName: "OpenAI Compatible",
+        systemImage: "server.rack",
+        defaultModels: ["deepseek-chat", "llama3", "qwen2.5-coder"],
+        optionFields: [
+            ProviderOptionField(
+                key: .baseURL,
+                label: "Base URL",
+                placeholder: "https://api.example.com/v1/chat/completions",
+                required: true
+            ),
+            ProviderOptionField(key: .organization, label: "Organization ID", placeholder: "Optional"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "OPENAI_API_KEY"
+    )
+
+    public static let openRouter = ProviderPresetDefinition(
+        preset: .openRouter,
+        displayName: "OpenRouter",
+        systemImage: "arrow.triangle.branch",
+        defaultBaseURL: "https://openrouter.ai/api/v1/chat/completions",
+        defaultModels: [
+            "anthropic/claude-sonnet-4",
+            "openai/gpt-4o",
+            "deepseek/deepseek-chat",
+        ],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://openrouter.ai/api/v1/chat/completions"),
+            ProviderOptionField(key: .httpReferer, label: "HTTP Referer", placeholder: "https://your-app.example"),
+            ProviderOptionField(key: .appTitle, label: "App Title", placeholder: "NewPi"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "OPENROUTER_API_KEY",
+        quickSetupDefaults: [
+            .baseURL: "https://openrouter.ai/api/v1/chat/completions",
+        ]
+    )
+
+    public static let ollama = ProviderPresetDefinition(
+        preset: .ollama,
+        displayName: "Ollama",
+        systemImage: "desktopcomputer",
+        defaultBaseURL: "http://127.0.0.1:11434",
+        defaultModels: ["llama3", "qwen2.5-coder", "codellama"],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "http://127.0.0.1:11434"),
+        ],
+        credentialRequired: false,
+        quickSetupDefaults: [
+            .baseURL: "http://127.0.0.1:11434",
+        ]
+    )
+
+    public static let deepSeekQuickSetup = ProviderPresetDefinition(
+        preset: .openaiCompatible,
+        displayName: "DeepSeek",
+        systemImage: "bolt.fill",
+        defaultBaseURL: "https://api.deepseek.com/v1/chat/completions",
+        defaultModels: ["deepseek-chat", "deepseek-reasoner"],
+        optionFields: openaiCompatible.optionFields,
+        credentialRequired: true,
+        environmentVariable: "OPENAI_API_KEY",
+        quickSetupDefaults: [
+            .baseURL: "https://api.deepseek.com/v1/chat/completions",
+        ]
+    )
+
+    public static func definition(for preset: ProviderPreset) -> ProviderPresetDefinition {
+        switch preset {
+        case .anthropic: anthropic
+        case .openai: openai
+        case .openaiCompatible: openaiCompatible
+        case .openRouter: openRouter
+        case .ollama: ollama
+        }
+    }
+
+    public static var quickAddTemplates: [ProviderPresetDefinition] {
+        [anthropic, openai, deepSeekQuickSetup, openRouter, ollama, openaiCompatible]
+    }
+}
