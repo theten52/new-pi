@@ -43,6 +43,7 @@ public struct AgentLoopConfig: Sendable {
     public var tools: [any AgentTool]
     public var toolExecution: ToolExecutionMode
     public var toolPolicy: ToolPolicyRules
+    public var compaction: CompactionConfig
     public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
     public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)?
 
@@ -52,6 +53,7 @@ public struct AgentLoopConfig: Sendable {
         tools: [any AgentTool] = [],
         toolExecution: ToolExecutionMode = .parallel,
         toolPolicy: ToolPolicyRules = .codingAgentDefault,
+        compaction: CompactionConfig = CompactionConfig(),
         beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
         requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil
     ) {
@@ -60,6 +62,7 @@ public struct AgentLoopConfig: Sendable {
         self.tools = tools
         self.toolExecution = toolExecution
         self.toolPolicy = toolPolicy
+        self.compaction = compaction
         self.beforeToolCall = beforeToolCall
         self.requestToolApproval = requestToolApproval
     }

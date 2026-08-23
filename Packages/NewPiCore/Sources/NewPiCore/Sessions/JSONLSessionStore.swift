@@ -257,18 +257,33 @@ public enum SessionManager {
     }
 
     public static func messages(from context: SessionContext) -> [AgentMessage] {
-        context.branch(from: context.leafID).compactMap(\.message)
+        context.branch(from: context.leafID).compactMap { entry in
+            if entry.type == .compaction, let summary = entry.compactionSummary {
+                return .compactionSummary(summary)
+            }
+            return entry.message
+        }
     }
 
     public static func rebuildContext(from messages: [AgentMessage], header: SessionHeader) -> SessionContext {
         var context = SessionContext(header: header)
         var parentID: String?
         for message in messages {
-            let entry = SessionEntry(
-                parentID: parentID,
-                type: .message,
-                message: message
-            )
+            let entry: SessionEntry
+            switch message {
+            case let .compactionSummary(summary):
+                entry = SessionEntry(
+                    parentID: parentID,
+                    type: .compaction,
+                    compactionSummary: summary
+                )
+            default:
+                entry = SessionEntry(
+                    parentID: parentID,
+                    type: .message,
+                    message: message
+                )
+            }
             context.append(entry)
             parentID = entry.id
         }

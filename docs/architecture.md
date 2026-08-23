@@ -92,6 +92,10 @@ Optional YAML frontmatter: `name`, `description`, `enabled`. Composed via `Syste
 
 Extension protocol: `NewPiExtension` / `NewPiMarkdownSkill` for future native tools and hooks.
 
+## Context compaction (Phase 5c)
+
+When estimated input tokens exceed `CompactionConfig.triggerTokenCount` (default 75% of 96k), `CompactionService` summarizes older messages via the active LLM and replaces them with a single `compactionSummary` message. Recent messages (default last 8) are kept verbatim. Tool-call pairs are not split. JSONL sessions persist compaction as `.compaction` entry type.
+
 ## Session persistence (Phase 4)
 
 JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.
@@ -112,5 +116,5 @@ Resume currently uses the default provider profile; restoring the saved profile 
 | 3 | read/write/edit/bash + ToolPolicy | Done |
 | 3.5 | Provider profiles + BYOK + multi-vendor | Done |
 | 4 | JSONL session persistence + resume UI | Done |
-| 5 | AGENTS.md, Skills, Compaction | Next |
+| 5 | AGENTS.md, Skills, Compaction | Done |
 | 6 | NewPi SwiftUI polish | In progress |

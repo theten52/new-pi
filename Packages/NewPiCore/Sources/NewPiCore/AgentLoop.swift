@@ -1,6 +1,8 @@
 import Foundation
 
 public struct AgentLoop: Sendable {
+    private let compactionService = CompactionService()
+
     public init() {}
 
     public func run(
@@ -21,6 +23,12 @@ public struct AgentLoop: Sendable {
                     while shouldContinue {
                         try Task.checkCancellation()
                         continuation.yield(.turnStart)
+
+                        try await compactionService.compactIfNeeded(
+                            context: &context,
+                            config: config,
+                            continuation: continuation
+                        )
 
                         let assistant = try await streamAssistant(
                             context: context,
