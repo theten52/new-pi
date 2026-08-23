@@ -117,4 +117,4 @@ Resume currently uses the default provider profile; restoring the saved profile 
 | 3.5 | Provider profiles + BYOK + multi-vendor | Done |
 | 4 | JSONL session persistence + resume UI | Done |
 | 5 | AGENTS.md, Skills, Compaction | Done |
-| 6 | NewPi SwiftUI polish | In progress |
+| 6 | NewPi SwiftUI polish | Done |

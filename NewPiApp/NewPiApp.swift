@@ -85,7 +85,19 @@ struct NewPiRootView: View {
                 }
 
                 Section("Provider") {
-                    Label(viewModel.activeProviderName, systemImage: "cpu")
+                    Picker("Provider", selection: Binding(
+                        get: { viewModel.activeProviderID ?? "" },
+                        set: { profileID in
+                            Task { await viewModel.switchProvider(profileID: profileID) }
+                        }
+                    )) {
+                        ForEach(viewModel.providerListItems) { item in
+                            Text(item.profile.name).tag(item.profile.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(viewModel.isStreaming || viewModel.providerListItems.isEmpty)
+
                     if !viewModel.activeProviderModel.isEmpty {
                         Text(viewModel.activeProviderModel)
                             .font(.caption.monospaced())
@@ -162,21 +174,6 @@ struct NewPiChatView: View {
             .padding()
         }
         .navigationTitle("Chat")
-    }
-}
-
-struct NewPiTranscriptRow: View {
-    let item: NewPiTranscriptItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(item.title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(item.body)
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

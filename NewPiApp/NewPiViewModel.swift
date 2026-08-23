@@ -26,6 +26,7 @@ final class NewPiViewModel: ObservableObject {
     @Published var providerListItems: [NewPiProviderListItem] = []
     @Published var savedSessions: [SessionSummary] = []
     @Published var activeProviderName = "Anthropic"
+    @Published var activeProviderID: String?
     @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
 
@@ -87,9 +88,45 @@ final class NewPiViewModel: ObservableObject {
         providerListItems = items
 
         if let defaultProfile = try? providerConfig.defaultProfile() {
+            activeProviderID = defaultProfile.id
             activeProviderName = defaultProfile.name
             activeProviderModel = defaultProfile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: defaultProfile)
+        }
+    }
+
+    func switchProvider(profileID: String) async {
+        guard !isStreaming else { return }
+        guard let projectURL else { return }
+        guard var profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
+
+        do {
+            let llm = try LLMProviderFactory.make(
+                profile: profile,
+                credentialResolver: providerCredentialResolver
+            )
+            let newConfig = AgentLoopConfig(
+                model: profile.modelConfig,
+                llm: llm,
+                tools: BuiltInTools.codingTools(for: projectURL),
+                toolPolicy: .codingAgentDefault
+            )
+            await session?.updateConfig(newConfig)
+
+            if let session,
+               let fileURL = currentSessionFileURL,
+               var header = await session.attachedSessionHeader {
+                header.providerProfileID = profile.id
+                header.modelID = profile.modelID
+                await session.attachPersistence(fileURL: fileURL, header: header)
+            }
+
+            activeProviderID = profile.id
+            activeProviderName = profile.name
+            activeProviderModel = profile.modelID
+            activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
         }
     }
 
@@ -199,6 +236,7 @@ final class NewPiViewModel: ObservableObject {
             await agentSession.attachPersistence(fileURL: sessionFileURL, header: header)
             session = agentSession
             currentSessionFileURL = sessionFileURL
+            activeProviderID = profile.id
             activeProviderName = profile.name
             activeProviderModel = profile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
@@ -261,6 +299,10 @@ final class NewPiViewModel: ObservableObject {
         switch event {
         case .agentStart:
             isStreaming = true
+        case let .messageStart(message):
+            if case let .compactionSummary(summary) = message {
+                appendTranscript(title: "Summary", body: summary)
+            }
         case let .textDelta(delta):
             appendOrUpdateAssistant(delta)
         case let .thinkingDelta(delta):

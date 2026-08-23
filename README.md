@@ -21,7 +21,7 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 5a | AGENTS.md loader | Done |
 | 5b | Skills loader + NewPiExtension | Done |
 | 5c | Context compaction | Done |
-| 6 | NewPi SwiftUI polish | In progress |
+| 6 | NewPi SwiftUI polish | Done |
 
 Phase 3.5 adds:
 
