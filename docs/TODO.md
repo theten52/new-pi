@@ -8,7 +8,7 @@ Tracked blockers and follow-ups discovered during autonomous development.
 |---|---|---|---|
 | P4-UI | Sidebar session list + resume | done | Phase 4b/c |
 | P4-BRANCH | Branch/fork UI for tree sessions | deferred | v1: linear resume only |
-| P4-RESUME-PROVIDER | Restore provider profile from session header on resume | pending | Currently uses default profile |
+| P4-RESUME-PROVIDER | Restore provider profile from session header on resume | done |
 | P4-CLI | CLI session commands | deferred | `new-pi sessions list` etc. |
 
 ## Phase 5 — Deferred

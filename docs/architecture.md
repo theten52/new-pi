@@ -72,6 +72,15 @@ Legacy `anthropic-api-key` migrates to profile `anthropic-default` on first load
 
 App UI: **Settings → Providers**
 
+## Project instructions (Phase 5a)
+
+Search order for `AGENTS.md`:
+
+1. `<project>/.new-pi/AGENTS.md`
+2. `<project>/AGENTS.md`
+
+Merged into the agent system prompt via `AgentsMarkdownLoader`.
+
 ## Session persistence (Phase 4)
 
 JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.

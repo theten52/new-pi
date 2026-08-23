@@ -166,7 +166,7 @@ final class NewPiViewModel: ObservableObject {
         guard let projectURL else { return }
 
         do {
-            let profile = try providerConfig.defaultProfile()
+            let profile = try resolveProfile(for: restoredContext?.header)
             let messages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
             rebuildTranscript(from: messages)
 
@@ -285,6 +285,18 @@ final class NewPiViewModel: ObservableObject {
         default:
             break
         }
+    }
+
+    private func resolveProfile(for header: SessionHeader?) throws -> ProviderProfile {
+        if let header,
+           let profileID = header.providerProfileID,
+           var profile = providerConfig.profiles.first(where: { $0.id == profileID }) {
+            if let modelID = header.modelID, !modelID.isEmpty {
+                profile.modelID = modelID
+            }
+            return profile
+        }
+        return try providerConfig.defaultProfile()
     }
 
     private func rebuildTranscript(from messages: [AgentMessage]) {

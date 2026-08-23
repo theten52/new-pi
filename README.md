@@ -18,7 +18,8 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 3.5 | Provider profiles + BYOK (Anthropic, OpenAI-compatible, OpenRouter, Ollama) | Done |
 | 4a | JSONL SessionStore + SessionManager | Done |
 | 4b/c | Session persistence + sidebar resume UI | Done |
-| 5 | AGENTS.md, Skills, Compaction | Next |
+| 5a | AGENTS.md loader | Done |
+| 5 | Skills, Compaction | Next |
 | 6 | NewPi SwiftUI polish | In progress |
 
 Phase 3.5 adds:
