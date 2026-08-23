@@ -1,0 +1,7 @@
+.new-pi/
+agent/
+sessions/
+*.xcuserstate
+.build/
+DerivedData/
+*.dmg
