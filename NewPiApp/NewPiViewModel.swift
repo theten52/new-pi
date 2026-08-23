@@ -99,7 +99,8 @@ final class NewPiViewModel: ObservableObject {
 
     private func subscribe(to session: AgentSession) {
         eventTask = Task {
-            for await event in session.events() {
+            let stream = await session.events()
+            for await event in stream {
                 handle(event)
             }
         }

@@ -1,41 +1,77 @@
-# NewPi Xcode setup
+# 用 Xcode 打开并运行 NewPi
 
-1. Open Xcode → **File → New → Project → macOS → App**
-2. Product Name: **NewPi**
-3. Interface: **SwiftUI**, Language: **Swift**
-4. Save inside this repository (e.g. `new-pi/NewPi/`)
+## 1. 打开工程
 
-## Add NewPiCore
+任选一种方式：
 
-1. **File → Add Package Dependencies → Add Local…**
-2. Select `Packages/NewPiCore`
-3. Link product **NewPiCore** to the NewPi target
+```bash
+open ./NewPi.xcodeproj
+```
 
-## Add app sources
+或在 Finder 中双击：
 
-Add existing files to the target:
+`new-pi/NewPi.xcodeproj`
 
-- `NewPiApp/NewPiApp.swift`
-- `NewPiApp/NewPiViewModel.swift`
+## 2. 选择 Scheme
 
-Remove the template `ContentView.swift` if present.
+Xcode 顶部工具栏：
 
-## Run
+- **Scheme:** `NewPi`
+- **Destination:** `My Mac`（本机）
+
+## 3. 运行
+
+按 **⌘R**（Product → Run）。
+
+首次运行若提示签名问题：
+
+1. 选中左侧 **NewPi** 工程 → **TARGETS → NewPi**
+2. **Signing & Capabilities** → 勾选 **Automatically manage signing**
+3. 选择你的 **Team**（个人 Apple ID 即可）
+
+## 4. 配置 API Key
+
+App 启动后：
+
+1. 菜单 **NewPi → Settings…**（或 **⌘,**）
+2. 粘贴 **Anthropic API Key** → **Save API Key**
+
+或在终端设置环境变量后从 Xcode 启动：
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+（Xcode 默认不会继承 shell 环境；推荐用 Settings 存 Keychain。）
+
+## 5. 开始对话
+
+1. 左侧 **Open Project…** 选择代码目录
+2. 右侧输入消息 → **Send**
+
+---
+
+## 仅运行核心库 / 测试（可选）
+
+不打开 App，只测 `NewPiCore`：
+
+```bash
+open Packages/NewPiCore/Package.swift
+```
+
+在 Xcode 中 **Product → Test**（⌘U），或终端：
 
 ```bash
 cd Packages/NewPiCore && swift test
 ```
 
-Then build **NewPi** in Xcode.
+CLI：
 
-1. Open **Settings → NewPi** (or `Cmd+,`)
-2. Paste your Anthropic API key → **Save API Key** (stored in Keychain service `com.new-pi.credentials`)
-3. Or export `ANTHROPIC_API_KEY` in your shell
-4. Open a project folder and chat
+```bash
+cd Packages/NewPiCore && swift run new-pi
+```
 
-Until Phase 3, the agent can converse but has no built-in coding tools yet.
+## 要求
 
-## Config paths
-
-- Global: `~/.new-pi/agent/`
-- Project: `<repo>/.new-pi/`
+- macOS 15+
+- Xcode 16+（Swift 6）

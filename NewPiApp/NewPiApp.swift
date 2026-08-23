@@ -27,9 +27,11 @@ struct NewPiApp: App {
 }
 
 @MainActor
-enum NewPiRootViewModelStore {
+final class NewPiRootViewModelStore {
     static let shared = NewPiRootViewModelStore()
     let viewModel = NewPiViewModel()
+
+    private init() {}
 }
 
 extension Notification.Name {
