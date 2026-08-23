@@ -9,6 +9,7 @@ public enum AgentEvent: Sendable {
     case textDelta(String)
     case thinkingDelta(String)
     case toolExecutionStart(id: String, name: String, arguments: JSONValue)
+    case toolApprovalRequired(ToolApprovalRequest)
     case toolExecutionUpdate(id: String, message: String)
     case toolExecutionEnd(id: String, name: String, result: ToolResult)
     case messageEnd(AgentMessage)

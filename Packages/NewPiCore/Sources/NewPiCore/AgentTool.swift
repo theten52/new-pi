@@ -42,20 +42,26 @@ public struct AgentLoopConfig: Sendable {
     public var llm: any LLMProvider
     public var tools: [any AgentTool]
     public var toolExecution: ToolExecutionMode
+    public var toolPolicy: ToolPolicyRules
     public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
+    public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)?
 
     public init(
         model: ModelConfig,
         llm: any LLMProvider,
         tools: [any AgentTool] = [],
         toolExecution: ToolExecutionMode = .parallel,
-        beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil
+        toolPolicy: ToolPolicyRules = .codingAgentDefault,
+        beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
+        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil
     ) {
         self.model = model
         self.llm = llm
         self.tools = tools
         self.toolExecution = toolExecution
+        self.toolPolicy = toolPolicy
         self.beforeToolCall = beforeToolCall
+        self.requestToolApproval = requestToolApproval
     }
 }
 

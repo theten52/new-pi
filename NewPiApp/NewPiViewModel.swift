@@ -16,6 +16,7 @@ final class NewPiViewModel: ObservableObject {
     @Published var isStreaming = false
     @Published var hasAnthropicAPIKey = false
     @Published var anthropicAPIKeyDraft = ""
+    @Published var pendingToolApproval: ToolApprovalRequest?
 
     private var session: AgentSession?
     private var eventTask: Task<Void, Never>?
@@ -44,22 +45,20 @@ final class NewPiViewModel: ObservableObject {
     func resetSession() async {
         eventTask?.cancel()
         transcript.removeAll()
+        pendingToolApproval = nil
 
         guard let projectURL else { return }
 
         let llm = LLMProviderFactory.anthropic(resolver: credentialResolver)
-        let config = AgentLoopConfig(
-            model: ModelConfig(provider: "anthropic", modelID: "claude-sonnet-4-20250514"),
-            llm: llm
-        )
-        let context = AgentContext(
-            systemPrompt: "You are NewPi, a native macOS coding agent.",
-            workingDirectory: projectURL
+        session = AgentSessionFactory.codingSession(
+            workingDirectory: projectURL,
+            llm: llm,
+            model: ModelConfig(provider: "anthropic", modelID: "claude-sonnet-4-20250514")
         )
 
-        let session = AgentSession(context: context, config: config)
-        self.session = session
-        subscribe(to: session)
+        if let session {
+            subscribe(to: session)
+        }
     }
 
     func saveAnthropicAPIKey() async {
@@ -90,7 +89,24 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    func approvePendingTool() {
+        guard let request = pendingToolApproval, let session else { return }
+        pendingToolApproval = nil
+        Task {
+            await session.respondToToolApproval(requestID: request.id, approved: true)
+        }
+    }
+
+    func denyPendingTool() {
+        guard let request = pendingToolApproval, let session else { return }
+        pendingToolApproval = nil
+        Task {
+            await session.respondToToolApproval(requestID: request.id, approved: false)
+        }
+    }
+
     func abort() {
+        pendingToolApproval = nil
         Task {
             await session?.abort()
             isStreaming = false
@@ -114,6 +130,8 @@ final class NewPiViewModel: ObservableObject {
             appendOrUpdateAssistant(delta)
         case let .thinkingDelta(delta):
             appendOrUpdateAssistant(delta)
+        case let .toolApprovalRequired(request):
+            pendingToolApproval = request
         case let .toolExecutionStart(_, name, _):
             appendTranscript(title: "Tool", body: "Running \(name)…")
         case let .toolExecutionEnd(_, name, result):
@@ -123,9 +141,11 @@ final class NewPiViewModel: ObservableObject {
             )
         case .agentEnd:
             isStreaming = false
+            pendingToolApproval = nil
         case let .error(error):
             appendTranscript(title: "Error", body: error.localizedDescription)
             isStreaming = false
+            pendingToolApproval = nil
         default:
             break
         }

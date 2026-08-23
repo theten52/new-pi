@@ -10,6 +10,7 @@
 		AA0000010000000000000001 /* NewPiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000010000000000000001 /* NewPiApp.swift */; };
 		AA0000020000000000000001 /* NewPiViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000020000000000000001 /* NewPiViewModel.swift */; };
 		AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000030000000000000001 /* NewPiSettingsView.swift */; };
+		AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
 /* End PBXBuildFile section */
 
@@ -17,6 +18,7 @@
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000020000000000000001 /* NewPiViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiViewModel.swift; sourceTree = "<group>"; };
 		BB0000030000000000000001 /* NewPiSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSettingsView.swift; sourceTree = "<group>"; };
+		BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiToolApprovalSheet.swift; sourceTree = "<group>"; };
 		BB0000040000000000000001 /* NewPi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewPi.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -46,6 +48,7 @@
 				BB0000010000000000000001 /* NewPiApp.swift */,
 				BB0000020000000000000001 /* NewPiViewModel.swift */,
 				BB0000030000000000000001 /* NewPiSettingsView.swift */,
+				BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */,
 			);
 			path = NewPiApp;
 			sourceTree = "<group>";
@@ -124,6 +127,7 @@
 				AA0000010000000000000001 /* NewPiApp.swift in Sources */,
 				AA0000020000000000000001 /* NewPiViewModel.swift in Sources */,
 				AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */,
+				AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

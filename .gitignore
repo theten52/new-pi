@@ -2,6 +2,7 @@
 agent/
 sessions/
 *.xcuserstate
+xcuserdata/
 .build/
 DerivedData/
 *.dmg

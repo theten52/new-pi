@@ -71,7 +71,14 @@ struct NewPiRootView: View {
             }
             .navigationTitle("NewPi")
         } detail: {
-            NewPiChatView(viewModel: viewModel)
+            ZStack(alignment: .bottom) {
+                NewPiChatView(viewModel: viewModel)
+
+                if viewModel.pendingToolApproval != nil {
+                    NewPiToolApprovalSheet(viewModel: viewModel)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {

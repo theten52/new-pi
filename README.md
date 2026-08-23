@@ -14,8 +14,8 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 |---|---|---|
 | 0–1 | AgentLoop, tests, AgentSession | Done |
 | 2 | AnthropicProvider, Keychain credentials | Done |
-| 3 | read/write/edit/bash tools | Next |
-| 4 | JSONL SessionManager | Planned |
+| 3 | read/write/edit/bash + ToolPolicy | Done |
+| 4 | JSONL SessionManager | Next |
 | 5 | AGENTS.md, Skills, Compaction | Planned |
 | 6 | NewPi SwiftUI polish | In progress |
 

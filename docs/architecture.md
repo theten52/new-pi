@@ -61,7 +61,7 @@ App UI: **Settings → NewPi**
 |---|---|---|
 | 0–1 | Types, AgentLoop, tests | Done |
 | 2 | AnthropicProvider + Keychain | Done |
-| 3 | read/write/edit/bash tools + ToolPolicy | Next |
-| 4 | JSONL SessionManager | Planned |
+| 3 | read/write/edit/bash + ToolPolicy | Done |
+| 4 | JSONL SessionManager | Next |
 | 5 | AGENTS.md, Skills, Compaction | Planned |
 | 6 | NewPi SwiftUI polish | In progress |

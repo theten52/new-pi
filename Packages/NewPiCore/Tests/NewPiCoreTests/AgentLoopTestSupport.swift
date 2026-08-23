@@ -121,6 +121,7 @@ enum AgentLoopTestSupport {
         case .textDelta: "textDelta"
         case .thinkingDelta: "thinkingDelta"
         case .toolExecutionStart: "toolExecutionStart"
+        case .toolApprovalRequired: "toolApprovalRequired"
         case .toolExecutionUpdate: "toolExecutionUpdate"
         case .toolExecutionEnd: "toolExecutionEnd"
         case .contextSnapshot: "contextSnapshot"

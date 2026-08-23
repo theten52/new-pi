@@ -143,6 +143,31 @@ public struct AgentLoop: Sendable {
         let toolContext = ToolContext(workingDirectory: context.workingDirectory)
 
         let runSingle: (ToolCallContent) async throws -> ToolResultMessage = { call in
+            if config.toolPolicy.requiresApproval(toolName: call.name) {
+                let request = ToolApprovalRequest(
+                    id: call.id,
+                    toolName: call.name,
+                    arguments: call.arguments,
+                    summary: ToolApprovalSummary.make(toolName: call.name, arguments: call.arguments)
+                )
+                continuation.yield(.toolApprovalRequired(request))
+
+                if let requestToolApproval = config.requestToolApproval {
+                    let approved = await requestToolApproval(request)
+                    if !approved {
+                        let reason = "Tool execution denied by policy"
+                        let result = ToolResult(content: reason, isError: true)
+                        continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
+                        return ToolResultMessage(
+                            toolCallID: call.id,
+                            toolName: call.name,
+                            content: reason,
+                            isError: true
+                        )
+                    }
+                }
+            }
+
             continuation.yield(.toolExecutionStart(id: call.id, name: call.name, arguments: call.arguments))
 
             if let beforeToolCall = config.beforeToolCall {
