@@ -287,6 +287,19 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    func testProviderConnection(profile: ProviderProfile, apiKeyDraft: String) async -> ProviderConnectionTester.TestResult {
+        let trimmedKey = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolver: ProviderCredentialResolver
+        if !trimmedKey.isEmpty {
+            resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
+                ProviderCredentialResolver.keychainAccount(for: profile.id): trimmedKey,
+            ]))
+        } else {
+            resolver = providerCredentialResolver
+        }
+        return await ProviderConnectionTester.test(profile: profile, credentialResolver: resolver)
+    }
+
     private func resolveProfile(for header: SessionHeader?) throws -> ProviderProfile {
         if let header,
            let profileID = header.providerProfileID,

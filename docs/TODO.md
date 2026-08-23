@@ -24,7 +24,7 @@ Tracked blockers and follow-ups discovered during autonomous development.
 | ID | Item | Notes |
 |---|---|---|
 | P6-PROVIDER-PICKER | In-chat provider switch | |
-| P6-TEST-CONN | Settings "Test provider" button | |
+| P6-TEST-CONN | Settings "Test provider" button | done |
 | P6-MARKDOWN | Transcript markdown rendering | |
 
 ## Known environment noise (no action)

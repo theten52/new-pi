@@ -169,6 +169,8 @@ struct NewPiEditProviderSheet: View {
     @State private var apiKeyDraft = ""
     @State private var customModel = ""
     @State private var errorMessage: String?
+    @State private var testMessage: String?
+    @State private var isTestingConnection = false
 
     init(viewModel: NewPiViewModel, profile: ProviderProfile) {
         self.viewModel = viewModel
@@ -222,6 +224,20 @@ struct NewPiEditProviderSheet: View {
                     }
                 }
 
+                if let testMessage {
+                    Section("Connection test") {
+                        Text(testMessage)
+                            .foregroundStyle(testMessage.hasPrefix("✓") ? .green : .red)
+                    }
+                }
+
+                Section {
+                    Button(isTestingConnection ? "Testing…" : "Test Connection") {
+                        Task { await testConnection() }
+                    }
+                    .disabled(isTestingConnection)
+                }
+
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
@@ -265,6 +281,22 @@ struct NewPiEditProviderSheet: View {
             get: { profile.option(key) ?? "" },
             set: { profile.setOption(key, value: $0) }
         )
+    }
+
+    private func testConnection() async {
+        profile.modelID = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try profile.validate()
+        } catch {
+            testMessage = error.localizedDescription
+            return
+        }
+
+        isTestingConnection = true
+        defer { isTestingConnection = false }
+
+        let result = await viewModel.testProviderConnection(profile: profile, apiKeyDraft: apiKeyDraft)
+        testMessage = result.success ? "✓ \(result.message)" : "✗ \(result.message)"
     }
 
     private func save() {
