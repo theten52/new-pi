@@ -299,41 +299,22 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                         throw AgentError.llmFailed(message)
                     }
 
-                    var buffer = ""
-                    var sseLines: [String] = []
+                    var sseParser = SSEByteStreamParser()
                     let decoder = AnthropicSSEDecoder()
                     let parser = AnthropicStreamParser()
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
-                        let chunk = String(decoding: [byte], as: UTF8.self)
-                        buffer += chunk
-
-                        while let newlineIndex = buffer.firstIndex(of: "\n") {
-                            var line = String(buffer[..<newlineIndex])
-                            buffer = String(buffer[buffer.index(after: newlineIndex)...])
-                            if line.hasSuffix("\r") {
-                                line.removeLast()
-                            }
-                            if line.isEmpty {
-                                if !sseLines.isEmpty {
-                                    let parsed = parser.parse(events: decoder.decodeLines(sseLines))
-                                    for event in parsed {
-                                        continuation.yield(event)
-                                    }
-                                    sseLines.removeAll()
-                                }
-                            } else {
-                                sseLines.append(line)
+                        for block in sseParser.feed(byte) {
+                            let parsed = parser.parse(events: decoder.decodeLines(block))
+                            for event in parsed {
+                                continuation.yield(event)
                             }
                         }
                     }
 
-                    if !buffer.isEmpty {
-                        sseLines.append(buffer)
-                    }
-                    if !sseLines.isEmpty {
-                        let parsed = parser.parse(events: decoder.decodeLines(sseLines))
+                    for block in sseParser.finish() {
+                        let parsed = parser.parse(events: decoder.decodeLines(block))
                         for event in parsed {
                             continuation.yield(event)
                         }

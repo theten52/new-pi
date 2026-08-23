@@ -65,6 +65,22 @@ struct ProviderConfigStoreTests {
         #expect(loaded.defaultProfileID == ProviderConfigFile.defaultAnthropicProfileID)
     }
 
+    @Test("new profile becomes default")
+    func newProfileDefault() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configURL = directory.appendingPathComponent("providers.json")
+        let store = ProviderConfigStore(
+            configURL: configURL,
+            credentialResolver: ProviderCredentialResolver(store: InMemoryCredentialStore())
+        )
+
+        var config = ProviderConfigStore.bootstrapDefaultConfig()
+        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        try store.upsertProfile(deepSeek, in: &config)
+        #expect(config.defaultProfileID == deepSeek.id)
+    }
+
     @Test("migrates legacy anthropic keychain account")
     func legacyMigration() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -111,6 +127,55 @@ struct OpenAICompatibleEndpointTests {
         )
         let url = try OpenAICompatibleEndpoint.resolveURL(for: profile)
         #expect(url.absoluteString == "https://api.deepseek.com/v1/chat/completions")
+    }
+}
+
+@Suite("SSEByteStreamParser")
+struct SSEByteStreamParserTests {
+    @Test("decodes UTF-8 CJK split across byte boundaries")
+    func utf8CJK() {
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"
+        let bytes = Array(payload.utf8)
+
+        var parser = SSEByteStreamParser()
+        var blocks: [[String]] = []
+        for byte in bytes {
+            blocks.append(contentsOf: parser.feed(byte))
+        }
+        blocks.append(contentsOf: parser.finish())
+
+        let joined = blocks.flatMap { $0 }.joined()
+        #expect(joined.contains("你好"))
+        #expect(!joined.contains("\u{FFFD}"))
+    }
+
+    @Test("handles newline at end of buffer without crashing")
+    func newlineAtEnd() throws {
+        var parser = SSEByteStreamParser()
+        for byte in Array("data: ok\n".utf8) {
+            _ = parser.feed(byte)
+        }
+        _ = parser.finish()
+    }
+
+    @Test("preserves partial lines across feed calls")
+    func partialLinesAcrossFeeds() {
+        let payload = "data: {\"content\":\"hi\"}\n\n"
+        let bytes = Array(payload.utf8)
+        let splitIndex = bytes.count / 2
+
+        var parser = SSEByteStreamParser()
+        var blocks: [[String]] = []
+        for byte in bytes[..<splitIndex] {
+            blocks.append(contentsOf: parser.feed(byte))
+        }
+        for byte in bytes[splitIndex...] {
+            blocks.append(contentsOf: parser.feed(byte))
+        }
+        blocks.append(contentsOf: parser.finish())
+
+        #expect(!blocks.isEmpty)
+        #expect(blocks.flatMap { $0 }.joined().contains("data:"))
     }
 }
 

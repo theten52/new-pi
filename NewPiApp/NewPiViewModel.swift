@@ -25,6 +25,7 @@ final class NewPiViewModel: ObservableObject {
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
     @Published var activeProviderName = "Anthropic"
+    @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
 
     private var session: AgentSession?
@@ -72,6 +73,7 @@ final class NewPiViewModel: ObservableObject {
 
         if let defaultProfile = try? providerConfig.defaultProfile() {
             activeProviderName = defaultProfile.name
+            activeProviderModel = defaultProfile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: defaultProfile)
         }
     }
@@ -89,8 +91,25 @@ final class NewPiViewModel: ObservableObject {
 
     func saveProfile(_ profile: ProviderProfile, apiKeyDraft: String) async {
         do {
+            let isNew = !providerConfig.profiles.contains(where: { $0.id == profile.id })
+            let trimmedKey = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             try await providerCredentialResolver.saveAPIKey(apiKeyDraft, for: profile)
-            try await providerConfigStore.upsertProfile(profile, in: &providerConfig)
+
+            // Prefer a profile with a key when the current default has none.
+            var setAsDefault = isNew
+            if !setAsDefault,
+               !trimmedKey.isEmpty,
+               let defaultProfile = try? providerConfig.defaultProfile(),
+               defaultProfile.id != profile.id,
+               !(await providerCredentialResolver.hasAPIKey(for: defaultProfile)) {
+                setAsDefault = true
+            }
+
+            try providerConfigStore.upsertProfile(
+                profile,
+                in: &providerConfig,
+                setAsDefault: setAsDefault
+            )
             await refreshProviderList()
             await resetSession()
         } catch {
@@ -127,6 +146,7 @@ final class NewPiViewModel: ObservableObject {
                 model: profile.modelConfig
             )
             activeProviderName = profile.name
+            activeProviderModel = profile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
 
             if let session {
@@ -218,9 +238,9 @@ final class NewPiViewModel: ObservableObject {
     }
 
     private func appendOrUpdateAssistant(_ delta: String) {
-        if let index = transcript.lastIndex(where: { $0.title == "NewPi" }) {
-            let existing = transcript[index]
-            transcript[index] = NewPiTranscriptItem(title: existing.title, body: existing.body + delta)
+        if let last = transcript.last, last.title == "NewPi" {
+            let index = transcript.count - 1
+            transcript[index] = NewPiTranscriptItem(title: "NewPi", body: last.body + delta)
         } else {
             appendTranscript(title: "NewPi", body: delta)
         }

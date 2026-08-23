@@ -59,11 +59,16 @@ struct NewPiRootView: View {
 
                 Section("Provider") {
                     Label(viewModel.activeProviderName, systemImage: "cpu")
+                    if !viewModel.activeProviderModel.isEmpty {
+                        Text(viewModel.activeProviderModel)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                     if viewModel.activeProviderReady {
                         Label("Ready", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     } else {
-                        Label("Key missing", systemImage: "exclamationmark.key.fill")
+                        Label("Key missing", systemImage: "key.slash")
                             .foregroundStyle(.orange)
                     }
                     Text("Settings → NewPi")

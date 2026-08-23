@@ -104,7 +104,7 @@ struct NewPiProviderRow: View {
                     .foregroundStyle(.green)
                     .help("API key configured")
             } else {
-                Label("Key missing", systemImage: "exclamationmark.key.fill")
+                Label("Key missing", systemImage: "key.slash")
                     .labelStyle(.iconOnly)
                     .foregroundStyle(.orange)
                     .help("API key missing")

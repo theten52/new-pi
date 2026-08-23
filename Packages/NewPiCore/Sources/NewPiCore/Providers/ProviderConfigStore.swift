@@ -45,14 +45,21 @@ public struct ProviderConfigStore {
         try data.write(to: configURL, options: .atomic)
     }
 
-    public func upsertProfile(_ profile: ProviderProfile, in config: inout ProviderConfigFile) throws {
+    public func upsertProfile(
+        _ profile: ProviderProfile,
+        in config: inout ProviderConfigFile,
+        setAsDefault: Bool = false
+    ) throws {
         try profile.validate()
+        let isNew = !config.profiles.contains(where: { $0.id == profile.id })
         if let index = config.profiles.firstIndex(where: { $0.id == profile.id }) {
             config.profiles[index] = profile
         } else {
             config.profiles.append(profile)
         }
-        if config.defaultProfileID == nil {
+        if setAsDefault || isNew {
+            config.defaultProfileID = profile.id
+        } else if config.defaultProfileID == nil {
             config.defaultProfileID = profile.id
         }
         try save(config)
