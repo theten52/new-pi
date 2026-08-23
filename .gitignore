@@ -1,6 +1,7 @@
 .new-pi/
 agent/
-sessions/
+# Runtime JSONL session data (do not match NewPiCore/Sources/.../Sessions source)
+**/.new-pi/agent/sessions/
 *.xcuserstate
 xcuserdata/
 .build/

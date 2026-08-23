@@ -5,12 +5,26 @@ public struct SessionHeader: Sendable, Codable, Equatable {
     public var version: Int
     public var createdAt: Date
     public var workingDirectory: URL
+    public var providerProfileID: String?
+    public var modelID: String?
+    public var label: String?
 
-    public init(id: UUID = UUID(), version: Int = 1, createdAt: Date = Date(), workingDirectory: URL) {
+    public init(
+        id: UUID = UUID(),
+        version: Int = 1,
+        createdAt: Date = Date(),
+        workingDirectory: URL,
+        providerProfileID: String? = nil,
+        modelID: String? = nil,
+        label: String? = nil
+    ) {
         self.id = id
         self.version = version
         self.createdAt = createdAt
         self.workingDirectory = workingDirectory
+        self.providerProfileID = providerProfileID
+        self.modelID = modelID
+        self.label = label
     }
 }
 

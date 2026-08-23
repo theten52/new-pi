@@ -80,6 +80,7 @@ App UI: **Settings → Providers**
 | 2 | AnthropicProvider + Keychain | Done |
 | 3 | read/write/edit/bash + ToolPolicy | Done |
 | 3.5 | Provider profiles + BYOK + multi-vendor | Done |
-| 4 | JSONL SessionManager | Next |
+| 4a | JSONL SessionStore + SessionManager | Done |
+| 4 | SessionManager App wiring + UI | In progress |
 | 5 | AGENTS.md, Skills, Compaction | Planned |
 | 6 | NewPi SwiftUI polish | In progress |
