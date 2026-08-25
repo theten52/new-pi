@@ -102,16 +102,16 @@ When estimated input tokens exceed `CompactionConfig.triggerTokenCount` (default
 
 ## Markdown rendering (Phase 6b)
 
-Assistant, compaction summary, and tool result bubbles use `NewPiMarkdownWebRendererView` (WKWebView):
+Assistant, compaction summary, and tool result bubbles use WKWebView markdown-it rendering:
 
 ```
 NewPiApp/MarkdownRenderer/  → bundled JS/CSS (markdown-it, highlight.js)
 NewPiMarkdownWebRenderer.swift  → HTML shell, CSP, throttled evaluateJS
-NewPiMarkdownText.swift  → WebView wrapper + AttributedString fallback
+NewPiMarkdownText.swift  → WebView wrapper + native fallback
 ```
 
-- Active streaming bubble: updates throttled ~150ms via `window.renderMarkdown`
-- Completed bubbles: immediate render (`flushRendering: true`)
+- Streaming and completed messages share the same WebView renderer (~50ms throttle while streaming)
+- Immediate final render on agentEnd (`flushRendering: true`)
 - Scroll wheel forwarded to outer chat `ScrollView`
 
 ## MCP plugins (Phase 7a)

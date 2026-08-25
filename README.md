@@ -28,10 +28,10 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 7a | MCP client (stdio + Settings UI) | Done |
 | 8 | Session branch, export, sub-agent | Done |
 
-Phase 6b adds WKWebView Markdown rendering for assistant, summary, and tool messages:
+Phase 6b adds hybrid Markdown rendering for assistant, summary, and tool messages:
 
 - **Engine:** markdown-it + highlight.js (bundled in `NewPiApp/MarkdownRenderer/`)
-- **Streaming:** 150ms throttled `evaluateJavaScript` updates; flush on agentEnd
+- **Streaming:** same WKWebView renderer, 50ms throttled updates; immediate flush on completion
 - **Fallback:** native `AttributedString` if WebView or bundle fails
 - **Security:** CSP, no raw HTML, no images, link navigation blocked
 

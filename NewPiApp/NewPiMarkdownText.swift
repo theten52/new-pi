@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Renders markdown via WKWebView (markdown-it + highlight.js) with throttled streaming updates.
+/// Renders markdown via WKWebView (markdown-it + highlight.js) for streaming and completed messages.
 /// Falls back to native AttributedString when the bundle or WebView fails.
 struct NewPiMarkdownText: View {
     let content: String
@@ -34,14 +34,11 @@ struct NewPiMarkdownText: View {
                 nativeFallback
             }
         }
-        .onChange(of: content) {
-            webHeight = 44
-        }
     }
 
     private var nativeFallback: some View {
         Group {
-            if let attributed = parsedMarkdown {
+            if let attributed = Self.parsedMarkdown(from: content) {
                 Text(attributed)
             } else {
                 Text(content)
@@ -49,16 +46,103 @@ struct NewPiMarkdownText: View {
         }
         .textSelection(.enabled)
         .lineSpacing(3)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var parsedMarkdown: AttributedString? {
-        try? AttributedString(
-            markdown: content,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .full,
-                failurePolicy: .returnPartiallyParsedIfPossible
-            )
+    /// Native fallback: line-by-line full Markdown so single `\n` are preserved.
+    private static func parsedMarkdown(from content: String) -> AttributedString? {
+        let segments = markdownLineSegments(from: content)
+        guard !segments.isEmpty else { return nil }
+
+        var result = AttributedString()
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
         )
+
+        for segment in segments {
+            switch segment {
+            case .newline:
+                result.append(AttributedString("\n"))
+            case let .block(text):
+                if let parsed = try? AttributedString(markdown: text, options: options) {
+                    result.append(parsed)
+                } else {
+                    result.append(AttributedString(text))
+                }
+            }
+        }
+
+        return result.characters.isEmpty ? nil : result
+    }
+
+    private enum MarkdownLineSegment {
+        case newline
+        case block(String)
+    }
+
+    private static func markdownLineSegments(from source: String) -> [MarkdownLineSegment] {
+        let normalized = source.replacingOccurrences(of: "\r\n", with: "\n")
+        var segments: [MarkdownLineSegment] = []
+        var index = normalized.startIndex
+
+        while index < normalized.endIndex {
+            if normalized[index...].hasPrefix("```") {
+                if let fenceEnd = endOfFencedBlock(in: normalized, startingAt: index) {
+                    segments.append(.block(String(normalized[index..<fenceEnd])))
+                    index = fenceEnd
+                } else {
+                    segments.append(.block(String(normalized[index...])))
+                    break
+                }
+                continue
+            }
+
+            let lineEnd = normalized[index...].firstIndex(of: "\n") ?? normalized.endIndex
+            let line = String(normalized[index..<lineEnd])
+            if line.isEmpty {
+                segments.append(.newline)
+            } else {
+                segments.append(.block(line))
+            }
+
+            if lineEnd == normalized.endIndex {
+                break
+            }
+
+            segments.append(.newline)
+            index = normalized.index(after: lineEnd)
+        }
+
+        return segments
+    }
+
+    private static func endOfFencedBlock(in source: String, startingAt start: String.Index) -> String.Index? {
+        guard source[start...].hasPrefix("```") else { return nil }
+
+        var searchStart = source.index(start, offsetBy: 3)
+        if let firstNewline = source[searchStart...].firstIndex(of: "\n") {
+            searchStart = source.index(after: firstNewline)
+        } else {
+            return nil
+        }
+
+        while searchStart < source.endIndex {
+            if source[searchStart...].hasPrefix("\n```") {
+                var closeEnd = source.index(searchStart, offsetBy: 4)
+                if closeEnd < source.endIndex, source[closeEnd] == "\n" {
+                    closeEnd = source.index(after: closeEnd)
+                }
+                return closeEnd
+            }
+
+            guard let nextNewline = source[searchStart...].firstIndex(of: "\n") else {
+                return nil
+            }
+            searchStart = source.index(after: nextNewline)
+        }
+
+        return nil
     }
 }
 

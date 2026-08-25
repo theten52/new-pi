@@ -157,12 +157,16 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var pendingMarkdown: String?
         private var lastRenderedMarkdown: String?
         private var rendererScriptURL: URL?
-        private var debounceWorkItem: DispatchWorkItem?
+        private var throttleWorkItem: DispatchWorkItem?
+        private var isRenderingJavaScript = false
+        private var rerenderAfterFlight = false
+        private var lastRenderTime = Date.distantPast
         private var hasReportedFailure = false
         private weak var scrollForwardingWebView: WKWebView?
         private var scrollWheelMonitor: Any?
 
-        private let debounceInterval: TimeInterval = 0.15
+        /// Minimum interval between streaming renders (throttle, not debounce).
+        private let throttleInterval: TimeInterval = 0.05
 
         init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
             _height = height
@@ -195,24 +199,34 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             self.rendererScriptURL = rendererScriptURL
             pendingMarkdown = markdown
 
-            debounceWorkItem?.cancel()
-
             if flush {
+                throttleWorkItem?.cancel()
+                throttleWorkItem = nil
                 renderPending(in: webView)
                 return
             }
 
+            let elapsed = Date().timeIntervalSince(lastRenderTime)
+            if elapsed >= throttleInterval {
+                renderPending(in: webView)
+                return
+            }
+
+            guard throttleWorkItem == nil else { return }
+
+            let delay = throttleInterval - elapsed
             let workItem = DispatchWorkItem { [weak self, weak webView] in
                 guard let self, let webView else { return }
+                self.throttleWorkItem = nil
                 self.renderPending(in: webView)
             }
-            debounceWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+            throttleWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
         }
 
         func cancelPendingUpdate() {
-            debounceWorkItem?.cancel()
-            debounceWorkItem = nil
+            throttleWorkItem?.cancel()
+            throttleWorkItem = nil
         }
 
         func installScrollWheelForwarding(for webView: WKWebView) {
@@ -233,11 +247,13 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         private func renderPending(in webView: WKWebView) {
-            debounceWorkItem?.cancel()
-            debounceWorkItem = nil
-
             guard let markdown = pendingMarkdown else { return }
             guard markdown != lastRenderedMarkdown else { return }
+
+            if isRenderingJavaScript {
+                rerenderAfterFlight = true
+                return
+            }
 
             if isPageLoaded {
                 renderViaJavaScript(markdown: markdown, in: webView)
@@ -245,17 +261,25 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         private func renderViaJavaScript(markdown: String, in webView: WKWebView) {
+            isRenderingJavaScript = true
             do {
                 let script = try NewPiMarkdownWebDocument.renderJavaScript(for: markdown)
                 webView.evaluateJavaScript(script) { [weak self] _, error in
                     guard let self else { return }
+                    self.isRenderingJavaScript = false
                     if error != nil {
                         self.reportFailure()
                         return
                     }
                     self.lastRenderedMarkdown = markdown
+                    self.lastRenderTime = Date()
+                    if self.rerenderAfterFlight {
+                        self.rerenderAfterFlight = false
+                        self.renderPending(in: webView)
+                    }
                 }
             } catch {
+                isRenderingJavaScript = false
                 reportFailure()
             }
         }

@@ -10,6 +10,7 @@
     html: false,
     linkify: true,
     typographer: true,
+    breaks: true,
     highlight: function (source, language) {
       if (language && window.hljs && window.hljs.getLanguage(language)) {
         try {
