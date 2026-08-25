@@ -6,7 +6,7 @@ public struct ProviderConfigStore {
 
     public init(
         configURL: URL = NewPiConfig.defaultAgentDirectory.appendingPathComponent("providers.json"),
-        credentialResolver: ProviderCredentialResolver = ProviderCredentialResolver()
+        credentialResolver: ProviderCredentialResolver = ProviderCredentialResolver.makeDefault()
     ) {
         self.configURL = configURL
         self.credentialResolver = credentialResolver
@@ -20,11 +20,13 @@ public struct ProviderConfigStore {
             let config = try decoder.decode(ProviderConfigFile.self, from: data)
             var validated = config
             try validated.validate()
+            try credentialResolver.migrateKeychainSecretsToUserDefaultsIfNeeded(profiles: validated.profiles)
             return validated
         }
 
         try credentialResolver.migrateLegacyAnthropicKeyIfNeeded()
         let defaultConfig = Self.bootstrapDefaultConfig()
+        try credentialResolver.migrateKeychainSecretsToUserDefaultsIfNeeded(profiles: defaultConfig.profiles)
         try save(defaultConfig)
         return defaultConfig
     }

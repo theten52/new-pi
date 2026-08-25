@@ -5,13 +5,31 @@ public struct ProviderCredentialResolver: Sendable {
     public var environment: @Sendable () -> [String: String]
 
     public init(
-        store: any CredentialStore = KeychainCredentialStore(),
-        environment: @escaping @Sendable () -> [String: String] = {
-            ProcessInfo.processInfo.environment
-        }
+        store: any CredentialStore = ProviderCredentialResolver.makeDefaultStore(),
+        environment: @escaping @Sendable () -> [String: String] = ProviderCredentialResolver.makeDefaultEnvironment
     ) {
         self.store = store
         self.environment = environment
+    }
+
+    public static func makeDefaultStore() -> any CredentialStore {
+        LayeredCredentialStore()
+    }
+
+    public static func makeDefaultEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let devEnv = DevelopmentEnvFile.loadEnvironment()
+        for (key, value) in devEnv where env[key]?.isEmpty != false {
+            env[key] = value
+        }
+        return env
+    }
+
+    public static func makeDefault() -> ProviderCredentialResolver {
+        ProviderCredentialResolver(
+            store: makeDefaultStore(),
+            environment: makeDefaultEnvironment
+        )
     }
 
     public static func keychainAccount(for profileID: String) -> String {
@@ -61,14 +79,52 @@ public struct ProviderCredentialResolver: Sendable {
         return (try? await apiKey(for: profile)) != nil
     }
 
-    /// Migrates legacy `anthropic-api-key` to the default profile keychain account.
+    /// One-time copy from Keychain → UserDefaults when Keychain storage is disabled.
+    public func migrateKeychainSecretsToUserDefaultsIfNeeded(profiles: [ProviderProfile]) throws {
+        guard !ProviderCredentialPreferences.load().useKeychain else { return }
+
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: ProviderCredentialPreferences.keychainMigrationAttemptedKey) else {
+            return
+        }
+        defer {
+            defaults.set(true, forKey: ProviderCredentialPreferences.keychainMigrationAttemptedKey)
+        }
+
+        let layeredStore = store as? LayeredCredentialStore
+        let userDefaultsStore = layeredStore?.userDefaultsStore ?? UserDefaultsCredentialStore()
+        let keychainStore = layeredStore?.keychainStore ?? KeychainCredentialStore()
+
+        var accounts = Set(profiles.map { Self.keychainAccount(for: $0.id) })
+        accounts.insert(Self.legacyAnthropicAccount)
+
+        for account in accounts {
+            if let existing = try userDefaultsStore.load(account: account)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !existing.isEmpty {
+                continue
+            }
+            guard let keychainValue = try keychainStore.load(account: account)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !keychainValue.isEmpty else {
+                continue
+            }
+            try userDefaultsStore.save(account: account, secret: keychainValue)
+        }
+    }
+
+    /// Migrates legacy `anthropic-api-key` to the default profile account (Keychain mode only).
     public func migrateLegacyAnthropicKeyIfNeeded() throws {
+        guard ProviderCredentialPreferences.load().useKeychain else { return }
+
         let legacyAccount = Self.legacyAnthropicAccount
         let newAccount = Self.keychainAccount(for: ProviderConfigFile.defaultAnthropicProfileID)
-        guard try store.load(account: newAccount) == nil,
-              let legacy = try store.load(account: legacyAccount),
-              !legacy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
+        guard try store.load(account: newAccount) == nil else { return }
+
+        let keychainStore = (store as? LayeredCredentialStore)?.keychainStore ?? KeychainCredentialStore()
+        guard let legacy = try keychainStore.load(account: legacyAccount)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !legacy.isEmpty else {
             return
         }
         try store.save(account: newAccount, secret: legacy)

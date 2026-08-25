@@ -35,6 +35,18 @@ struct NewPiSettingsView: View {
                 }
             }
 
+            Section("Credentials") {
+                Toggle("Store API keys in Keychain", isOn: useKeychainBinding)
+                Text("Off by default for Xcode debugging (UserDefaults + optional .env). When on, saved keys are also written to Keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !viewModel.useKeychainForCredentials {
+                    Text("If macOS still asks for your login password, open each provider → paste API key → Save once (stored locally, no Keychain).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
             Section("Paths") {
                 LabeledContent("Providers") {
                     Text("~/.new-pi/agent/providers.json")
@@ -71,6 +83,13 @@ struct NewPiSettingsView: View {
                     await viewModel.setDefaultProvider(profileID: newValue)
                 }
             }
+        )
+    }
+
+    private var useKeychainBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.useKeychainForCredentials },
+            set: { viewModel.setUseKeychainForCredentials($0) }
         )
     }
 }
@@ -205,6 +224,9 @@ struct NewPiEditProviderSheet: View {
                         SecureField("API Key", text: $apiKeyDraft)
                             .textFieldStyle(.roundedBorder)
                         Text("Leave blank to keep the existing key.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Keys are saved to UserDefaults by default. Enable Keychain in Settings if you want Keychain storage too.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

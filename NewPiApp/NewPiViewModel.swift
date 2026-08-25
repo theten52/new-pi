@@ -57,7 +57,8 @@ final class NewPiViewModel: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var currentSessionFileURL: URL?
     private let providerConfigStore = ProviderConfigStore()
-    private let providerCredentialResolver = ProviderCredentialResolver()
+    private let providerCredentialResolver = ProviderCredentialResolver.makeDefault()
+    @Published var useKeychainForCredentials = ProviderCredentialPreferences.load().useKeychain
     private let jsonlStore = JSONLSessionStore()
     private let sessionExporter = SessionExporter()
     private var liveMessageCount = 0
@@ -85,6 +86,7 @@ final class NewPiViewModel: ObservableObject {
 
     func reloadProviders() async {
         do {
+            useKeychainForCredentials = ProviderCredentialPreferences.load().useKeychain
             providerConfig = try providerConfigStore.load()
             await refreshProviderList()
             if projectURL != nil {
@@ -102,6 +104,11 @@ final class NewPiViewModel: ObservableObject {
             return
         }
         savedSessions = (try? SessionManager.listSessions(for: projectURL)) ?? []
+    }
+
+    func setUseKeychainForCredentials(_ enabled: Bool) {
+        useKeychainForCredentials = enabled
+        ProviderCredentialPreferences(useKeychain: enabled).save()
     }
 
     func refreshProviderList() async {

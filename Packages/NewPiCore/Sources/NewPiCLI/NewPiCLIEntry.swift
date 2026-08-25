@@ -40,7 +40,7 @@ enum NewPiCLI {
 
     private static func printProviderStatus() async {
         let configStore = ProviderConfigStore()
-        let credentialResolver = ProviderCredentialResolver()
+        let credentialResolver = ProviderCredentialResolver.makeDefault()
 
         print("new-pi")
         print("config: \(NewPiConfig.defaultAgentDirectory.path)")
