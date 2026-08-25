@@ -173,8 +173,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         /// Minimum interval between streaming renders (throttle, not debounce).
         private let throttleInterval: TimeInterval = 0.1
-        private let heightDebounceInterval: TimeInterval = 0.15
-        private let heightChangeThreshold: CGFloat = 18
+        private let heightDebounceInterval: TimeInterval = 0.05
+        private let streamingHeightEpsilon: CGFloat = 1
 
         init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
             _height = height
@@ -319,13 +319,11 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             if isFlushRendering {
                 heightWorkItem?.cancel()
                 heightWorkItem = nil
-                if abs(reportedHeight - height) >= 1 {
+                if abs(reportedHeight - height) >= streamingHeightEpsilon {
                     height = reportedHeight
                 }
                 return
             }
-
-            guard reportedHeight > height + heightChangeThreshold else { return }
 
             heightWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
@@ -339,7 +337,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         private func applyStreamingHeight(_ reportedHeight: CGFloat) {
             let nextHeight = max(height, max(1, reportedHeight))
-            guard nextHeight > height + (heightChangeThreshold * 0.5) else { return }
+            guard nextHeight > height + streamingHeightEpsilon else { return }
 
             height = nextHeight
             NotificationCenter.default.post(name: .newPiStreamingLayoutDidChange, object: nil)

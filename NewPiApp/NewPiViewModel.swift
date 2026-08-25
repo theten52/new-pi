@@ -612,12 +612,40 @@ final class NewPiViewModel: ObservableObject {
     }
 
     private func rebuildTranscript(from messages: [AgentMessage], entryIDs: [String] = []) {
+        let existingByMessageIndex = Dictionary(
+            uniqueKeysWithValues: transcript.compactMap { item -> (Int, UUID)? in
+                guard let messageIndex = item.messageIndex else { return nil }
+                return (messageIndex, item.id)
+            }
+        )
+        let existingByEntryID = Dictionary(
+            uniqueKeysWithValues: transcript.compactMap { item -> (String, UUID)? in
+                guard let sessionEntryID = item.sessionEntryID else { return nil }
+                return (sessionEntryID, item.id)
+            }
+        )
+        let streamingAssistantID = transcript.last(where: { $0.title == "NewPi" && $0.messageIndex == nil })?.id
+        let lastAssistantMessageIndex = messages.lastIndex(where: {
+            if case .assistant = $0 { return true }
+            return false
+        })
+
         transcript.removeAll()
         for (index, message) in messages.enumerated() {
             let entryID = index < entryIDs.count ? entryIDs[index] : nil
+            let preservedID = preservedTranscriptID(
+                for: index,
+                entryID: entryID,
+                message: message,
+                existingByMessageIndex: existingByMessageIndex,
+                existingByEntryID: existingByEntryID,
+                streamingAssistantID: streamingAssistantID,
+                lastAssistantMessageIndex: lastAssistantMessageIndex
+            )
             switch message {
             case let .user(user):
                 transcript.append(NewPiTranscriptItem(
+                    id: preservedID,
                     title: "You",
                     body: user.content,
                     messageIndex: index,
@@ -625,6 +653,7 @@ final class NewPiViewModel: ObservableObject {
                 ))
             case let .assistant(assistant):
                 transcript.append(NewPiTranscriptItem(
+                    id: preservedID,
                     title: "NewPi",
                     body: assistant.text,
                     messageIndex: index,
@@ -632,6 +661,7 @@ final class NewPiViewModel: ObservableObject {
                 ))
             case let .toolResult(result):
                 transcript.append(NewPiTranscriptItem(
+                    id: preservedID,
                     title: "Tool \(result.toolName)",
                     body: result.isError ? "Error: \(result.content)" : result.content,
                     messageIndex: index,
@@ -639,6 +669,7 @@ final class NewPiViewModel: ObservableObject {
                 ))
             case let .compactionSummary(summary):
                 transcript.append(NewPiTranscriptItem(
+                    id: preservedID,
                     title: "Summary",
                     body: summary,
                     messageIndex: index,
@@ -647,6 +678,29 @@ final class NewPiViewModel: ObservableObject {
             }
         }
         liveMessageCount = messages.count
+    }
+
+    private func preservedTranscriptID(
+        for messageIndex: Int,
+        entryID: String?,
+        message: AgentMessage,
+        existingByMessageIndex: [Int: UUID],
+        existingByEntryID: [String: UUID],
+        streamingAssistantID: UUID?,
+        lastAssistantMessageIndex: Int?
+    ) -> UUID {
+        if let entryID, let id = existingByEntryID[entryID] {
+            return id
+        }
+        if let id = existingByMessageIndex[messageIndex] {
+            return id
+        }
+        if case .assistant = message,
+           messageIndex == lastAssistantMessageIndex,
+           let streamingAssistantID {
+            return streamingAssistantID
+        }
+        return UUID()
     }
 
     private func syncTranscriptMessageIndices() async {

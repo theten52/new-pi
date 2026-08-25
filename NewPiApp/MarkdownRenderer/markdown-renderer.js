@@ -40,6 +40,7 @@
   let lastPostedHeight = 0;
   let pendingHeightFrame = null;
   let resizeObserver = null;
+  let activeStreamingRender = false;
 
   function postHeight(height) {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.height) {
@@ -58,12 +59,15 @@
     }
 
     const height = measureRootHeight(root);
-    if (!force && Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
+    const streaming = activeStreamingRender;
+    if (!force && !streaming && Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
       return;
     }
 
     lastPostedHeight = height;
-    root.style.minHeight = height + "px";
+    if (!streaming) {
+      root.style.minHeight = height + "px";
+    }
     postHeight(height);
   }
 
@@ -109,13 +113,16 @@
 
     options = options || {};
     const streaming = options.streaming === true;
-    const preservedHeight = measureRootHeight(root);
-    if (preservedHeight > 1) {
-      root.style.minHeight = preservedHeight + "px";
+    if (!streaming) {
+      const preservedHeight = measureRootHeight(root);
+      if (preservedHeight > 1) {
+        root.style.minHeight = preservedHeight + "px";
+      }
     }
 
     if (streaming) {
       streamingRenderDepth += 1;
+      activeStreamingRender = true;
     }
 
     root.innerHTML = markdown.render(markdownSource);
@@ -123,7 +130,8 @@
 
     if (streaming) {
       streamingRenderDepth -= 1;
-      scheduleHeightPost(false);
+      scheduleHeightPost(true);
+      activeStreamingRender = false;
       return;
     }
 
