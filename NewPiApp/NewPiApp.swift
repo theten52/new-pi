@@ -64,6 +64,16 @@ extension Notification.Name {
 struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
     @State private var showLogs = false
+    @State private var showsAllSessions = false
+
+    private let recentSessionLimit = 5
+
+    private var displayedSessions: [SessionSummary] {
+        if showsAllSessions || viewModel.savedSessions.count <= recentSessionLimit {
+            return viewModel.savedSessions
+        }
+        return Array(viewModel.savedSessions.prefix(recentSessionLimit))
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -91,7 +101,7 @@ struct NewPiRootView: View {
                         Text("No saved sessions")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(viewModel.savedSessions) { summary in
+                        ForEach(displayedSessions) { summary in
                             Button {
                                 Task { await viewModel.resumeSession(summary) }
                             } label: {
@@ -105,7 +115,19 @@ struct NewPiRootView: View {
                             }
                             .buttonStyle(.plain)
                         }
+
+                        if viewModel.savedSessions.count > recentSessionLimit {
+                            Button(showsAllSessions ? "Show less" : "Show all (\(viewModel.savedSessions.count))") {
+                                showsAllSessions.toggle()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
                     }
+                }
+                .onChange(of: viewModel.projectURL) { _, _ in
+                    showsAllSessions = false
                 }
 
                 Section("Provider") {

@@ -66,6 +66,7 @@ final class NewPiViewModel: ObservableObject {
     init() {
         Task {
             await reloadProviders()
+            await restoreLastProjectIfNeeded()
         }
     }
 
@@ -75,13 +76,26 @@ final class NewPiViewModel: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
+        if let lastProject = NewPiLastProjectStore.load() {
+            panel.directoryURL = lastProject
+        }
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        projectURL = url
         Task {
-            await refreshSessionList()
-            await startNewSession()
+            await openProject(at: url)
         }
+    }
+
+    func restoreLastProjectIfNeeded() async {
+        guard projectURL == nil, let url = NewPiLastProjectStore.load() else { return }
+        await openProject(at: url)
+    }
+
+    func openProject(at url: URL) async {
+        projectURL = url.standardizedFileURL
+        NewPiLastProjectStore.save(url)
+        await refreshSessionList()
+        await startNewSession()
     }
 
     func reloadProviders() async {
