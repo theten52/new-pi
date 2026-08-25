@@ -17,6 +17,8 @@
 		AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000090000000000000001 /* NewPiMCPSettingsView.swift */; };
 		AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */; };
 		AA00000B0000000000000001 /* MarkdownRenderer in Resources */ = {isa = PBXBuildFile; fileRef = BB00000B0000000000000001 /* MarkdownRenderer */; };
+		AA00000C0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB00000C0000000000000001 /* Assets.xcassets */; };
+		AA00000D0000000000000001 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = BB00000D0000000000000001 /* AppIcon.icns */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
 /* End PBXBuildFile section */
 
@@ -31,6 +33,10 @@
 		BB0000090000000000000001 /* NewPiMCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMCPSettingsView.swift; sourceTree = "<group>"; };
 		BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownWebRenderer.swift; sourceTree = "<group>"; };
 		BB00000B0000000000000001 /* MarkdownRenderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MarkdownRenderer; sourceTree = "<group>"; };
+		BB00000C0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		BB00000D0000000000000001 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+		BB00000E0000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB00000F0000000000000001 /* AppIcon.iconset */ = {isa = PBXFileReference; lastKnownFileType = folder.iconset; path = AppIcon.iconset; sourceTree = "<group>"; };
 		BB0000040000000000000001 /* NewPi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewPi.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -67,6 +73,10 @@
 				BB0000080000000000000001 /* NewPiLogsView.swift */,
 				BB0000090000000000000001 /* NewPiMCPSettingsView.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
+				BB00000C0000000000000001 /* Assets.xcassets */,
+				BB00000D0000000000000001 /* AppIcon.icns */,
+				BB00000E0000000000000001 /* Info.plist */,
+				BB00000F0000000000000001 /* AppIcon.iconset */,
 			);
 			path = NewPiApp;
 			sourceTree = "<group>";
@@ -144,6 +154,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA00000B0000000000000001 /* MarkdownRenderer in Resources */,
+				AA00000C0000000000000001 /* Assets.xcassets in Resources */,
+				AA00000D0000000000000001 /* AppIcon.icns in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,9 +233,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_FILE = NewPiApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -245,9 +255,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_FILE = NewPiApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
