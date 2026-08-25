@@ -217,11 +217,13 @@ final class NewPiViewModel: ObservableObject {
                 profile: profile,
                 credentialResolver: providerCredentialResolver
             )
+            let mcpTools = await MCPToolLoader.loadAgentTools()
             let agentSession = AgentSessionFactory.codingSession(
                 workingDirectory: projectURL,
                 llm: llm,
                 model: profile.modelConfig,
-                restoredMessages: messages
+                restoredMessages: messages,
+                additionalTools: mcpTools
             )
 
             let sessionFileURL: URL

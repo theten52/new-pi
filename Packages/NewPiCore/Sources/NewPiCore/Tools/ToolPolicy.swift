@@ -33,7 +33,10 @@ public struct ToolPolicyRules: Sendable, Equatable {
     public static let allowAll = ToolPolicyRules(requireApprovalFor: [])
 
     public func requiresApproval(toolName: String) -> Bool {
-        requireApprovalFor.contains(toolName)
+        if toolName.hasPrefix(MCPToolName.prefix) {
+            return true
+        }
+        return requireApprovalFor.contains(toolName)
     }
 }
 
@@ -61,6 +64,9 @@ public enum ToolApprovalSummary {
             let command = arguments.objectValue?["command"]?.stringValue ?? "?"
             return "Run command:\n\(command)"
         default:
+            if toolName.hasPrefix(MCPToolName.prefix), let parsed = MCPToolName.parse(toolName) {
+                return "MCP tool \(parsed.serverId)/\(parsed.toolName): \(String(describing: arguments))"
+            }
             return "\(toolName): \(String(describing: arguments))"
         }
     }

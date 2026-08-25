@@ -14,6 +14,7 @@
 		AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000060000000000000001 /* NewPiMarkdownText.swift */; };
 		AA0000070000000000000001 /* NewPiLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000070000000000000001 /* NewPiLogStore.swift */; };
 		AA0000080000000000000001 /* NewPiLogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000080000000000000001 /* NewPiLogsView.swift */; };
+		AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000090000000000000001 /* NewPiMCPSettingsView.swift */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +26,7 @@
 		BB0000060000000000000001 /* NewPiMarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownText.swift; sourceTree = "<group>"; };
 		BB0000070000000000000001 /* NewPiLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogStore.swift; sourceTree = "<group>"; };
 		BB0000080000000000000001 /* NewPiLogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogsView.swift; sourceTree = "<group>"; };
+		BB0000090000000000000001 /* NewPiMCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMCPSettingsView.swift; sourceTree = "<group>"; };
 		BB0000040000000000000001 /* NewPi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewPi.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -58,6 +60,7 @@
 				BB0000060000000000000001 /* NewPiMarkdownText.swift */,
 				BB0000070000000000000001 /* NewPiLogStore.swift */,
 				BB0000080000000000000001 /* NewPiLogsView.swift */,
+				BB0000090000000000000001 /* NewPiMCPSettingsView.swift */,
 			);
 			path = NewPiApp;
 			sourceTree = "<group>";
@@ -140,6 +143,7 @@
 				AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */,
 				AA0000070000000000000001 /* NewPiLogStore.swift in Sources */,
 				AA0000080000000000000001 /* NewPiLogsView.swift in Sources */,
+				AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

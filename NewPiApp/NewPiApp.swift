@@ -1,8 +1,19 @@
+import AppKit
 import NewPiCore
 import SwiftUI
 
+final class NewPiAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        Task {
+            await MCPPluginManager.shared.shutdownAll()
+        }
+    }
+}
+
 @main
 struct NewPiApp: App {
+    @NSApplicationDelegateAdaptor(NewPiAppDelegate.self) private var appDelegate
+
     init() {
         _ = NewPiLogStore.shared
     }

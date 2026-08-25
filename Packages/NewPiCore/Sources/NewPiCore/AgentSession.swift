@@ -121,12 +121,15 @@ public enum AgentSessionFactory {
         llm: any LLMProvider,
         model: ModelConfig,
         toolPolicy: ToolPolicyRules = .codingAgentDefault,
-        restoredMessages: [AgentMessage] = []
+        restoredMessages: [AgentMessage] = [],
+        additionalTools: [any AgentTool] = []
     ) -> AgentSession {
+        var tools = BuiltInTools.codingTools(for: workingDirectory)
+        tools.append(contentsOf: additionalTools)
         let config = AgentLoopConfig(
             model: model,
             llm: llm,
-            tools: BuiltInTools.codingTools(for: workingDirectory),
+            tools: tools,
             toolPolicy: toolPolicy
         )
         let context = AgentContext(

@@ -24,6 +24,28 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 6 | NewPi SwiftUI polish | Done |
 | 7b | Debug logs | Done |
 | 7c | Chat UX polish | Done |
+| 7a | MCP client (stdio + Settings UI) | Done |
+
+Phase 7a adds MCP (Model Context Protocol) plugin support:
+
+- Config: `~/.new-pi/agent/mcp.json` (same shape as Claude Desktop / Cursor)
+- Stdio JSON-RPC transport; tools exposed as `mcp/{serverId}/{toolName}`
+- Settings → **MCP Plugins** with consent gate, per-server enable/restart
+- MCP tool calls require user approval (unlike built-in read-only tools)
+- Env override: `NEW_PI_MCP=1` to enable without UI consent
+
+Example `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  }
+}
+```
 
 Phase 3.5 adds:
 

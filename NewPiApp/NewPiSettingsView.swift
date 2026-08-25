@@ -1,8 +1,10 @@
+import AppKit
 import NewPiCore
 import SwiftUI
 
 struct NewPiSettingsView: View {
     @ObservedObject var viewModel: NewPiViewModel
+    @StateObject private var mcpBridge = MCPPluginManagerBridge()
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
 
@@ -34,11 +36,17 @@ struct NewPiSettingsView: View {
             }
 
             Section("Paths") {
-                LabeledContent("Config") {
+                LabeledContent("Providers") {
                     Text("~/.new-pi/agent/providers.json")
                         .font(.caption.monospaced())
                 }
+                LabeledContent("MCP") {
+                    Text("~/.new-pi/agent/mcp.json")
+                        .font(.caption.monospaced())
+                }
             }
+
+            NewPiMCPSettingsView(bridge: mcpBridge)
         }
         .formStyle(.grouped)
         .padding()

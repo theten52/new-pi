@@ -100,6 +100,27 @@ When estimated input tokens exceed `CompactionConfig.triggerTokenCount` (default
 
 `NewPiLogger` in NewPiCore records LLM requests/responses (secrets redacted), tool execution, and agent events. The macOS app exposes an in-memory log sheet (**View Logs**, `Cmd+Shift+L`) with Copy/Clear and Console.app shortcut.
 
+## MCP plugins (Phase 7a)
+
+External tools via [Model Context Protocol](https://modelcontextprotocol.io/) stdio servers.
+
+```
+~/.new-pi/agent/mcp.json
+        └── MCPPluginManager (actor, singleton)
+                └── MCPConnection per server
+                        └── MCPStdioTransport (JSON-RPC framing)
+                                └── MCPAgentTool → AgentSession tools[]
+```
+
+- **Config:** `mcpServers` map with `command`, `args`, optional `env`, `disabled`
+- **Secrets:** `${VAR}` env substitution; `env:account` Keychain refs (service `com.newpi.mcp`)
+- **Tool naming:** `mcp/{serverId}/{toolName}` — merged at session start via `MCPToolLoader`
+- **Policy:** MCP tools always require approval (`ToolPolicy`)
+- **UI:** Settings → MCP Plugins; consent alert on first enable; server status + restart
+- **Lifecycle:** `MCPPluginManager.shared.shutdownAll()` on app terminate
+
+Enable via Settings or `NEW_PI_MCP=1`. Per-server toggles persist in UserDefaults.
+
 ## Session persistence (Phase 4)
 
 JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.
@@ -123,3 +144,4 @@ Resume restores provider profile from session header.
 | 4 | JSONL session persistence + resume UI | Done |
 | 5 | AGENTS.md, Skills, Compaction | Done |
 | 6 | NewPi SwiftUI polish | Done |
+| 7 | Debug logs, Chat UX, MCP client | Done |

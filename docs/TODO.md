@@ -33,7 +33,7 @@ Tracked blockers and follow-ups discovered during autonomous development.
 |---|---|---|
 | P7-LOGS | In-app debug logs | done | `NewPiLogger` + Logs sheet |
 | P7-UX | Chat UX polish | done | empty state, auto-scroll, copy, bubbles |
-| P7-MCP | MCP client | pending | deferred |
+| P7-MCP | MCP client | done | stdio MCP + Settings UI |
 
 ## Known environment noise (no action)
 
