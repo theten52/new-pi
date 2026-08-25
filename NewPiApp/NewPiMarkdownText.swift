@@ -154,12 +154,15 @@ struct NewPiTranscriptRow: View {
     }
 
     private var usesMarkdown: Bool {
-        item.title == "NewPi" || item.title == "Summary" || item.title.hasPrefix("Tool")
+        item.title == "NewPi" || item.title == "Summary"
     }
 
     var body: some View {
         HStack {
-            if isUser {
+            if item.isToolTranscript {
+                NewPiToolTranscriptView(item: item)
+                Spacer(minLength: 72)
+            } else if isUser {
                 Spacer(minLength: 72)
                 bubble
             } else {

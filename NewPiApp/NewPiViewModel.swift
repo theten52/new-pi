@@ -544,10 +544,21 @@ final class NewPiViewModel: ObservableObject {
                 details: "\(name)\n\(NewPiLogFormat.describeJSONValue(arguments))"
             )
         case let .toolExecutionEnd(_, name, result):
-            appendTranscript(
-                title: "Tool \(name)",
-                body: result.isError ? "Error: \(result.content)" : result.content
-            )
+            let body = result.isError ? "Error: \(result.content)" : result.content
+            if let lastIndex = transcript.indices.last,
+               transcript[lastIndex].title == "Tool",
+               transcript[lastIndex].body.hasPrefix("Running ") {
+                let running = transcript[lastIndex]
+                transcript[lastIndex] = NewPiTranscriptItem(
+                    id: running.id,
+                    title: "Tool \(name)",
+                    body: body,
+                    messageIndex: running.messageIndex,
+                    sessionEntryID: running.sessionEntryID
+                )
+            } else {
+                appendTranscript(title: "Tool \(name)", body: body)
+            }
             NewPiLogger.info(
                 category: "app",
                 message: result.isError ? "UI: tool failed" : "UI: tool finished",
