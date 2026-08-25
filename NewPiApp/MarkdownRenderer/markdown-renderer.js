@@ -30,7 +30,7 @@
 
   markdown.disable("image");
 
-  const heightChangeThreshold = 1;
+  const heightChangeThreshold = 8;
   let lastPostedHeight = 0;
   let pendingHeightFrame = null;
   let resizeObserver = null;

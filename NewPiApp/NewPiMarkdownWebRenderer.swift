@@ -158,6 +158,9 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var lastRenderedMarkdown: String?
         private var rendererScriptURL: URL?
         private var throttleWorkItem: DispatchWorkItem?
+        private var heightWorkItem: DispatchWorkItem?
+        private var pendingReportedHeight: CGFloat?
+        private var isFlushRendering = true
         private var isRenderingJavaScript = false
         private var rerenderAfterFlight = false
         private var lastRenderTime = Date.distantPast
@@ -167,6 +170,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         /// Minimum interval between streaming renders (throttle, not debounce).
         private let throttleInterval: TimeInterval = 0.05
+        private let heightDebounceInterval: TimeInterval = 0.1
+        private let heightChangeThreshold: CGFloat = 8
 
         init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
             _height = height
@@ -198,6 +203,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         ) {
             self.rendererScriptURL = rendererScriptURL
             pendingMarkdown = markdown
+            isFlushRendering = flush
 
             if flush {
                 throttleWorkItem?.cancel()
@@ -227,6 +233,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func cancelPendingUpdate() {
             throttleWorkItem?.cancel()
             throttleWorkItem = nil
+            heightWorkItem?.cancel()
+            heightWorkItem = nil
         }
 
         func installScrollWheelForwarding(for webView: WKWebView) {
@@ -287,11 +295,44 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == "height" else { return }
 
+            let reportedHeight: CGFloat
             if let number = message.body as? NSNumber {
-                height = max(1, CGFloat(truncating: number))
+                reportedHeight = max(1, CGFloat(truncating: number))
             } else if let doubleValue = message.body as? Double {
-                height = max(1, CGFloat(doubleValue))
+                reportedHeight = max(1, CGFloat(doubleValue))
+            } else {
+                return
             }
+
+            scheduleHeightUpdate(reportedHeight)
+        }
+
+        private func scheduleHeightUpdate(_ reportedHeight: CGFloat) {
+            pendingReportedHeight = reportedHeight
+
+            if isFlushRendering {
+                heightWorkItem?.cancel()
+                heightWorkItem = nil
+                applyHeight(reportedHeight)
+                return
+            }
+
+            if abs(reportedHeight - height) < heightChangeThreshold {
+                return
+            }
+
+            heightWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self, let pendingReportedHeight = self.pendingReportedHeight else { return }
+                self.heightWorkItem = nil
+                self.applyHeight(pendingReportedHeight)
+            }
+            heightWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + heightDebounceInterval, execute: workItem)
+        }
+
+        private func applyHeight(_ reportedHeight: CGFloat) {
+            height = max(1, reportedHeight)
         }
 
         // SECURITY-REVIEW: Only local file resources and about:blank are allowed.
