@@ -100,6 +100,20 @@ When estimated input tokens exceed `CompactionConfig.triggerTokenCount` (default
 
 `NewPiLogger` in NewPiCore records LLM requests/responses (secrets redacted), tool execution, and agent events. The macOS app exposes an in-memory log sheet (**View Logs**, `Cmd+Shift+L`) with Copy/Clear and Console.app shortcut.
 
+## Markdown rendering (Phase 6b)
+
+Assistant, compaction summary, and tool result bubbles use `NewPiMarkdownWebRendererView` (WKWebView):
+
+```
+NewPiApp/MarkdownRenderer/  → bundled JS/CSS (markdown-it, highlight.js)
+NewPiMarkdownWebRenderer.swift  → HTML shell, CSP, throttled evaluateJS
+NewPiMarkdownText.swift  → WebView wrapper + AttributedString fallback
+```
+
+- Active streaming bubble: updates throttled ~150ms via `window.renderMarkdown`
+- Completed bubbles: immediate render (`flushRendering: true`)
+- Scroll wheel forwarded to outer chat `ScrollView`
+
 ## MCP plugins (Phase 7a)
 
 External tools via [Model Context Protocol](https://modelcontextprotocol.io/) stdio servers.
@@ -155,6 +169,6 @@ JSONL entries form a tree via `id` / `parentID`. `SessionManager.syncMessages` i
 | 3.5 | Provider profiles + BYOK + multi-vendor | Done |
 | 4 | JSONL session persistence + resume UI | Done |
 | 5 | AGENTS.md, Skills, Compaction | Done |
-| 6 | NewPi SwiftUI polish | Done |
+| 6 | NewPi SwiftUI polish + WebView Markdown | Done |
 | 7 | Debug logs, Chat UX, MCP client | Done |
 | 8 | Session branch, export, sub-agent | Done |

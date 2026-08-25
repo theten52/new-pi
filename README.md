@@ -22,10 +22,18 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 5b | Skills loader + NewPiExtension | Done |
 | 5c | Context compaction | Done |
 | 6 | NewPi SwiftUI polish | Done |
+| 6b | WKWebView Markdown (streaming) | Done |
 | 7b | Debug logs | Done |
 | 7c | Chat UX polish | Done |
 | 7a | MCP client (stdio + Settings UI) | Done |
 | 8 | Session branch, export, sub-agent | Done |
+
+Phase 6b adds WKWebView Markdown rendering for assistant, summary, and tool messages:
+
+- **Engine:** markdown-it + highlight.js (bundled in `NewPiApp/MarkdownRenderer/`)
+- **Streaming:** 150ms throttled `evaluateJavaScript` updates; flush on agentEnd
+- **Fallback:** native `AttributedString` if WebView or bundle fails
+- **Security:** CSP, no raw HTML, no images, link navigation blocked
 
 Phase 8 adds session branching, export, and sub-agents:
 

@@ -32,7 +32,8 @@ Tracked blockers and follow-ups discovered during autonomous development.
 |---|---|---|
 | P6-PROVIDER-PICKER | In-chat provider switch | done | Sidebar picker, preserves session |
 | P6-TEST-CONN | Settings "Test provider" button | done |
-| P6-MARKDOWN | Transcript markdown rendering | done |
+| P6-MARKDOWN | Transcript markdown rendering | done | AttributedString baseline |
+| P6-MARKDOWN-WEB | WKWebView markdown + streaming | done | markdown-it/highlight.js, 150ms throttle |
 
 ## Phase 7 — From AIChatMac learnings
 

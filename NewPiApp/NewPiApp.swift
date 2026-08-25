@@ -211,7 +211,10 @@ struct NewPiChatView: View {
                         ForEach(viewModel.transcript) { item in
                             NewPiTranscriptRow(
                                 item: item,
-                                isStreaming: viewModel.isStreaming
+                                isStreaming: viewModel.isStreaming,
+                                isActiveStreamingItem: viewModel.isStreaming
+                                    && item.id == viewModel.transcript.last?.id
+                                    && (item.title == "NewPi" || item.title == "Summary")
                             ) { index in
                                 Task { await viewModel.forkFromMessage(index: index) }
                             }

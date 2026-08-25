@@ -1,0 +1,33 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: #24292f;
+  font: -apple-system-body;
+  overflow: hidden;
+}
+
+.markdown-body {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  font: -apple-system-body;
+}
+
+.markdown-body pre {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-body a {
+  cursor: default;
+}

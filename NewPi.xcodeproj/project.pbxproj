@@ -15,6 +15,8 @@
 		AA0000070000000000000001 /* NewPiLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000070000000000000001 /* NewPiLogStore.swift */; };
 		AA0000080000000000000001 /* NewPiLogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000080000000000000001 /* NewPiLogsView.swift */; };
 		AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000090000000000000001 /* NewPiMCPSettingsView.swift */; };
+		AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */; };
+		AA00000B0000000000000001 /* MarkdownRenderer in Resources */ = {isa = PBXBuildFile; fileRef = BB00000B0000000000000001 /* MarkdownRenderer */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
 /* End PBXBuildFile section */
 
@@ -27,6 +29,8 @@
 		BB0000070000000000000001 /* NewPiLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogStore.swift; sourceTree = "<group>"; };
 		BB0000080000000000000001 /* NewPiLogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogsView.swift; sourceTree = "<group>"; };
 		BB0000090000000000000001 /* NewPiMCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMCPSettingsView.swift; sourceTree = "<group>"; };
+		BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownWebRenderer.swift; sourceTree = "<group>"; };
+		BB00000B0000000000000001 /* MarkdownRenderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MarkdownRenderer; sourceTree = "<group>"; };
 		BB0000040000000000000001 /* NewPi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewPi.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -58,9 +62,11 @@
 				BB0000030000000000000001 /* NewPiSettingsView.swift */,
 				BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */,
 				BB0000060000000000000001 /* NewPiMarkdownText.swift */,
+				BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */,
 				BB0000070000000000000001 /* NewPiLogStore.swift */,
 				BB0000080000000000000001 /* NewPiLogsView.swift */,
 				BB0000090000000000000001 /* NewPiMCPSettingsView.swift */,
+				BB00000B0000000000000001 /* MarkdownRenderer */,
 			);
 			path = NewPiApp;
 			sourceTree = "<group>";
@@ -82,6 +88,7 @@
 			buildPhases = (
 				DD0000020000000000000001 /* Sources */,
 				DD0000010000000000000001 /* Frameworks */,
+				DD0000030000000000000001 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -131,6 +138,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		DD0000030000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA00000B0000000000000001 /* MarkdownRenderer in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		DD0000020000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -141,6 +159,7 @@
 				AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */,
 				AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */,
 				AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */,
+				AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */,
 				AA0000070000000000000001 /* NewPiLogStore.swift in Sources */,
 				AA0000080000000000000001 /* NewPiLogsView.swift in Sources */,
 				AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */,

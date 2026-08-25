@@ -1,11 +1,45 @@
 import AppKit
 import SwiftUI
 
-/// Renders assistant-style markdown in the transcript; tolerates partial input while streaming.
+/// Renders markdown via WKWebView (markdown-it + highlight.js) with throttled streaming updates.
+/// Falls back to native AttributedString when the bundle or WebView fails.
 struct NewPiMarkdownText: View {
     let content: String
+    var flushRendering: Bool
+
+    @State private var webRendererFailed = false
+    @State private var webHeight: CGFloat = 44
 
     var body: some View {
+        Group {
+            if let rendererScriptURL = NewPiMarkdownWebDocument.rendererScriptURL(), !webRendererFailed {
+                NewPiMarkdownWebRendererView(
+                    markdown: content,
+                    rendererScriptURL: rendererScriptURL,
+                    height: $webHeight,
+                    flushRendering: flushRendering,
+                    onRenderingFailed: {
+                        webRendererFailed = true
+                    }
+                )
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: 1,
+                    idealHeight: webHeight,
+                    maxHeight: webHeight,
+                    alignment: .leading
+                )
+                .accessibilityLabel(content)
+            } else {
+                nativeFallback
+            }
+        }
+        .onChange(of: content) {
+            webHeight = 44
+        }
+    }
+
+    private var nativeFallback: some View {
         Group {
             if let attributed = parsedMarkdown {
                 Text(attributed)
@@ -31,11 +65,16 @@ struct NewPiMarkdownText: View {
 struct NewPiTranscriptRow: View {
     let item: NewPiTranscriptItem
     var isStreaming = false
+    var isActiveStreamingItem = false
     var onFork: ((Int) -> Void)?
 
     private var isUser: Bool { item.title == "You" }
     private var isAssistantLike: Bool {
         item.title == "NewPi" || item.title == "Summary"
+    }
+
+    private var usesMarkdown: Bool {
+        item.title == "NewPi" || item.title == "Summary" || item.title.hasPrefix("Tool")
     }
 
     var body: some View {
@@ -87,18 +126,16 @@ struct NewPiTranscriptRow: View {
 
     @ViewBuilder
     private var messageBody: some View {
-        switch item.title {
-        case "NewPi", "Summary":
-            NewPiMarkdownText(content: item.body)
-        case "Error":
+        if usesMarkdown {
+            NewPiMarkdownText(
+                content: item.body,
+                flushRendering: !isActiveStreamingItem
+            )
+        } else if item.title == "Error" {
             Text(item.body)
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
-        case _ where item.title.hasPrefix("Tool"):
-            Text(item.body)
-                .font(.body.monospaced())
-                .textSelection(.enabled)
-        default:
+        } else {
             Text(item.body)
                 .textSelection(.enabled)
         }
