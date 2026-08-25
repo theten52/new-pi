@@ -123,7 +123,7 @@ final class NewPiViewModel: ObservableObject {
     func switchProvider(profileID: String) async {
         guard !isStreaming else { return }
         guard let projectURL else { return }
-        guard var profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
+        guard let profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
 
         do {
             let llm = try LLMProviderFactory.make(

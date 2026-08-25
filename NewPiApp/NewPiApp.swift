@@ -182,7 +182,7 @@ struct NewPiRootView: View {
             }
         }
         .sheet(isPresented: $showLogs) {
-            NewPiLogsView(store: .shared)
+            NewPiLogsView(store: NewPiLogStore.shared)
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
