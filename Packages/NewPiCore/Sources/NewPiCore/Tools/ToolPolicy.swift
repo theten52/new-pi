@@ -27,7 +27,7 @@ public struct ToolPolicyRules: Sendable, Equatable {
     }
 
     public static let codingAgentDefault = ToolPolicyRules(
-        requireApprovalFor: ["write", "edit", "bash"]
+        requireApprovalFor: ["write", "edit", "bash", SubAgentTool.toolName]
     )
 
     public static let allowAll = ToolPolicyRules(requireApprovalFor: [])
@@ -63,6 +63,9 @@ public enum ToolApprovalSummary {
         case "bash":
             let command = arguments.objectValue?["command"]?.stringValue ?? "?"
             return "Run command:\n\(command)"
+        case SubAgentTool.toolName:
+            let task = arguments.objectValue?["task"]?.stringValue ?? "?"
+            return "Spawn sub-agent:\n\(task.prefix(200))\(task.count > 200 ? "…" : "")"
         default:
             if toolName.hasPrefix(MCPToolName.prefix), let parsed = MCPToolName.parse(toolName) {
                 return "MCP tool \(parsed.serverId)/\(parsed.toolName): \(String(describing: arguments))"

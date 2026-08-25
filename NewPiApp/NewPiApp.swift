@@ -156,6 +156,22 @@ struct NewPiRootView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
+                    Menu {
+                        Button("Export Markdown…") {
+                            Task { await viewModel.exportSessionToFile(format: .markdown) }
+                        }
+                        Button("Export Text…") {
+                            Task { await viewModel.exportSessionToFile(format: .text) }
+                        }
+                        Button("Export JSON…") {
+                            Task { await viewModel.exportSessionToFile(format: .json) }
+                        }
+                    } label: {
+                        Label("Export", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(viewModel.transcript.isEmpty)
+                }
+                ToolbarItem(placement: .automatic) {
                     Button {
                         showLogs = true
                     } label: {
@@ -193,8 +209,13 @@ struct NewPiChatView: View {
                         }
 
                         ForEach(viewModel.transcript) { item in
-                            NewPiTranscriptRow(item: item)
-                                .id(item.id)
+                            NewPiTranscriptRow(
+                                item: item,
+                                isStreaming: viewModel.isStreaming
+                            ) { index in
+                                Task { await viewModel.forkFromMessage(index: index) }
+                            }
+                            .id(item.id)
                         }
 
                         if viewModel.isStreaming {
@@ -245,7 +266,7 @@ struct NewPiChatView: View {
             }
             .padding()
         }
-        .navigationTitle("Chat")
+        .navigationTitle(viewModel.isForkedBranch ? "Chat (branch)" : "Chat")
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {

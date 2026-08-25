@@ -2,16 +2,31 @@ import AppKit
 import Foundation
 import NewPiCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NewPiTranscriptItem: Identifiable {
     let id: UUID
     let title: String
     let body: String
+    let messageIndex: Int?
+    let sessionEntryID: String?
 
-    init(id: UUID = UUID(), title: String, body: String) {
+    init(
+        id: UUID = UUID(),
+        title: String,
+        body: String,
+        messageIndex: Int? = nil,
+        sessionEntryID: String? = nil
+    ) {
         self.id = id
         self.title = title
         self.body = body
+        self.messageIndex = messageIndex
+        self.sessionEntryID = sessionEntryID
+    }
+
+    var canFork: Bool {
+        messageIndex != nil && (title == "You" || title == "NewPi" || title == "Summary")
     }
 }
 
@@ -35,6 +50,8 @@ final class NewPiViewModel: ObservableObject {
     @Published var activeProviderID: String?
     @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
+    @Published var branchPointCount = 0
+    @Published var isForkedBranch = false
 
     private var session: AgentSession?
     private var eventTask: Task<Void, Never>?
@@ -42,6 +59,8 @@ final class NewPiViewModel: ObservableObject {
     private let providerConfigStore = ProviderConfigStore()
     private let providerCredentialResolver = ProviderCredentialResolver()
     private let jsonlStore = JSONLSessionStore()
+    private let sessionExporter = SessionExporter()
+    private var liveMessageCount = 0
 
     init() {
         Task {
@@ -201,6 +220,96 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    func forkFromMessage(index: Int) async {
+        guard !isStreaming, let session else { return }
+        do {
+            try await session.fork(atMessageIndex: index)
+            let messages = await session.context.messages
+            rebuildTranscript(from: messages, entryIDs: await session.branchEntryIDs())
+            branchPointCount = await session.branchPointCount()
+            isForkedBranch = branchPointCount > 0
+            appendTranscript(title: "System", body: "Forked conversation from message \(index + 1). New replies continue on this branch.")
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    func exportCurrentSession(format: SessionExportFormat) async -> String? {
+        if let session {
+            let header = await session.attachedSessionHeader
+            let messages = await session.context.messages
+            if let header {
+                switch format {
+                case .markdown:
+                    return sessionExporter.exportMarkdown(
+                        context: SessionContext(header: header),
+                        messages: messages,
+                        leafID: await session.activeBranchLeafID
+                    )
+                case .text:
+                    return sessionExporter.exportText(messages: messages)
+                case .json:
+                    if let fileURL = currentSessionFileURL,
+                       let context = try? jsonlStore.load(from: fileURL),
+                       let data = try? sessionExporter.exportJSON(context: context) {
+                        return String(data: data, encoding: .utf8)
+                    }
+                    return nil
+                }
+            }
+        }
+
+        if !transcript.isEmpty {
+            let items = transcript.map { (title: $0.title, body: $0.body) }
+            switch format {
+            case .markdown:
+                return sessionExporter.exportTranscriptMarkdown(items: items)
+            case .text:
+                return items.map { "\($0.title): \($0.body)" }.joined(separator: "\n\n")
+            case .json:
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    func exportSessionToFile(format: SessionExportFormat) async {
+        guard let content = await exportCurrentSession(format: format) else { return }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = defaultExportFilename(format: format)
+        panel.allowedContentTypes = exportContentTypes(for: format)
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? content.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func defaultExportFilename(format: SessionExportFormat) -> String {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "")
+        switch format {
+        case .markdown:
+            return "new-pi-session-\(stamp).md"
+        case .json:
+            return "new-pi-session-\(stamp).json"
+        case .text:
+            return "new-pi-session-\(stamp).txt"
+        }
+    }
+
+    private func exportContentTypes(for format: SessionExportFormat) -> [UTType] {
+        switch format {
+        case .markdown:
+            return [.plainText]
+        case .json:
+            return [.json]
+        case .text:
+            return [.plainText]
+        }
+    }
+
     private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
         eventTask?.cancel()
         transcript.removeAll()
@@ -211,7 +320,6 @@ final class NewPiViewModel: ObservableObject {
         do {
             let profile = try resolveProfile(for: restoredContext?.header)
             let messages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
-            rebuildTranscript(from: messages)
 
             let llm = try LLMProviderFactory.make(
                 profile: profile,
@@ -244,6 +352,13 @@ final class NewPiViewModel: ObservableObject {
             await agentSession.attachPersistence(fileURL: sessionFileURL, header: header)
             session = agentSession
             currentSessionFileURL = sessionFileURL
+
+            let entryIDs = await agentSession.branchEntryIDs()
+            rebuildTranscript(from: messages, entryIDs: entryIDs)
+            branchPointCount = await agentSession.branchPointCount()
+            isForkedBranch = branchPointCount > 0
+            liveMessageCount = messages.count
+
             activeProviderID = profile.id
             activeProviderName = profile.name
             activeProviderModel = profile.modelID
@@ -349,7 +464,10 @@ final class NewPiViewModel: ObservableObject {
             isStreaming = false
             pendingToolApproval = nil
             NewPiLogger.info(category: "agent", message: "Agent run finished")
-            Task { await refreshSessionList() }
+            Task {
+                await syncTranscriptMessageIndices()
+                await refreshSessionList()
+            }
         case let .error(error):
             appendTranscript(title: "Error", body: error.localizedDescription)
             isStreaming = false
@@ -389,32 +507,67 @@ final class NewPiViewModel: ObservableObject {
         return try providerConfig.defaultProfile()
     }
 
-    private func rebuildTranscript(from messages: [AgentMessage]) {
-        for message in messages {
+    private func rebuildTranscript(from messages: [AgentMessage], entryIDs: [String] = []) {
+        transcript.removeAll()
+        for (index, message) in messages.enumerated() {
+            let entryID = index < entryIDs.count ? entryIDs[index] : nil
             switch message {
             case let .user(user):
-                appendTranscript(title: "You", body: user.content)
+                transcript.append(NewPiTranscriptItem(
+                    title: "You",
+                    body: user.content,
+                    messageIndex: index,
+                    sessionEntryID: entryID
+                ))
             case let .assistant(assistant):
-                appendTranscript(title: "NewPi", body: assistant.text)
+                transcript.append(NewPiTranscriptItem(
+                    title: "NewPi",
+                    body: assistant.text,
+                    messageIndex: index,
+                    sessionEntryID: entryID
+                ))
             case let .toolResult(result):
-                appendTranscript(
+                transcript.append(NewPiTranscriptItem(
                     title: "Tool \(result.toolName)",
-                    body: result.isError ? "Error: \(result.content)" : result.content
-                )
+                    body: result.isError ? "Error: \(result.content)" : result.content,
+                    messageIndex: index,
+                    sessionEntryID: entryID
+                ))
             case let .compactionSummary(summary):
-                appendTranscript(title: "Summary", body: summary)
+                transcript.append(NewPiTranscriptItem(
+                    title: "Summary",
+                    body: summary,
+                    messageIndex: index,
+                    sessionEntryID: entryID
+                ))
             }
         }
+        liveMessageCount = messages.count
     }
 
-    private func appendTranscript(title: String, body: String) {
-        transcript.append(NewPiTranscriptItem(title: title, body: body))
+    private func syncTranscriptMessageIndices() async {
+        guard let session else { return }
+        let messages = await session.context.messages
+        let entryIDs = await session.branchEntryIDs()
+        rebuildTranscript(from: messages, entryIDs: entryIDs)
+        branchPointCount = await session.branchPointCount()
+        isForkedBranch = branchPointCount > 0
+    }
+
+    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil) {
+        transcript.append(NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex))
     }
 
     private func appendOrUpdateAssistant(_ delta: String) {
         if let last = transcript.last, last.title == "NewPi" {
             let index = transcript.count - 1
-            transcript[index] = NewPiTranscriptItem(id: last.id, title: "NewPi", body: last.body + delta)
+            transcript[index] = NewPiTranscriptItem(
+                id: last.id,
+                title: "NewPi",
+                body: last.body + delta,
+                messageIndex: last.messageIndex,
+                sessionEntryID: last.sessionEntryID
+            )
         } else {
             appendTranscript(title: "NewPi", body: delta)
         }

@@ -11,6 +11,8 @@ public actor AgentSession {
     private var steeringQueue: [AgentMessage] = []
     private var persistenceFileURL: URL?
     private var persistenceHeader: SessionHeader?
+    private var persistenceContext: SessionContext?
+    private var persistenceLeafID: String?
     private var jsonlStore = JSONLSessionStore()
 
     public init(context: AgentContext, config: AgentLoopConfig) {
@@ -87,16 +89,65 @@ public actor AgentSession {
     public func attachPersistence(fileURL: URL, header: SessionHeader) {
         persistenceFileURL = fileURL
         persistenceHeader = header
+        if let loaded = try? jsonlStore.load(from: fileURL) {
+            persistenceContext = loaded
+            persistenceLeafID = loaded.leafID
+        } else {
+            persistenceContext = SessionContext(header: header)
+            persistenceLeafID = nil
+        }
     }
 
     public var attachedSessionHeader: SessionHeader? {
         persistenceHeader
     }
 
+    public var activeBranchLeafID: String? {
+        persistenceLeafID
+    }
+
+    public func fork(atMessageIndex index: Int) throws {
+        guard index >= 0, index < context.messages.count else {
+            throw AgentError.invalidState("Invalid fork index: \(index)")
+        }
+
+        context.messages = Array(context.messages.prefix(index + 1))
+
+        guard var persisted = persistenceContext else { return }
+        let entries = SessionManager.messageEntries(from: persisted, leafID: persistenceLeafID)
+        guard index < entries.count else {
+            throw AgentError.invalidState("Session entry not found for message index \(index)")
+        }
+
+        let entryID = entries[index].0.id
+        persisted = try SessionManager.forkContext(persisted, at: entryID)
+        persistenceContext = persisted
+        persistenceLeafID = entryID
+        persistIfNeeded()
+    }
+
+    public func branchEntryIDs() -> [String] {
+        guard let persisted = persistenceContext else { return [] }
+        return SessionManager.messageEntries(from: persisted, leafID: persistenceLeafID).map(\.0.id)
+    }
+
+    public func branchPointCount() -> Int {
+        guard let persisted = persistenceContext else { return 0 }
+        return SessionManager.branchPointCount(in: persisted)
+    }
+
     private func persistIfNeeded() {
         guard let fileURL = persistenceFileURL, let header = persistenceHeader else { return }
-        let rebuilt = SessionManager.rebuildContext(from: context.messages, header: header)
-        try? jsonlStore.save(rebuilt, to: fileURL)
+
+        var persisted = persistenceContext ?? SessionContext(header: header)
+        var leafID = persistenceLeafID
+
+        SessionManager.syncMessages(context.messages, into: &persisted, leafID: &leafID)
+
+        persistenceContext = persisted
+        persistenceLeafID = leafID
+        persistenceHeader = persisted.header
+        try? jsonlStore.save(persisted, to: fileURL)
     }
 
     private func dequeueSteering() -> AgentMessage? {
@@ -125,6 +176,7 @@ public enum AgentSessionFactory {
         additionalTools: [any AgentTool] = []
     ) -> AgentSession {
         var tools = BuiltInTools.codingTools(for: workingDirectory)
+        tools.append(SubAgentTool(llm: llm, model: model))
         tools.append(contentsOf: additionalTools)
         let config = AgentLoopConfig(
             model: model,

@@ -32,6 +32,7 @@ enum NewPiCLI {
               new-pi                         Show provider configuration status
               new-pi sessions list [--project PATH]
               new-pi sessions show <id> [--project PATH]
+              new-pi sessions export <id> [--format markdown|json|text] [--output PATH]
               new-pi help
             """
         )

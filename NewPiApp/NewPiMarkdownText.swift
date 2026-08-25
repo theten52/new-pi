@@ -30,6 +30,8 @@ struct NewPiMarkdownText: View {
 
 struct NewPiTranscriptRow: View {
     let item: NewPiTranscriptItem
+    var isStreaming = false
+    var onFork: ((Int) -> Void)?
 
     private var isUser: Bool { item.title == "You" }
     private var isAssistantLike: Bool {
@@ -62,6 +64,17 @@ struct NewPiTranscriptRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Copy message")
+
+                if item.canFork, let index = item.messageIndex, let onFork {
+                    Button {
+                        onFork(index)
+                    } label: {
+                        Image(systemName: "arrow.triangle.branch")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Fork from here")
+                    .disabled(isStreaming)
+                }
             }
 
             messageBody

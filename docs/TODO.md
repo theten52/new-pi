@@ -7,9 +7,16 @@ Tracked blockers and follow-ups discovered during autonomous development.
 | ID | Item | Status | Notes |
 |---|---|---|---|
 | P4-UI | Sidebar session list + resume | done | Phase 4b/c |
-| P4-BRANCH | Branch/fork UI for tree sessions | deferred | v1: linear resume only |
+| P4-BRANCH | Branch/fork UI for tree sessions | done | Fork from transcript row |
 | P4-RESUME-PROVIDER | Restore provider profile from session header on resume | done |
-| P4-CLI | CLI session commands | done | `new-pi sessions list/show` |
+| P4-CLI | CLI session commands | done | `new-pi sessions list/show/export` |
+
+## Phase 8 — Advanced session & agent
+
+| ID | Item | Notes |
+|---|---|---|
+| P8-EXPORT | Export transcript/session | done | Markdown/JSON/text; App + CLI |
+| P8-SUBAGENT | Sub-agent / parallel tasks | done | `subagent` tool with approval |
 
 ## Phase 5 — Deferred
 

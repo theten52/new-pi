@@ -133,6 +133,18 @@ JSONL files under `~/.new-pi/agent/sessions/<project-hash>/`.
 
 Resume restores provider profile from session header.
 
+## Session branching (Phase 8 / P4-BRANCH)
+
+JSONL entries form a tree via `id` / `parentID`. `SessionManager.syncMessages` incrementally appends new messages without destroying sibling branches. App UI exposes **Fork from here** on transcript rows; `AgentSession.fork(atMessageIndex:)` rewinds the active branch.
+
+## Session export (Phase 8 / P8-EXPORT)
+
+`SessionExporter` produces Markdown, plain text, or JSONL (via `JSONLSessionCodec`). App: toolbar Export menu. CLI: `new-pi sessions export <id> [--format markdown|json|text]`.
+
+## Sub-agents (Phase 8 / P8-SUBAGENT)
+
+`SubAgentTool` runs a nested `AgentLoop` with read + bash tools (no recursion). Registered in `AgentSessionFactory.codingSession`. Requires user approval like bash/write.
+
 ## Phase roadmap
 
 | Phase | Scope | Status |
@@ -145,3 +157,4 @@ Resume restores provider profile from session header.
 | 5 | AGENTS.md, Skills, Compaction | Done |
 | 6 | NewPi SwiftUI polish | Done |
 | 7 | Debug logs, Chat UX, MCP client | Done |
+| 8 | Session branch, export, sub-agent | Done |

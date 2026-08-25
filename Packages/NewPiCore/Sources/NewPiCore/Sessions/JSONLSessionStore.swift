@@ -278,11 +278,97 @@ public enum SessionManager {
     }
 
     public static func messages(from context: SessionContext) -> [AgentMessage] {
-        context.branch(from: context.leafID).compactMap { entry in
+        messages(from: context, leafID: context.leafID)
+    }
+
+    public static func messages(from context: SessionContext, leafID: String?) -> [AgentMessage] {
+        messageEntries(from: context, leafID: leafID).map(\.1)
+    }
+
+    public static func messageEntries(
+        from context: SessionContext,
+        leafID: String?
+    ) -> [(SessionEntry, AgentMessage)] {
+        context.branch(from: leafID).compactMap { entry in
             if entry.type == .compaction, let summary = entry.compactionSummary {
-                return .compactionSummary(summary)
+                return (entry, .compactionSummary(summary))
             }
-            return entry.message
+            if let message = entry.message {
+                return (entry, message)
+            }
+            return nil
+        }
+    }
+
+    public static func forkContext(_ context: SessionContext, at entryID: String) throws -> SessionContext {
+        guard context.entries.contains(where: { $0.id == entryID }) else {
+            throw AgentError.invalidState("Session entry not found: \(entryID)")
+        }
+        var forked = context
+        forked.leafID = entryID
+        return forked
+    }
+
+    public static func childEntries(of entryID: String, in context: SessionContext) -> [SessionEntry] {
+        context.entries.filter { $0.parentID == entryID }
+    }
+
+    public static func branchPointCount(in context: SessionContext) -> Int {
+        let parentIDs = Set(context.entries.compactMap(\.parentID))
+        return context.entries.filter { parentIDs.contains($0.id) }.count
+    }
+
+    public static func syncMessages(
+        _ messages: [AgentMessage],
+        into context: inout SessionContext,
+        leafID: inout String?
+    ) {
+        let existing = Self.messages(from: context, leafID: leafID)
+        guard messages.count >= existing.count else { return }
+        guard messagesMatchForSync(Array(messages.prefix(existing.count)), existing) else { return }
+
+        var parent = leafID
+        for message in messages.dropFirst(existing.count) {
+            let entry: SessionEntry
+            switch message {
+            case let .compactionSummary(summary):
+                entry = SessionEntry(
+                    parentID: parent,
+                    type: .compaction,
+                    compactionSummary: summary
+                )
+            default:
+                entry = SessionEntry(
+                    parentID: parent,
+                    type: .message,
+                    message: message
+                )
+            }
+            context.entries.append(entry)
+            parent = entry.id
+        }
+        leafID = parent
+        context.leafID = leafID
+    }
+
+    private static func messagesMatchForSync(_ lhs: [AgentMessage], _ rhs: [AgentMessage]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy(messageContentEqual)
+    }
+
+    private static func messageContentEqual(_ lhs: AgentMessage, _ rhs: AgentMessage) -> Bool {
+        switch (lhs, rhs) {
+        case let (.user(l), .user(r)):
+            return l.content == r.content
+        case let (.assistant(l), .assistant(r)):
+            return l.text == r.text && l.toolCalls == r.toolCalls && l.stopReason == r.stopReason
+        case let (.toolResult(l), .toolResult(r)):
+            return l.toolCallID == r.toolCallID && l.toolName == r.toolName
+                && l.content == r.content && l.isError == r.isError
+        case let (.compactionSummary(l), .compactionSummary(r)):
+            return l == r
+        default:
+            return false
         }
     }
 

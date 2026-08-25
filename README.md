@@ -25,6 +25,13 @@ Pi-inspired native macOS coding agent harness, implemented in Swift.
 | 7b | Debug logs | Done |
 | 7c | Chat UX polish | Done |
 | 7a | MCP client (stdio + Settings UI) | Done |
+| 8 | Session branch, export, sub-agent | Done |
+
+Phase 8 adds session branching, export, and sub-agents:
+
+- **P4-BRANCH:** Fork from any message in the transcript (branch icon); tree JSONL preserved
+- **P8-EXPORT:** Toolbar Export menu (Markdown/Text/JSON); CLI `new-pi sessions export <id>`
+- **P8-SUBAGENT:** `subagent` tool spawns a focused child agent (read + bash); requires approval
 
 Phase 7a adds MCP (Model Context Protocol) plugin support:
 
@@ -77,7 +84,14 @@ swift test
 swift run new-pi
 swift run new-pi sessions list --project /path/to/project
 swift run new-pi sessions show <session-id> --project /path/to/project
+swift run new-pi sessions export <session-id> --format markdown [--output file.jsonl]
 ```
+
+## Session branch & export (Phase 8)
+
+- **Fork:** Click the branch icon on a transcript message to continue from that point; sibling branches are preserved in JSONL
+- **Export:** Toolbar → Export (Markdown / Text / JSON)
+- **Sub-agent:** Main agent can call `subagent` tool for delegated parallel work (requires approval)
 
 ## NewPi macOS app
 
