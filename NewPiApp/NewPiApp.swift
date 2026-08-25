@@ -58,6 +58,7 @@ final class NewPiRootViewModelStore {
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
+    static let newPiStreamingLayoutDidChange = Notification.Name("com.new-pi.streamingLayoutDidChange")
 }
 
 struct NewPiRootView: View {
@@ -195,23 +196,33 @@ struct NewPiRootView: View {
     }
 }
 
+struct NewPiStreamingStatusView: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("NewPi is thinking…")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+        .padding(.horizontal, 4)
+        .accessibilityLabel("NewPi is thinking")
+    }
+}
+
+private enum NewPiChatScrollAnchor {
+    static let bottom = "chat-bottom"
+}
+
 struct NewPiChatView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @State private var input = ""
-    @State private var scrollDebounceTask: Task<Void, Never>?
-
-    /// Hide while assistant/summary text is actively streaming — the bubble itself is the progress cue.
-    private var showsThinkingIndicator: Bool {
-        guard viewModel.isStreaming else { return false }
-        guard let last = viewModel.transcript.last else { return true }
-        return last.title != "NewPi" && last.title != "Summary"
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if viewModel.transcript.isEmpty {
                             NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
                         }
@@ -229,32 +240,36 @@ struct NewPiChatView: View {
                             .id(item.id)
                         }
 
-                        if showsThinkingIndicator {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("NewPi is thinking…")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 4)
-                            .id("streaming-indicator")
-                            .transition(.opacity)
+                        if viewModel.isStreaming {
+                            NewPiStreamingStatusView()
                         }
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id(NewPiChatScrollAnchor.bottom)
+
+                        NewPiChatScrollAnchorView()
+                            .frame(width: 0, height: 0)
                     }
                     .padding()
-                    .animation(.easeOut(duration: 0.15), value: showsThinkingIndicator)
+                }
+                .transaction { transaction in
+                    if viewModel.isStreaming {
+                        transaction.disablesAnimations = true
+                    }
+                }
+                .onAppear {
+                    syncScroll(using: proxy, animated: false)
                 }
                 .onChange(of: viewModel.transcript.count) {
-                    scheduleScrollToBottom(proxy: proxy)
+                    syncScroll(using: proxy, animated: !viewModel.isStreaming)
                 }
-                .onChange(of: viewModel.transcript.last?.body) {
-                    scheduleScrollToBottom(proxy: proxy)
+                .onChange(of: viewModel.isStreaming) { _, isStreaming in
+                    syncScroll(using: proxy, animated: !isStreaming)
                 }
-                .onChange(of: viewModel.isStreaming) {
-                    scheduleScrollToBottom(proxy: proxy, immediate: true)
-                }
-                .onDisappear {
-                    scrollDebounceTask?.cancel()
+                .onReceive(NotificationCenter.default.publisher(for: .newPiStreamingLayoutDidChange)) { _ in
+                    guard viewModel.isStreaming else { return }
+                    NewPiChatScrollController.shared.requestFollow()
                 }
             }
 
@@ -285,36 +300,18 @@ struct NewPiChatView: View {
         .navigationTitle(viewModel.isForkedBranch ? "Chat (branch)" : "Chat")
     }
 
-    private func scheduleScrollToBottom(proxy: ScrollViewProxy, immediate: Bool = false) {
-        scrollDebounceTask?.cancel()
-
-        if !viewModel.isStreaming || immediate {
-            scrollToBottom(proxy: proxy, animated: !viewModel.isStreaming)
+    private func syncScroll(using proxy: ScrollViewProxy, animated: Bool) {
+        if viewModel.isStreaming {
+            NewPiChatScrollController.shared.scrollToBottomImmediately()
             return
         }
 
-        scrollDebounceTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            scrollToBottom(proxy: proxy, animated: false)
-        }
-    }
-
-    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        let anchor: AnyHashable? = if showsThinkingIndicator {
-            "streaming-indicator"
-        } else {
-            viewModel.transcript.last?.id
-        }
-
-        guard let anchor else { return }
-
         if animated {
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(anchor, anchor: .bottom)
+                proxy.scrollTo(NewPiChatScrollAnchor.bottom, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(anchor, anchor: .bottom)
+            proxy.scrollTo(NewPiChatScrollAnchor.bottom, anchor: .bottom)
         }
     }
 }

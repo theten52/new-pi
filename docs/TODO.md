@@ -33,7 +33,22 @@ Tracked blockers and follow-ups discovered during autonomous development.
 | P6-PROVIDER-PICKER | In-chat provider switch | done | Sidebar picker, preserves session |
 | P6-TEST-CONN | Settings "Test provider" button | done |
 | P6-MARKDOWN | Transcript markdown rendering | done | AttributedString baseline |
-| P6-MARKDOWN-WEB | WKWebView markdown + streaming | done | unified WebView, 50ms throttle |
+| P6-MARKDOWN-WEB | WKWebView markdown + streaming | in progress | unified WebView + throttle; **换行/布局跳动未解决** — see dev-notes |
+
+## Phase 6c — Streaming markdown / scroll UX (open)
+
+See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-26-streaming-markdown-scroll-ux.md) for full context.
+
+| ID | Item | Priority | Notes |
+|---|---|---|---|
+| UX-REBUILD-ID | Preserve transcript row UUID on `rebuildTranscript` | P0 | `agentEnd` remounts all WebViews → flash |
+| UX-HEIGHT-CLIP | Fix streaming height clipping (threshold vs fixed frame) | P0 | Latest tokens invisible until height catches up |
+| UX-SCROLL-MONITOR | Single shared scroll-wheel monitor for embedded WebViews | P1 | N monitors for N bubbles |
+| UX-FLUSH-HEIGHT-RACE | Cancel `heightWorkItem` on flush | P1 | Stale streaming height after `agentEnd` |
+| UX-FLUSH-SHRINK | Avoid bubble height snap-down on flush | P2 | Monotonic stream height vs final measure |
+| UX-SCROLL-BODY | Scroll follow when height debounce blocks | P2 | Only height notification today |
+| UX-THINKING-LAYOUT | Thinking indicator vs scroll stability | P2 | Product: always visible vs hide on output |
+| UX-NC-COUPLING | Replace NotificationCenter scroll coupling | P3 | Prefer callback/`ObservableObject` |
 
 ## Phase 7 — From AIChatMac learnings
 

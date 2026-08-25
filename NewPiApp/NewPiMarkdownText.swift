@@ -22,13 +22,9 @@ struct NewPiMarkdownText: View {
                         webRendererFailed = true
                     }
                 )
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: 1,
-                    idealHeight: webHeight,
-                    maxHeight: webHeight,
-                    alignment: .leading
-                )
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(height: webHeight, alignment: .topLeading)
+                .animation(nil, value: webHeight)
                 .accessibilityLabel(content)
             } else {
                 nativeFallback

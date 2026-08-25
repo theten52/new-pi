@@ -52,8 +52,11 @@ enum NewPiMarkdownWebDocument {
         """
     }
 
-    static func renderJavaScript(for markdown: String) throws -> String {
+    static func renderJavaScript(for markdown: String, streaming: Bool = false) throws -> String {
         let expression = try jsonParseExpression(for: markdown)
+        if streaming {
+            return "window.renderMarkdown(\(expression), { streaming: true });"
+        }
         return "window.renderMarkdown(\(expression));"
     }
 
@@ -169,9 +172,9 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var scrollWheelMonitor: Any?
 
         /// Minimum interval between streaming renders (throttle, not debounce).
-        private let throttleInterval: TimeInterval = 0.05
-        private let heightDebounceInterval: TimeInterval = 0.1
-        private let heightChangeThreshold: CGFloat = 8
+        private let throttleInterval: TimeInterval = 0.1
+        private let heightDebounceInterval: TimeInterval = 0.15
+        private let heightChangeThreshold: CGFloat = 18
 
         init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
             _height = height
@@ -271,7 +274,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private func renderViaJavaScript(markdown: String, in webView: WKWebView) {
             isRenderingJavaScript = true
             do {
-                let script = try NewPiMarkdownWebDocument.renderJavaScript(for: markdown)
+                let script = try NewPiMarkdownWebDocument.renderJavaScript(
+                    for: markdown,
+                    streaming: !isFlushRendering
+                )
                 webView.evaluateJavaScript(script) { [weak self] _, error in
                     guard let self else { return }
                     self.isRenderingJavaScript = false
@@ -313,26 +319,30 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             if isFlushRendering {
                 heightWorkItem?.cancel()
                 heightWorkItem = nil
-                applyHeight(reportedHeight)
+                if abs(reportedHeight - height) >= 1 {
+                    height = reportedHeight
+                }
                 return
             }
 
-            if abs(reportedHeight - height) < heightChangeThreshold {
-                return
-            }
+            guard reportedHeight > height + heightChangeThreshold else { return }
 
             heightWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self, let pendingReportedHeight = self.pendingReportedHeight else { return }
                 self.heightWorkItem = nil
-                self.applyHeight(pendingReportedHeight)
+                self.applyStreamingHeight(pendingReportedHeight)
             }
             heightWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + heightDebounceInterval, execute: workItem)
         }
 
-        private func applyHeight(_ reportedHeight: CGFloat) {
-            height = max(1, reportedHeight)
+        private func applyStreamingHeight(_ reportedHeight: CGFloat) {
+            let nextHeight = max(height, max(1, reportedHeight))
+            guard nextHeight > height + (heightChangeThreshold * 0.5) else { return }
+
+            height = nextHeight
+            NotificationCenter.default.post(name: .newPiStreamingLayoutDidChange, object: nil)
         }
 
         // SECURITY-REVIEW: Only local file resources and about:blank are allowed.

@@ -6,12 +6,18 @@
   "use strict";
 
   const escapeHtml = window.markdownit().utils.escapeHtml;
+  let streamingRenderDepth = 0;
+
   const markdown = window.markdownit({
     html: false,
     linkify: true,
     typographer: true,
     breaks: true,
     highlight: function (source, language) {
+      if (streamingRenderDepth > 0) {
+        return '<pre class="hljs"><code>' + escapeHtml(source) + "</code></pre>";
+      }
+
       if (language && window.hljs && window.hljs.getLanguage(language)) {
         try {
           const highlighted = window.hljs.highlight(source, {
@@ -30,7 +36,7 @@
 
   markdown.disable("image");
 
-  const heightChangeThreshold = 8;
+  const heightChangeThreshold = 20;
   let lastPostedHeight = 0;
   let pendingHeightFrame = null;
   let resizeObserver = null;
@@ -45,29 +51,30 @@
     return Math.ceil(Math.max(1, root.getBoundingClientRect().height));
   }
 
-  function postHeightIfChanged() {
+  function postHeightIfChanged(force) {
     const root = document.getElementById("markdown-root");
     if (!root) {
       return;
     }
 
     const height = measureRootHeight(root);
-    if (Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
+    if (!force && Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
       return;
     }
 
     lastPostedHeight = height;
+    root.style.minHeight = height + "px";
     postHeight(height);
   }
 
-  function scheduleHeightPost() {
+  function scheduleHeightPost(force) {
     if (pendingHeightFrame !== null) {
       return;
     }
 
     pendingHeightFrame = window.requestAnimationFrame(function () {
       pendingHeightFrame = null;
-      postHeightIfChanged();
+      postHeightIfChanged(force);
     });
   }
 
@@ -78,28 +85,51 @@
     }
 
     if (window.ResizeObserver) {
-      resizeObserver = new ResizeObserver(scheduleHeightPost);
+      resizeObserver = new ResizeObserver(function () {
+        scheduleHeightPost(false);
+      });
       resizeObserver.observe(root);
     }
   }
 
-  window.renderMarkdown = function (markdownSource) {
-    const root = document.getElementById("markdown-root");
-    if (!root) {
-      return;
-    }
-
-    root.innerHTML = markdown.render(markdownSource);
+  function bindLinks(root) {
     root.querySelectorAll("a").forEach(function (link) {
       link.setAttribute("rel", "nofollow noopener noreferrer");
       link.addEventListener("click", function (event) {
         event.preventDefault();
       });
     });
+  }
 
+  window.renderMarkdown = function (markdownSource, options) {
+    const root = document.getElementById("markdown-root");
+    if (!root) {
+      return;
+    }
+
+    options = options || {};
+    const streaming = options.streaming === true;
+    const preservedHeight = measureRootHeight(root);
+    if (preservedHeight > 1) {
+      root.style.minHeight = preservedHeight + "px";
+    }
+
+    if (streaming) {
+      streamingRenderDepth += 1;
+    }
+
+    root.innerHTML = markdown.render(markdownSource);
+    bindLinks(root);
+
+    if (streaming) {
+      streamingRenderDepth -= 1;
+      scheduleHeightPost(false);
+      return;
+    }
+
+    root.style.minHeight = "";
+    lastPostedHeight = 0;
     observeRootHeight(root);
-    postHeightIfChanged();
-    scheduleHeightPost();
-    window.setTimeout(scheduleHeightPost, 100);
+    scheduleHeightPost(true);
   };
 }());
