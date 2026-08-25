@@ -75,38 +75,73 @@ public enum ToolApprovalSummary {
     }
 }
 
-/// Waits for UI or test harness to approve/deny a tool call.
-public actor ToolApprovalGate {
-    private var waiters: [String: CheckedContinuation<Bool, Never>] = [:]
+/// Tracks tools that have been approved for the lifetime of a session,
+/// so repeated calls to the same tool do not require re-approval.
+public actor ToolApprovalTracker {
+    private var approvedToolNames: Set<String> = []
 
     public init() {}
 
-    public func wait(for requestID: String) async -> Bool {
+    public func markApproved(_ toolName: String) {
+        NewPiLogger.info(
+            category: "tool-approval",
+            message: "Tool marked approved for session",
+            details: "tool=\(toolName)"
+        )
+        approvedToolNames.insert(toolName)
+    }
+
+    public func isApproved(_ toolName: String) -> Bool {
+        approvedToolNames.contains(toolName)
+    }
+
+    public func reset() {
+        approvedToolNames.removeAll()
+    }
+}
+
+/// Waits for UI or test harness to approve/deny a tool call.
+public actor ToolApprovalGate {
+    private struct PendingRequest {
+        let toolName: String
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private var waiters: [String: PendingRequest] = [:]
+
+    public init() {}
+
+    public func wait(for request: ToolApprovalRequest) async -> Bool {
         NewPiLogger.debug(
             category: "tool-approval",
             message: "Approval gate waiting",
-            details: "requestID=\(requestID)"
+            details: "requestID=\(request.id) tool=\(request.toolName)"
         )
         return await withCheckedContinuation { continuation in
-            waiters[requestID] = continuation
+            waiters[request.id] = PendingRequest(
+                toolName: request.toolName,
+                continuation: continuation
+            )
         }
     }
 
-    public func respond(requestID: String, approved: Bool) {
-        NewPiLogger.info(
-            category: "tool-approval",
-            message: "Approval gate response",
-            details: "requestID=\(requestID) approved=\(approved) pendingWaiters=\(waiters.keys.sorted())"
-        )
-        guard let continuation = waiters.removeValue(forKey: requestID) else {
+    @discardableResult
+    public func respond(requestID: String, approved: Bool) -> String? {
+        guard let pending = waiters.removeValue(forKey: requestID) else {
             NewPiLogger.error(
                 category: "tool-approval",
                 message: "No waiter for approval response",
                 details: "requestID=\(requestID)"
             )
-            return
+            return nil
         }
-        continuation.resume(returning: approved)
+        NewPiLogger.info(
+            category: "tool-approval",
+            message: "Approval gate response",
+            details: "requestID=\(requestID) approved=\(approved) tool=\(pending.toolName) pendingWaiters=\(waiters.keys.sorted())"
+        )
+        pending.continuation.resume(returning: approved)
+        return pending.toolName
     }
 
     public func cancelAll() {
@@ -115,8 +150,8 @@ public actor ToolApprovalGate {
             message: "Approval gate cancelled all pending requests",
             details: "count=\(waiters.count)"
         )
-        for (_, continuation) in waiters {
-            continuation.resume(returning: false)
+        for (_, pending) in waiters {
+            pending.continuation.resume(returning: false)
         }
         waiters.removeAll()
     }

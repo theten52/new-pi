@@ -49,6 +49,10 @@ public struct AgentLoopConfig: Sendable {
     public var maxTurns: Int
     public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
     public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)?
+    /// Session-scoped tracker of tools already approved by the user.
+    /// When a tool is present in the tracker, no approval is required for
+    /// subsequent calls to the same tool within the same session.
+    public var toolApprovalTracker: ToolApprovalTracker?
 
     public init(
         model: ModelConfig,
@@ -59,7 +63,8 @@ public struct AgentLoopConfig: Sendable {
         compaction: CompactionConfig = CompactionConfig(),
         maxTurns: Int = AgentLoopConfig.defaultMaxTurns,
         beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
-        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil
+        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil,
+        toolApprovalTracker: ToolApprovalTracker? = nil
     ) {
         self.model = model
         self.llm = llm
@@ -70,6 +75,7 @@ public struct AgentLoopConfig: Sendable {
         self.maxTurns = max(1, maxTurns)
         self.beforeToolCall = beforeToolCall
         self.requestToolApproval = requestToolApproval
+        self.toolApprovalTracker = toolApprovalTracker
     }
 }
 

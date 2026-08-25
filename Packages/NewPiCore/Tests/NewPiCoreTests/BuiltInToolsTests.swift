@@ -139,7 +139,12 @@ struct ToolApprovalTests {
         let gate = ToolApprovalGate()
 
         let waitTask = Task {
-            await gate.wait(for: "call-1")
+            await gate.wait(for: ToolApprovalRequest(
+                id: "call-1",
+                toolName: "bash",
+                arguments: .object(["command": .string("ls")]),
+                summary: "Run command: ls"
+            ))
         }
 
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -148,7 +153,12 @@ struct ToolApprovalTests {
         #expect(approved)
 
         let denyTask = Task {
-            await gate.wait(for: "call-2")
+            await gate.wait(for: ToolApprovalRequest(
+                id: "call-2",
+                toolName: "write",
+                arguments: .object(["path": .string("/tmp/x")]),
+                summary: "Write file: /tmp/x"
+            ))
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
         await gate.respond(requestID: "call-2", approved: false)

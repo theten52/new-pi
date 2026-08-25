@@ -483,6 +483,7 @@ final class NewPiViewModel: ObservableObject {
             message: "User denied tool",
             details: "requestID=\(request.id) tool=\(request.toolName)"
         )
+        pendingToolApproval = nil
         Task {
             await session.respondToToolApproval(requestID: request.id, approved: false)
         }

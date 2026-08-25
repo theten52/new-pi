@@ -236,7 +236,15 @@ public struct AgentLoop: Sendable {
                 details: NewPiLogFormat.describeToolCall(call)
             )
 
-            if config.toolPolicy.requiresApproval(toolName: call.name) {
+            let requiresApproval = config.toolPolicy.requiresApproval(toolName: call.name)
+            let alreadyApproved: Bool
+            if requiresApproval, let tracker = config.toolApprovalTracker {
+                alreadyApproved = await tracker.isApproved(call.name)
+            } else {
+                alreadyApproved = false
+            }
+
+            if requiresApproval && !alreadyApproved {
                 let request = ToolApprovalRequest(
                     id: call.id,
                     toolName: call.name,

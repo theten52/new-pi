@@ -169,14 +169,7 @@ struct NewPiRootView: View {
             }
             .navigationTitle("NewPi")
         } detail: {
-            ZStack(alignment: .bottom) {
-                NewPiChatView(viewModel: viewModel)
-
-                if viewModel.pendingToolApproval != nil {
-                    NewPiToolApprovalSheet(viewModel: viewModel)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
+            NewPiChatView(viewModel: viewModel)
             .toolbar {
                 ToolbarItem(placement: .automatic) {
                     Menu {
@@ -206,6 +199,10 @@ struct NewPiRootView: View {
         }
         .sheet(isPresented: $showLogs) {
             NewPiLogsView(store: NewPiLogStore.shared)
+        }
+        .sheet(item: $viewModel.pendingToolApproval) { request in
+            NewPiToolApprovalSheet(viewModel: viewModel, request: request)
+                .interactiveDismissDisabled()
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {

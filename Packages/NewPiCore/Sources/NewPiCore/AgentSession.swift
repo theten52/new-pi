@@ -6,6 +6,7 @@ public actor AgentSession {
     public private(set) var config: AgentLoopConfig
     private let loop = AgentLoop()
     private let approvalGate = ToolApprovalGate()
+    private let approvalTracker = ToolApprovalTracker()
     private var runTask: Task<Void, Never>?
     private var eventContinuations: [UUID: AsyncStream<AgentEvent>.Continuation] = [:]
     private var steeringQueue: [AgentMessage] = []
@@ -19,8 +20,9 @@ public actor AgentSession {
         self.context = context
         var configured = config
         configured.requestToolApproval = { [approvalGate] request in
-            await approvalGate.wait(for: request.id)
+            await approvalGate.wait(for: request)
         }
+        configured.toolApprovalTracker = approvalTracker
         self.config = configured
     }
 
@@ -85,12 +87,17 @@ public actor AgentSession {
     }
 
     public func respondToToolApproval(requestID: String, approved: Bool) async {
+        let toolName = await approvalGate.respond(requestID: requestID, approved: approved)
         NewPiLogger.info(
             category: "agent-session",
             message: "Tool approval response forwarded",
-            details: "requestID=\(requestID) approved=\(approved)"
+            details: "requestID=\(requestID) approved=\(approved) tool=\(toolName ?? "unknown")"
         )
-        await approvalGate.respond(requestID: requestID, approved: approved)
+        if approved, let toolName {
+            // Mark the tool as approved for the remainder of this session,
+            // so subsequent calls to the same tool skip the approval prompt.
+            await approvalTracker.markApproved(toolName)
+        }
     }
 
     public func abort() {
@@ -106,8 +113,9 @@ public actor AgentSession {
     public func updateConfig(_ config: AgentLoopConfig) {
         var configured = config
         configured.requestToolApproval = { [approvalGate] request in
-            await approvalGate.wait(for: request.id)
+            await approvalGate.wait(for: request)
         }
+        configured.toolApprovalTracker = approvalTracker
         self.config = configured
         NewPiLogger.info(
             category: "agent-session",
