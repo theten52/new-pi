@@ -94,6 +94,15 @@ final class NewPiViewModel: ObservableObject {
     func openProject(at url: URL) async {
         projectURL = url.standardizedFileURL
         NewPiLastProjectStore.save(url)
+        NewPiLogStore.shared.setProjectDirectory(projectURL)
+        NewPiLogger.info(
+            category: "app",
+            message: "Project opened",
+            details: """
+            path=\(url.path)
+            projectLog=\(NewPiFileLogSink.shared.projectLogURL(for: url).path)
+            """
+        )
         await refreshSessionList()
         await startNewSession()
     }
@@ -151,13 +160,29 @@ final class NewPiViewModel: ObservableObject {
                 profile: profile,
                 credentialResolver: providerCredentialResolver
             )
+            let mcpTools = await MCPToolLoader.loadAgentTools()
             let newConfig = AgentLoopConfig(
                 model: profile.modelConfig,
                 llm: llm,
-                tools: BuiltInTools.codingTools(for: projectURL),
+                tools: AgentSessionFactory.codingTools(
+                    workingDirectory: projectURL,
+                    llm: llm,
+                    model: profile.modelConfig,
+                    additionalTools: mcpTools
+                ),
                 toolPolicy: .codingAgentDefault
             )
             await session?.updateConfig(newConfig)
+
+            NewPiLogger.info(
+                category: "app",
+                message: "Provider switched",
+                details: """
+                provider=\(profile.name)
+                model=\(profile.modelID)
+                mcpTools=\(mcpTools.count)
+                """
+            )
 
             if let session,
                let fileURL = currentSessionFileURL,
@@ -338,6 +363,16 @@ final class NewPiViewModel: ObservableObject {
 
         guard let projectURL else { return }
 
+        NewPiLogger.info(
+            category: "app",
+            message: "Beginning agent session",
+            details: """
+            project=\(projectURL.path)
+            restored=\(restoredContext != nil)
+            sessionFile=\(fileURL?.path ?? "new")
+            """
+        )
+
         do {
             let profile = try resolveProfile(for: restoredContext?.header)
             let messages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
@@ -387,7 +422,22 @@ final class NewPiViewModel: ObservableObject {
 
             subscribe(to: agentSession)
             await refreshSessionList()
+            NewPiLogger.info(
+                category: "app",
+                message: "Agent session ready",
+                details: """
+                provider=\(profile.name) model=\(profile.modelID)
+                mcpTools=\(mcpTools.count)
+                restoredMessages=\(messages.count)
+                sessionFile=\(sessionFileURL.path)
+                """
+            )
         } catch {
+            NewPiLogger.error(
+                category: "app",
+                message: "Failed to begin session",
+                details: error.localizedDescription
+            )
             appendTranscript(title: "Error", body: error.localizedDescription)
             activeProviderReady = false
         }
@@ -401,13 +451,22 @@ final class NewPiViewModel: ObservableObject {
 
         appendTranscript(title: "You", body: text)
         isStreaming = true
+        NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
         Task {
             await session.prompt(text)
         }
     }
 
     func approvePendingTool() {
-        guard let request = pendingToolApproval, let session else { return }
+        guard let request = pendingToolApproval, let session else {
+            NewPiLogger.error(category: "app", message: "Approve tapped with no pending request")
+            return
+        }
+        NewPiLogger.info(
+            category: "app",
+            message: "User approved tool",
+            details: "requestID=\(request.id) tool=\(request.toolName)"
+        )
         pendingToolApproval = nil
         Task {
             await session.respondToToolApproval(requestID: request.id, approved: true)
@@ -415,14 +474,22 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func denyPendingTool() {
-        guard let request = pendingToolApproval, let session else { return }
-        pendingToolApproval = nil
+        guard let request = pendingToolApproval, let session else {
+            NewPiLogger.error(category: "app", message: "Deny tapped with no pending request")
+            return
+        }
+        NewPiLogger.info(
+            category: "app",
+            message: "User denied tool",
+            details: "requestID=\(request.id) tool=\(request.toolName)"
+        )
         Task {
             await session.respondToToolApproval(requestID: request.id, approved: false)
         }
     }
 
     func abort() {
+        NewPiLogger.info(category: "app", message: "User aborted agent run")
         pendingToolApproval = nil
         Task {
             await session?.abort()
@@ -431,7 +498,7 @@ final class NewPiViewModel: ObservableObject {
     }
 
     private func subscribe(to session: AgentSession) {
-        eventTask = Task {
+        eventTask = Task { @MainActor in
             let stream = await session.events()
             for await event in stream {
                 handle(event)
@@ -443,8 +510,9 @@ final class NewPiViewModel: ObservableObject {
         switch event {
         case .agentStart:
             isStreaming = true
-            NewPiLogger.info(category: "agent", message: "Agent run started")
+            NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
+            NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
             if case let .compactionSummary(summary) = message {
                 appendTranscript(title: "Summary", body: summary)
                 NewPiLogger.info(
@@ -460,16 +528,20 @@ final class NewPiViewModel: ObservableObject {
         case let .toolApprovalRequired(request):
             pendingToolApproval = request
             NewPiLogger.info(
-                category: "tool",
-                message: "Tool approval required",
-                details: "\(request.toolName) — \(request.summary)"
+                category: "app",
+                message: "UI: showing tool approval sheet",
+                details: """
+                requestID=\(request.id)
+                tool=\(request.toolName)
+                summary=\(request.summary)
+                """
             )
         case let .toolExecutionStart(_, name, arguments):
             appendTranscript(title: "Tool", body: "Running \(name)…")
             NewPiLogger.info(
-                category: "tool",
-                message: "Tool started",
-                details: "\(name)\n\(String(describing: arguments))"
+                category: "app",
+                message: "UI: tool execution started",
+                details: "\(name)\n\(NewPiLogFormat.describeJSONValue(arguments))"
             )
         case let .toolExecutionEnd(_, name, result):
             appendTranscript(
@@ -477,14 +549,14 @@ final class NewPiViewModel: ObservableObject {
                 body: result.isError ? "Error: \(result.content)" : result.content
             )
             NewPiLogger.info(
-                category: "tool",
-                message: result.isError ? "Tool failed" : "Tool finished",
-                details: "\(name): \(result.content)"
+                category: "app",
+                message: result.isError ? "UI: tool failed" : "UI: tool finished",
+                details: "\(name): \(NewPiLogFormat.truncate(result.content, maxLength: 2000))"
             )
         case .agentEnd:
             isStreaming = false
             pendingToolApproval = nil
-            NewPiLogger.info(category: "agent", message: "Agent run finished")
+            NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
                 await syncTranscriptMessageIndices()
                 await refreshSessionList()
@@ -494,8 +566,8 @@ final class NewPiViewModel: ObservableObject {
             isStreaming = false
             pendingToolApproval = nil
             NewPiLogger.error(
-                category: "agent",
-                message: "Agent error",
+                category: "app",
+                message: "UI: agent error shown to user",
                 details: error.localizedDescription
             )
         default:

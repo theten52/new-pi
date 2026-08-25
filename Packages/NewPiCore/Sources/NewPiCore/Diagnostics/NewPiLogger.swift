@@ -1,6 +1,7 @@
 import Foundation
 
 public enum NewPiLogLevel: String, Sendable, Equatable {
+    case debug = "DEBUG"
     case info = "INFO"
     case error = "ERROR"
 }
@@ -58,6 +59,16 @@ public enum NewPiLogSanitizer {
             )
         }
 
+        let apiKeyPattern = #"(?i)(api[_-]?key|x-api-key|authorization)\s*[:=]\s*["']?[-A-Za-z0-9._~+/=]{8,}"#
+        if let expression = try? NSRegularExpression(pattern: apiKeyPattern) {
+            let range = NSRange(sanitized.startIndex..<sanitized.endIndex, in: sanitized)
+            sanitized = expression.stringByReplacingMatches(
+                in: sanitized,
+                range: range,
+                withTemplate: "$1: [redacted]"
+            )
+        }
+
         return sanitized
     }
 }
@@ -67,11 +78,48 @@ public enum NewPiLogger {
 
     private static let lock = NSLock()
     private nonisolated(unsafe) static var handler: Handler?
+    private nonisolated(unsafe) static var fileLoggingEnabled = false
+
+    public static var logFileURLs: [URL] {
+        NewPiFileLogSink.shared.activeLogURLs
+    }
+
+    public static var globalLogFileURL: URL {
+        NewPiFileLogSink.shared.globalLogURL
+    }
+
+    /// Enables append-only file logging under `~/.new-pi/agent/logs/newpi-debug.log`.
+    public static func bootstrapFileLogging(sessionID: String = UUID().uuidString) {
+        lock.lock()
+        fileLoggingEnabled = true
+        lock.unlock()
+        NewPiFileLogSink.shared.enable(sessionID: sessionID)
+    }
+
+    public static func setProjectLogDirectory(_ url: URL?) {
+        NewPiFileLogSink.shared.setProjectDirectory(url)
+        if let url {
+            info(
+                category: "lifecycle",
+                message: "Project log attached",
+                details: "Project: \(url.path)\nLog: \(NewPiFileLogSink.shared.projectLogURL(for: url).path)"
+            )
+        }
+    }
 
     public static func setHandler(_ handler: Handler?) {
         lock.lock()
         defer { lock.unlock() }
         self.handler = handler
+    }
+
+    public static func debug(
+        category: String,
+        message: String,
+        details: String? = nil,
+        secrets: [String] = []
+    ) {
+        record(level: .debug, category: category, message: message, details: details, secrets: secrets)
     }
 
     public static func info(
@@ -162,8 +210,13 @@ public enum NewPiLogger {
 
         lock.lock()
         let currentHandler = handler
+        let writeToFile = fileLoggingEnabled
         lock.unlock()
+
         currentHandler?(entry)
+        if writeToFile {
+            NewPiFileLogSink.shared.append(entry)
+        }
     }
 
     private static func prettyJSONString(from data: Data) -> String? {

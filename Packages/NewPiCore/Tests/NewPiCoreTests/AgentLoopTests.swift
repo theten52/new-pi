@@ -170,6 +170,41 @@ struct AgentLoopTests {
         })
     }
 
+    @Test("unknown tool returns error result instead of aborting agent")
+    func unknownTool() async {
+        let llm = MockLLMProviderBox(scripts: [
+            [
+                .toolCall(ToolCallContent(id: "call_1", name: "missing", arguments: .object([:]))),
+                .completed(stopReason: .toolUse, usage: UsageStats()),
+            ],
+            [
+                .textDelta("handled"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ],
+        ])
+
+        let config = AgentLoopConfig(
+            model: AgentLoopTestSupport.defaultModel,
+            llm: llm,
+            tools: [EchoTool()]
+        )
+
+        let events = await AgentLoopTestSupport.collectEvents(
+            prompt: .user("try missing tool"),
+            context: AgentContext(systemPrompt: "test"),
+            config: config
+        )
+
+        #expect(!events.contains { if case .error = $0 { true } else { false } })
+        #expect(events.contains {
+            if case let .toolExecutionEnd(_, "missing", result) = $0 {
+                result.isError && result.content.contains("Tool not found")
+            } else {
+                false
+            }
+        })
+    }
+
     @Test("steering message is injected after tool execution")
     func steeringAfterTools() async {
         let llm = MockLLMProviderBox(scripts: [

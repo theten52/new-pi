@@ -1,12 +1,14 @@
 import Foundation
 
 enum ToolArguments {
-    static func requiredString(_ arguments: JSONValue, key: String) throws -> String {
-        guard let value = arguments.objectValue?[key]?.stringValue,
-              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AgentError.invalidState("Missing required argument: \(key)")
+    static func requiredString(_ arguments: JSONValue, key: String, aliases: [String] = []) throws -> String {
+        for candidate in [key] + aliases {
+            if let value = arguments.objectValue?[candidate]?.stringValue,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
         }
-        return value
+        throw AgentError.invalidState("Missing required argument: \(key)")
     }
 
     static func optionalInt(_ arguments: JSONValue, key: String) -> Int? {
@@ -68,10 +70,21 @@ public struct ReadTool: AgentTool {
         context: ToolContext,
         onUpdate: (@Sendable (ToolProgress) -> Void)?
     ) async throws -> ToolResult {
-        let path = try ToolArguments.requiredString(arguments, key: "path")
+        let path = try ToolArguments.requiredString(arguments, key: "path", aliases: ["file_path", "filePath"])
         let fileURL = try PathResolver.resolve(path, relativeTo: context.workingDirectory)
         let offset = ToolArguments.optionalInt(arguments, key: "offset")
         let limit = ToolArguments.optionalInt(arguments, key: "limit")
+
+        NewPiLogger.debug(
+            category: "tool-read",
+            message: "Read tool starting",
+            details: """
+            path=\(path)
+            resolved=\(fileURL.path)
+            offset=\(offset.map(String.init) ?? "nil")
+            limit=\(limit.map(String.init) ?? "nil")
+            """
+        )
 
         onUpdate?(ToolProgress(message: "Reading \(fileURL.lastPathComponent)"))
 
@@ -95,6 +108,11 @@ public struct ReadTool: AgentTool {
         }
 
         let sliced = sliceLines(content, offset: offset, limit: limit)
+        NewPiLogger.debug(
+            category: "tool-read",
+            message: "Read tool finished",
+            details: "bytes=\(data.count) linesReturned=\(sliced.split(separator: "\n").count)"
+        )
         return ToolResult(content: sliced)
     }
 
@@ -147,9 +165,15 @@ public struct WriteTool: AgentTool {
         context: ToolContext,
         onUpdate: (@Sendable (ToolProgress) -> Void)?
     ) async throws -> ToolResult {
-        let path = try ToolArguments.requiredString(arguments, key: "path")
+        let path = try ToolArguments.requiredString(arguments, key: "path", aliases: ["file_path", "filePath"])
         let content = arguments.objectValue?["content"]?.stringValue ?? ""
         let fileURL = try PathResolver.resolve(path, relativeTo: context.workingDirectory)
+
+        NewPiLogger.info(
+            category: "tool-write",
+            message: "Write tool starting",
+            details: "path=\(path) resolved=\(fileURL.path) bytes=\(content.utf8.count)"
+        )
 
         onUpdate?(ToolProgress(message: "Writing \(fileURL.lastPathComponent)"))
 
@@ -198,10 +222,16 @@ public struct EditTool: AgentTool {
         context: ToolContext,
         onUpdate: (@Sendable (ToolProgress) -> Void)?
     ) async throws -> ToolResult {
-        let path = try ToolArguments.requiredString(arguments, key: "path")
+        let path = try ToolArguments.requiredString(arguments, key: "path", aliases: ["file_path", "filePath"])
         let oldString = try ToolArguments.requiredString(arguments, key: "old_string")
         let newString = arguments.objectValue?["new_string"]?.stringValue ?? ""
         let fileURL = try PathResolver.resolve(path, relativeTo: context.workingDirectory)
+
+        NewPiLogger.info(
+            category: "tool-edit",
+            message: "Edit tool starting",
+            details: "path=\(path) resolved=\(fileURL.path) oldLen=\(oldString.count) newLen=\(newString.count)"
+        )
 
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw PathResolverError.notFound(fileURL.path)
@@ -262,8 +292,18 @@ public struct BashTool: AgentTool {
         context: ToolContext,
         onUpdate: (@Sendable (ToolProgress) -> Void)?
     ) async throws -> ToolResult {
-        let command = try ToolArguments.requiredString(arguments, key: "command")
+        let command = try ToolArguments.requiredString(arguments, key: "command", aliases: ["cmd", "script"])
         let timeout = ToolArguments.optionalDouble(arguments, key: "timeout_seconds", default: timeoutSeconds)
+
+        NewPiLogger.info(
+            category: "tool-bash",
+            message: "Bash tool starting",
+            details: """
+            cwd=\(context.workingDirectory.path)
+            timeout=\(timeout)s
+            command=\(command)
+            """
+        )
 
         onUpdate?(ToolProgress(message: "Running shell command"))
 
@@ -285,14 +325,19 @@ public struct BashTool: AgentTool {
 
         try process.run()
 
+        let stdoutTask = Task { readPipe(stdoutPipe, maxBytes: maxOutputBytes) }
+        let stderrTask = Task { readPipe(stderrPipe, maxBytes: maxOutputBytes) }
+
         let completedInTime = await waitForProcess(process, timeoutSeconds: timeout)
         guard completedInTime else {
             process.terminate()
+            stdoutTask.cancel()
+            stderrTask.cancel()
             throw AgentError.invalidState("Command timed out after \(Int(timeout)) seconds")
         }
 
-        let stdout = readPipe(stdoutPipe, maxBytes: maxOutputBytes)
-        let stderr = readPipe(stderrPipe, maxBytes: maxOutputBytes)
+        let stdout = await stdoutTask.value
+        let stderr = await stderrTask.value
         let exitCode = process.terminationStatus
 
         var output = ""
@@ -307,6 +352,12 @@ public struct BashTool: AgentTool {
             output = "(no output)"
         }
         output += "\n[exit \(exitCode)]"
+
+        NewPiLogger.info(
+            category: "tool-bash",
+            message: exitCode == 0 ? "Bash tool finished" : "Bash tool exited non-zero",
+            details: "exit=\(exitCode) output=\(NewPiLogFormat.truncate(output, maxLength: 2000))"
+        )
 
         return ToolResult(content: output, isError: exitCode != 0)
     }

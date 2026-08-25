@@ -36,14 +36,30 @@ public enum PathResolver {
                 .standardizedFileURL
         }
 
-        let workspace = workingDirectory.standardizedFileURL
+        let workspace = workingDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedCandidate = candidate.resolvingSymlinksInPath()
         let workspacePath = workspace.path
-        let candidatePath = candidate.path
+        let candidatePath = resolvedCandidate.path
 
         guard candidatePath == workspacePath || candidatePath.hasPrefix(workspacePath + "/") else {
+            NewPiLogger.error(
+                category: "path",
+                message: "Path escapes workspace",
+                details: """
+                input=\(path)
+                workspace=\(workspacePath)
+                resolved=\(candidatePath)
+                """
+            )
             throw PathResolverError.pathEscapesWorkspace
         }
 
-        return candidate
+        NewPiLogger.debug(
+            category: "path",
+            message: "Path resolved",
+            details: "input=\(path) -> \(resolvedCandidate.path)"
+        )
+
+        return resolvedCandidate
     }
 }

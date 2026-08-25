@@ -39,4 +39,27 @@ struct NewPiLoggerTests {
         #expect(box.entries[0].message == "hello")
         #expect(box.entries[0].details == "world")
     }
+
+    @Test("writes debug entries to configured file sink")
+    func fileSinkDelivery() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("new-pi-log-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let sessionID = UUID().uuidString
+        NewPiLogger.bootstrapFileLogging(sessionID: sessionID)
+        NewPiLogger.setProjectLogDirectory(tempDir)
+        NewPiLogger.debug(category: "test-file", message: "disk write", details: "payload")
+
+        let projectLog = NewPiFileLogSink.shared.projectLogURL(for: tempDir)
+        let globalLog = NewPiLogger.globalLogFileURL
+        #expect(FileManager.default.fileExists(atPath: globalLog.path))
+        #expect(FileManager.default.fileExists(atPath: projectLog.path))
+
+        let projectContents = try String(contentsOf: projectLog, encoding: .utf8)
+        #expect(projectContents.contains(sessionID))
+        #expect(projectContents.contains("[DEBUG] [test-file] disk write"))
+        #expect(projectContents.contains("payload"))
+    }
 }

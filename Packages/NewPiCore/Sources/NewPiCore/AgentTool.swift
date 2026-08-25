@@ -38,12 +38,15 @@ public struct BeforeToolCallDecision: Sendable, Equatable {
 }
 
 public struct AgentLoopConfig: Sendable {
+    public static let defaultMaxTurns = 20
+
     public var model: ModelConfig
     public var llm: any LLMProvider
     public var tools: [any AgentTool]
     public var toolExecution: ToolExecutionMode
     public var toolPolicy: ToolPolicyRules
     public var compaction: CompactionConfig
+    public var maxTurns: Int
     public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
     public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)?
 
@@ -54,6 +57,7 @@ public struct AgentLoopConfig: Sendable {
         toolExecution: ToolExecutionMode = .parallel,
         toolPolicy: ToolPolicyRules = .codingAgentDefault,
         compaction: CompactionConfig = CompactionConfig(),
+        maxTurns: Int = AgentLoopConfig.defaultMaxTurns,
         beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
         requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil
     ) {
@@ -63,6 +67,7 @@ public struct AgentLoopConfig: Sendable {
         self.toolExecution = toolExecution
         self.toolPolicy = toolPolicy
         self.compaction = compaction
+        self.maxTurns = max(1, maxTurns)
         self.beforeToolCall = beforeToolCall
         self.requestToolApproval = requestToolApproval
     }

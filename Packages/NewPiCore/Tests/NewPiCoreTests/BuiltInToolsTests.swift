@@ -101,6 +101,26 @@ struct BuiltInToolsTests {
         #expect(result.content.contains("[exit 0]"))
     }
 
+    @Test("read accepts file_path alias")
+    func readFilePathAlias() async throws {
+        let project = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: project) }
+
+        let file = project.appendingPathComponent("hello.txt")
+        try "content".write(to: file, atomically: true, encoding: .utf8)
+
+        let tool = ReadTool()
+        let context = ToolContext(workingDirectory: project)
+        let result = try await tool.execute(
+            id: "1",
+            arguments: .object(["file_path": .string("hello.txt")]),
+            context: context,
+            onUpdate: nil
+        )
+
+        #expect(result.content.contains("1|content"))
+    }
+
     @Test("path resolver blocks escaping workspace")
     func pathEscapeBlocked() throws {
         let project = try makeTempProject()

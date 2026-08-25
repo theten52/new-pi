@@ -15,13 +15,40 @@ public struct AgentLoop: Sendable {
             let task = Task {
                 do {
                     var context = context
+                    NewPiLogger.info(
+                        category: "agent-loop",
+                        message: "Agent run started",
+                        details: """
+                        Working directory: \(context.workingDirectory.path)
+                        Registered tools: \(NewPiLogFormat.describeToolRegistry(config.tools))
+                        Message count: \(context.messages.count)
+                        Model: \(config.model.provider)/\(config.model.modelID)
+                        """
+                    )
                     continuation.yield(.agentStart)
 
                     try appendMessage(prompt, to: &context, continuation: continuation)
 
                     var shouldContinue = true
+                    var turnIndex = 0
                     while shouldContinue {
                         try Task.checkCancellation()
+                        turnIndex += 1
+                        if turnIndex > config.maxTurns {
+                            NewPiLogger.error(
+                                category: "agent-loop",
+                                message: "Max agent turns exceeded",
+                                details: "limit=\(config.maxTurns)"
+                            )
+                            throw AgentError.invalidState(
+                                "Agent stopped after \(config.maxTurns) turns to prevent an infinite tool loop."
+                            )
+                        }
+                        NewPiLogger.debug(
+                            category: "agent-loop",
+                            message: "Turn started",
+                            details: "Turn #\(turnIndex), messages=\(context.messages.count)"
+                        )
                         continuation.yield(.turnStart)
 
                         try await compactionService.compactIfNeeded(
@@ -30,6 +57,8 @@ public struct AgentLoop: Sendable {
                             continuation: continuation
                         )
 
+                        AgentMessageHistoryRepair.repairOrphanedToolCalls(in: &context.messages)
+
                         let assistant = try await streamAssistant(
                             context: context,
                             config: config,
@@ -37,7 +66,18 @@ public struct AgentLoop: Sendable {
                         )
                         try appendMessage(.assistant(assistant), to: &context, continuation: continuation)
 
-                        if assistant.stopReason == .toolUse, !assistant.toolCalls.isEmpty {
+                        NewPiLogger.debug(
+                            category: "agent-loop",
+                            message: "Assistant turn completed",
+                            details: """
+                            stopReason=\(assistant.stopReason.rawValue)
+                            textLength=\(assistant.text.count)
+                            toolCalls=\(assistant.toolCalls.count)
+                            \(assistant.toolCalls.map { "- \($0.name) (\($0.id))" }.joined(separator: "\n"))
+                            """
+                        )
+
+                        if !assistant.toolCalls.isEmpty {
                             try await executeToolCalls(
                                 assistant.toolCalls,
                                 context: context,
@@ -58,20 +98,32 @@ public struct AgentLoop: Sendable {
                         continuation.yield(.turnEnd)
                     }
 
+                    NewPiLogger.info(category: "agent-loop", message: "Agent run finished", details: "Turns=\(turnIndex)")
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
                     continuation.finish()
                 } catch is CancellationError {
+                    NewPiLogger.info(category: "agent-loop", message: "Agent run cancelled")
                     continuation.yield(.error(.aborted))
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
                     continuation.finish()
                 } catch let error as AgentError {
+                    NewPiLogger.error(
+                        category: "agent-loop",
+                        message: "Agent run failed",
+                        details: error.localizedDescription
+                    )
                     continuation.yield(.error(error))
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
                     continuation.finish()
                 } catch {
+                    NewPiLogger.error(
+                        category: "agent-loop",
+                        message: "Agent run failed with unexpected error",
+                        details: error.localizedDescription
+                    )
                     continuation.yield(.error(.llmFailed(error.localizedDescription)))
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
@@ -108,6 +160,15 @@ public struct AgentLoop: Sendable {
         let llmMessages = context.messages
         let toolDefinitions = config.tools.map(\.definition)
 
+        NewPiLogger.debug(
+            category: "agent-loop",
+            message: "Streaming assistant response",
+            details: """
+            messages=\(llmMessages.count)
+            tools=\(toolDefinitions.count)
+            """
+        )
+
         for try await event in config.llm.stream(
             model: config.model,
             systemPrompt: context.systemPrompt,
@@ -135,7 +196,7 @@ public struct AgentLoop: Sendable {
             toolCalls: toolCalls,
             provider: config.model.provider,
             modelID: config.model.modelID,
-            stopReason: stopReason,
+            stopReason: toolCalls.isEmpty ? stopReason : .toolUse,
             usage: usage
         )
     }
@@ -147,10 +208,30 @@ public struct AgentLoop: Sendable {
         continuation: AsyncStream<AgentEvent>.Continuation,
         messageSink: inout [AgentMessage]
     ) async throws {
-        let registry = Dictionary(uniqueKeysWithValues: config.tools.map { ($0.name, $0) })
+        var registry: [String: any AgentTool] = [:]
+        for tool in config.tools {
+            registry[tool.name] = tool
+        }
         let toolContext = ToolContext(workingDirectory: context.workingDirectory)
 
+        NewPiLogger.info(
+            category: "tool",
+            message: "Executing tool batch",
+            details: """
+            count=\(toolCalls.count)
+            cwd=\(context.workingDirectory.path)
+            registry=[\(registry.keys.sorted().joined(separator: ", "))]
+            \(toolCalls.map { NewPiLogFormat.describeToolCall($0) }.joined(separator: "\n---\n"))
+            """
+        )
+
         let runSingle: (ToolCallContent) async throws -> ToolResultMessage = { call in
+            NewPiLogger.debug(
+                category: "tool",
+                message: "Tool call received",
+                details: NewPiLogFormat.describeToolCall(call)
+            )
+
             if config.toolPolicy.requiresApproval(toolName: call.name) {
                 let request = ToolApprovalRequest(
                     id: call.id,
@@ -160,19 +241,49 @@ public struct AgentLoop: Sendable {
                 )
                 continuation.yield(.toolApprovalRequired(request))
 
-                if let requestToolApproval = config.requestToolApproval {
-                    let approved = await requestToolApproval(request)
-                    if !approved {
-                        let reason = "Tool execution denied by policy"
-                        let result = ToolResult(content: reason, isError: true)
-                        continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
-                        return ToolResultMessage(
-                            toolCallID: call.id,
-                            toolName: call.name,
-                            content: reason,
-                            isError: true
-                        )
-                    }
+                NewPiLogger.info(
+                    category: "tool-approval",
+                    message: "Waiting for user approval",
+                    details: """
+                    requestID=\(request.id)
+                    tool=\(request.toolName)
+                    summary=\(request.summary)
+                    """
+                )
+
+                guard let requestToolApproval = config.requestToolApproval else {
+                    NewPiLogger.error(
+                        category: "tool-approval",
+                        message: "Approval handler missing",
+                        details: "tool=\(call.name) requestID=\(call.id)"
+                    )
+                    let reason = "Tool execution denied: approval handler not configured"
+                    let result = ToolResult(content: reason, isError: true)
+                    continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
+                    return ToolResultMessage(
+                        toolCallID: call.id,
+                        toolName: call.name,
+                        content: reason,
+                        isError: true
+                    )
+                }
+
+                let approved = await requestToolApproval(request)
+                NewPiLogger.info(
+                    category: "tool-approval",
+                    message: approved ? "Tool approved" : "Tool denied",
+                    details: "requestID=\(request.id) tool=\(request.toolName)"
+                )
+                if !approved {
+                    let reason = "Tool execution denied by policy"
+                    let result = ToolResult(content: reason, isError: true)
+                    continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
+                    return ToolResultMessage(
+                        toolCallID: call.id,
+                        toolName: call.name,
+                        content: reason,
+                        isError: true
+                    )
                 }
             }
 
@@ -194,10 +305,27 @@ public struct AgentLoop: Sendable {
             }
 
             guard let tool = registry[call.name] else {
-                throw AgentError.toolNotFound(call.name)
+                let reason = "Tool not found: \(call.name)"
+                NewPiLogger.error(
+                    category: "tool",
+                    message: "Tool not found in registry",
+                    details: """
+                    requested=\(call.name)
+                    available=[\(registry.keys.sorted().joined(separator: ", "))]
+                    """
+                )
+                let result = ToolResult(content: reason, isError: true)
+                continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
+                return ToolResultMessage(
+                    toolCallID: call.id,
+                    toolName: call.name,
+                    content: reason,
+                    isError: true
+                )
             }
 
             do {
+                let startedAt = Date()
                 let result = try await tool.execute(
                     id: call.id,
                     arguments: call.arguments,
@@ -205,6 +333,17 @@ public struct AgentLoop: Sendable {
                     onUpdate: { progress in
                         continuation.yield(.toolExecutionUpdate(id: call.id, message: progress.message))
                     }
+                )
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                NewPiLogger.info(
+                    category: "tool",
+                    message: result.isError ? "Tool finished with error" : "Tool finished",
+                    details: """
+                    tool=\(call.name)
+                    id=\(call.id)
+                    elapsedMs=\(elapsedMs)
+                    output=\(NewPiLogFormat.truncate(result.content, maxLength: 4000))
+                    """
                 )
                 continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
                 return ToolResultMessage(
@@ -214,6 +353,15 @@ public struct AgentLoop: Sendable {
                     isError: result.isError
                 )
             } catch {
+                NewPiLogger.error(
+                    category: "tool",
+                    message: "Tool threw error",
+                    details: """
+                    tool=\(call.name)
+                    id=\(call.id)
+                    error=\(error.localizedDescription)
+                    """
+                )
                 let result = ToolResult(content: error.localizedDescription, isError: true)
                 continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
                 return ToolResultMessage(

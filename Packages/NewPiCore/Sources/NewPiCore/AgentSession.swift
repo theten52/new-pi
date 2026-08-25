@@ -40,6 +40,25 @@ public actor AgentSession {
 
     public func prompt(_ message: AgentMessage) {
         runTask?.cancel()
+        let promptSummary: String = switch message {
+        case let .user(user):
+            "user: \(NewPiLogFormat.truncate(user.content, maxLength: 500))"
+        case let .assistant(assistant):
+            "assistant: \(assistant.toolCalls.count) tool calls"
+        case let .toolResult(result):
+            "toolResult: \(result.toolName)"
+        case let .compactionSummary(summary):
+            "compactionSummary: \(summary.count) chars"
+        }
+        NewPiLogger.info(
+            category: "agent-session",
+            message: "Prompt submitted",
+            details: """
+            \(promptSummary)
+            cwd=\(context.workingDirectory.path)
+            tools=\(NewPiLogFormat.describeToolRegistry(config.tools))
+            """
+        )
         runTask = Task {
             let steeringProvider: (@Sendable () async -> AgentMessage?)? = { [weak self] in
                 guard let self else { return nil }
@@ -66,10 +85,16 @@ public actor AgentSession {
     }
 
     public func respondToToolApproval(requestID: String, approved: Bool) async {
+        NewPiLogger.info(
+            category: "agent-session",
+            message: "Tool approval response forwarded",
+            details: "requestID=\(requestID) approved=\(approved)"
+        )
         await approvalGate.respond(requestID: requestID, approved: approved)
     }
 
     public func abort() {
+        NewPiLogger.info(category: "agent-session", message: "Agent abort requested")
         runTask?.cancel()
         Task {
             await approvalGate.cancelAll()
@@ -84,6 +109,14 @@ public actor AgentSession {
             await approvalGate.wait(for: request.id)
         }
         self.config = configured
+        NewPiLogger.info(
+            category: "agent-session",
+            message: "Session config updated",
+            details: """
+            model=\(config.model.provider)/\(config.model.modelID)
+            tools=\(NewPiLogFormat.describeToolRegistry(config.tools))
+            """
+        )
     }
 
     public func attachPersistence(fileURL: URL, header: SessionHeader) {
@@ -167,6 +200,18 @@ public actor AgentSession {
 }
 
 public enum AgentSessionFactory {
+    public static func codingTools(
+        workingDirectory: URL,
+        llm: any LLMProvider,
+        model: ModelConfig,
+        additionalTools: [any AgentTool] = []
+    ) -> [any AgentTool] {
+        var tools = BuiltInTools.codingTools(for: workingDirectory)
+        tools.append(SubAgentTool(llm: llm, model: model))
+        tools.append(contentsOf: additionalTools)
+        return tools
+    }
+
     public static func codingSession(
         workingDirectory: URL,
         llm: any LLMProvider,
@@ -175,9 +220,12 @@ public enum AgentSessionFactory {
         restoredMessages: [AgentMessage] = [],
         additionalTools: [any AgentTool] = []
     ) -> AgentSession {
-        var tools = BuiltInTools.codingTools(for: workingDirectory)
-        tools.append(SubAgentTool(llm: llm, model: model))
-        tools.append(contentsOf: additionalTools)
+        let tools = codingTools(
+            workingDirectory: workingDirectory,
+            llm: llm,
+            model: model,
+            additionalTools: additionalTools
+        )
         let config = AgentLoopConfig(
             model: model,
             llm: llm,
@@ -189,6 +237,25 @@ public enum AgentSessionFactory {
             messages: restoredMessages,
             workingDirectory: workingDirectory
         )
+        logSessionCreated(workingDirectory: workingDirectory, model: model, tools: tools)
         return AgentSession(context: context, config: config)
+    }
+}
+
+extension AgentSessionFactory {
+    public static func logSessionCreated(
+        workingDirectory: URL,
+        model: ModelConfig,
+        tools: [any AgentTool]
+    ) {
+        NewPiLogger.info(
+            category: "agent-session",
+            message: "Coding session created",
+            details: """
+            cwd=\(workingDirectory.path)
+            model=\(model.provider)/\(model.modelID)
+            tools=\(NewPiLogFormat.describeToolRegistry(tools))
+            """
+        )
     }
 }

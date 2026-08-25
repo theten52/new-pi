@@ -100,15 +100,14 @@ public enum OpenAIStreamEvent: Sendable, Equatable {
 }
 
 public struct OpenAIStreamParser: Sendable {
+    private var toolIDs: [Int: String] = [:]
+    private var toolNames: [Int: String] = [:]
+    private var toolArguments: [Int: String] = [:]
+
     public init() {}
 
-    public func parse(events: [OpenAIStreamEvent]) -> [LLMStreamEvent] {
+    public mutating func parse(events: [OpenAIStreamEvent]) -> [LLMStreamEvent] {
         var output: [LLMStreamEvent] = []
-        var toolIDs: [Int: String] = [:]
-        var toolNames: [Int: String] = [:]
-        var toolArguments: [Int: String] = [:]
-        var stopReason: StopReason = .stop
-        var usage = UsageStats()
 
         for event in events {
             switch event {
@@ -121,19 +120,38 @@ public struct OpenAIStreamParser: Sendable {
                     toolArguments[index, default: ""] += argumentsDelta
                 }
             case let .completed(reason, inputTokens, outputTokens):
-                stopReason = mapStopReason(reason)
-                usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                let hadToolCalls = !toolIDs.isEmpty
+                output.append(contentsOf: flushToolCalls())
+                var stopReason = mapStopReason(reason)
+                if hadToolCalls, stopReason != .toolUse {
+                    // Some OpenAI-compatible providers (e.g. DeepSeek) emit finish_reason=stop
+                    // even when tool_calls were streamed.
+                    stopReason = .toolUse
+                }
+                let usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                output.append(.completed(stopReason: stopReason, usage: usage))
             }
         }
 
+        return output
+    }
+
+    /// Emits any pending tool calls. Call at stream end if no terminal `completed` event arrived.
+    public mutating func finish() -> [LLMStreamEvent] {
+        flushToolCalls()
+    }
+
+    private mutating func flushToolCalls() -> [LLMStreamEvent] {
+        var output: [LLMStreamEvent] = []
         for index in toolIDs.keys.sorted() {
             guard let id = toolIDs[index], let name = toolNames[index] else { continue }
             let json = toolArguments[index] ?? "{}"
             let arguments = (try? JSONValueDecoder.decode(from: json)) ?? .object([:])
             output.append(.toolCall(ToolCallContent(id: id, name: name, arguments: arguments)))
         }
-
-        output.append(.completed(stopReason: stopReason, usage: usage))
+        toolIDs.removeAll()
+        toolNames.removeAll()
+        toolArguments.removeAll()
         return output
     }
 
@@ -297,7 +315,7 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
 
                     var sseParser = SSEByteStreamParser()
                     let decoder = OpenAISSEDecoder()
-                    let parser = OpenAIStreamParser()
+                    var parser = OpenAIStreamParser()
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
@@ -310,6 +328,9 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     for block in sseParser.finish() {
                         let parsed = parser.parse(events: decoder.decodeLines(block))
                         for event in parsed { continuation.yield(event) }
+                    }
+                    for event in parser.finish() {
+                        continuation.yield(event)
                     }
 
                     NewPiLogger.logLLMStreamFinished(category: "openai-compatible", model: model.modelID)

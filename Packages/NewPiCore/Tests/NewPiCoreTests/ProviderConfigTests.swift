@@ -193,7 +193,7 @@ struct OpenAIStreamParserTests {
             "",
         ]
 
-        let parser = OpenAIStreamParser()
+        var parser = OpenAIStreamParser()
         let events = parser.parse(events: decoder.decodeLines(lines))
         #expect(events.contains { if case let .textDelta(text) = $0 { text == "Hi" } else { false } })
         #expect(events.contains {

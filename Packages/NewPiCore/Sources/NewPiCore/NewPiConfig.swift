@@ -13,4 +13,18 @@ public enum NewPiConfig {
 
     /// Project-local config directory name.
     public static let projectConfigDirectoryName = ".new-pi"
+
+    /// User-level debug log directory, e.g. `~/.new-pi/agent/logs/`.
+    public static var defaultLogsDirectory: URL {
+        NewPiFileLogSink.defaultLogsDirectory
+    }
+
+    /// Primary persistent debug log file path.
+    public static var defaultDebugLogFile: URL {
+        defaultLogsDirectory.appendingPathComponent(NewPiFileLogSink.logFileName)
+    }
+
+    public static func projectDebugLogFile(in projectDirectory: URL) -> URL {
+        NewPiFileLogSink.shared.projectLogURL(for: projectDirectory)
+    }
 }

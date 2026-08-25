@@ -82,17 +82,39 @@ public actor ToolApprovalGate {
     public init() {}
 
     public func wait(for requestID: String) async -> Bool {
-        await withCheckedContinuation { continuation in
+        NewPiLogger.debug(
+            category: "tool-approval",
+            message: "Approval gate waiting",
+            details: "requestID=\(requestID)"
+        )
+        return await withCheckedContinuation { continuation in
             waiters[requestID] = continuation
         }
     }
 
     public func respond(requestID: String, approved: Bool) {
-        guard let continuation = waiters.removeValue(forKey: requestID) else { return }
+        NewPiLogger.info(
+            category: "tool-approval",
+            message: "Approval gate response",
+            details: "requestID=\(requestID) approved=\(approved) pendingWaiters=\(waiters.keys.sorted())"
+        )
+        guard let continuation = waiters.removeValue(forKey: requestID) else {
+            NewPiLogger.error(
+                category: "tool-approval",
+                message: "No waiter for approval response",
+                details: "requestID=\(requestID)"
+            )
+            return
+        }
         continuation.resume(returning: approved)
     }
 
     public func cancelAll() {
+        NewPiLogger.info(
+            category: "tool-approval",
+            message: "Approval gate cancelled all pending requests",
+            details: "count=\(waiters.count)"
+        )
         for (_, continuation) in waiters {
             continuation.resume(returning: false)
         }
