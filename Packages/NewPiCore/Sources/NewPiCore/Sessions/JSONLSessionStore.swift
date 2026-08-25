@@ -361,7 +361,10 @@ public enum SessionManager {
         case let (.user(l), .user(r)):
             return l.content == r.content
         case let (.assistant(l), .assistant(r)):
-            return l.text == r.text && l.toolCalls == r.toolCalls && l.stopReason == r.stopReason
+            return l.text == r.text
+                && l.reasoningContent == r.reasoningContent
+                && l.toolCalls == r.toolCalls
+                && l.stopReason == r.stopReason
         case let (.toolResult(l), .toolResult(r)):
             return l.toolCallID == r.toolCallID && l.toolName == r.toolName
                 && l.content == r.content && l.isError == r.isError

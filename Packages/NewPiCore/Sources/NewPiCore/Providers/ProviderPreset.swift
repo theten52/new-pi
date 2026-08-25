@@ -159,7 +159,7 @@ public enum ProviderPresetCatalog {
         displayName: "DeepSeek",
         systemImage: "bolt.fill",
         defaultBaseURL: "https://api.deepseek.com/v1/chat/completions",
-        defaultModels: ["deepseek-chat", "deepseek-reasoner"],
+        defaultModels: ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
         optionFields: openaiCompatible.optionFields,
         credentialRequired: true,
         environmentVariable: "OPENAI_API_KEY",

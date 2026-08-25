@@ -524,7 +524,11 @@ final class NewPiViewModel: ObservableObject {
         case let .textDelta(delta):
             appendOrUpdateAssistant(delta)
         case let .thinkingDelta(delta):
-            appendOrUpdateAssistant(delta)
+            NewPiLogger.debug(
+                category: "app",
+                message: "UI: reasoning delta",
+                details: "length=\(delta.count)"
+            )
         case let .toolApprovalRequired(request):
             pendingToolApproval = request
             NewPiLogger.info(
@@ -569,6 +573,7 @@ final class NewPiViewModel: ObservableObject {
             pendingToolApproval = nil
             NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
+                await appendTruncatedOutputNoticeIfNeeded()
                 await syncTranscriptMessageIndices()
                 await refreshSessionList()
             }
@@ -701,6 +706,27 @@ final class NewPiViewModel: ObservableObject {
             return streamingAssistantID
         }
         return UUID()
+    }
+
+    private func appendTruncatedOutputNoticeIfNeeded() async {
+        guard let session else { return }
+        let messages = await session.context.messages
+        guard case let .assistant(assistant) = messages.last else { return }
+        guard assistant.stopReason == .length,
+              assistant.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              assistant.toolCalls.isEmpty else {
+            return
+        }
+
+        let notice = assistant.reasoningContent.isEmpty
+            ? "模型输出达到长度上限且未返回内容。请新开 session 或简化请求后重试。"
+            : "模型推理达到长度上限，未完成最终回答或工具调用。请新开 session 或简化请求后重试。"
+        appendTranscript(title: "System", body: notice)
+        NewPiLogger.info(
+            category: "app",
+            message: "UI: truncated empty assistant output notice shown",
+            details: "reasoningLength=\(assistant.reasoningContent.count)"
+        )
     }
 
     private func syncTranscriptMessageIndices() async {

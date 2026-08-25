@@ -206,6 +206,46 @@ struct OpenAIStreamParserTests {
     }
 }
 
+@Suite("OpenAICompatibleRequestPolicy")
+struct OpenAICompatibleRequestPolicyTests {
+    @Test("raises DeepSeek max tokens floor")
+    func deepSeekMaxTokens() {
+        let profile = ProviderProfile(
+            name: "DeepSeek",
+            preset: .openaiCompatible,
+            modelID: "deepseek-v4-flash-vision-exp",
+            maxTokens: 8192,
+            options: ["baseURL": "https://api.deepseek.com/v1/chat/completions"]
+        )
+        let model = profile.modelConfig
+        #expect(OpenAICompatibleRequestPolicy.effectiveMaxTokens(model: model, profile: profile) == 16_384)
+    }
+
+    @Test("disables DeepSeek thinking when tools are present")
+    func disableThinkingForTools() {
+        var body: [String: Any] = ["model": "deepseek-v4-flash"]
+        let profile = ProviderProfile(
+            name: "DeepSeek",
+            preset: .openaiCompatible,
+            modelID: "deepseek-v4-flash",
+            options: ["baseURL": "https://api.deepseek.com/v1/chat/completions"]
+        )
+        OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
+            body: &body,
+            model: profile.modelConfig,
+            profile: profile,
+            hasTools: true
+        )
+        #expect((body["thinking"] as? [String: String])?["type"] == "disabled")
+    }
+
+    @Test("DeepSeek quick setup defaults to higher max tokens")
+    func deepSeekProfileDefaults() {
+        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        #expect(profile.maxTokens == 16_384)
+    }
+}
+
 @Suite("LLMProviderFactory profile")
 struct LLMProviderFactoryProfileTests {
     @Test("anthropic preset builds AnthropicProvider")

@@ -185,11 +185,23 @@ public enum NewPiLogger {
         )
     }
 
-    public static func logLLMStreamFinished(category: String, model: String) {
+    public static func logLLMStreamFinished(
+        category: String,
+        model: String,
+        usage: UsageStats? = nil
+    ) {
+        var details = "Model: \(model)"
+        if let usage {
+            details += """
+
+            prompt_tokens=\(usage.inputTokens)
+            completion_tokens=\(usage.outputTokens)
+            """
+        }
         info(
             category: category,
             message: "LLM stream finished",
-            details: "Model: \(model)"
+            details: details
         )
     }
 

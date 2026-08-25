@@ -32,6 +32,8 @@ public struct UserMessage: Sendable, Codable, Equatable {
 
 public struct AssistantMessage: Sendable, Codable, Equatable {
     public var text: String
+    /// Provider-specific chain-of-thought (e.g. DeepSeek `reasoning_content`).
+    public var reasoningContent: String
     public var toolCalls: [ToolCallContent]
     public var provider: String
     public var modelID: String
@@ -41,6 +43,7 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
 
     public init(
         text: String,
+        reasoningContent: String = "",
         toolCalls: [ToolCallContent] = [],
         provider: String,
         modelID: String,
@@ -49,6 +52,7 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
         timestamp: Date = Date()
     ) {
         self.text = text
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.provider = provider
         self.modelID = modelID

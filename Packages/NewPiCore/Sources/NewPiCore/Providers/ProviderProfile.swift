@@ -114,6 +114,7 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
             name: name ?? template.displayName,
             preset: template.preset,
             modelID: template.defaultModels.first ?? "default",
+            maxTokens: template.defaultBaseURL?.contains("deepseek.com") == true ? 16_384 : 8_192,
             options: options
         )
     }

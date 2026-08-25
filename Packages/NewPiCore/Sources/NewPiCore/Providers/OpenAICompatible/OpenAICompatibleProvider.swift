@@ -58,6 +58,9 @@ public enum OpenAIMessageEncoder {
                         ] as [String: Any]
                     }
                 }
+                if !assistant.reasoningContent.isEmpty {
+                    payload["reasoning_content"] = assistant.reasoningContent
+                }
                 encoded.append(payload)
             case let .toolResult(toolResult):
                 encoded.append([
@@ -95,6 +98,7 @@ public enum OpenAIMessageEncoder {
 
 public enum OpenAIStreamEvent: Sendable, Equatable {
     case textDelta(String)
+    case reasoningDelta(String)
     case toolCallDelta(index: Int, id: String?, name: String?, argumentsDelta: String?)
     case completed(reason: String?, inputTokens: Int, outputTokens: Int)
 }
@@ -113,6 +117,8 @@ public struct OpenAIStreamParser: Sendable {
             switch event {
             case let .textDelta(text):
                 output.append(.textDelta(text))
+            case let .reasoningDelta(text):
+                output.append(.thinkingDelta(text))
             case let .toolCallDelta(index, id, name, argumentsDelta):
                 if let id { toolIDs[index] = id }
                 if let name { toolNames[index] = name }
@@ -185,6 +191,9 @@ public struct OpenAISSEDecoder: Sendable {
 
             if let choices = json["choices"] as? [[String: Any]], let choice = choices.first {
                 if let delta = choice["delta"] as? [String: Any] {
+                    if let reasoning = delta["reasoning_content"] as? String, !reasoning.isEmpty {
+                        events.append(.reasoningDelta(reasoning))
+                    }
                     if let content = delta["content"] as? String, !content.isEmpty {
                         events.append(.textDelta(content))
                     }
@@ -265,7 +274,10 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
 
                     var body: [String: Any] = [
                         "model": model.modelID,
-                        "max_tokens": model.maxTokens,
+                        "max_tokens": OpenAICompatibleRequestPolicy.effectiveMaxTokens(
+                            model: model,
+                            profile: profile
+                        ),
                         "stream": true,
                         "messages": [["role": "system", "content": systemPrompt]]
                             + OpenAIMessageEncoder.encodeMessages(messages),
@@ -274,6 +286,13 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     if !tools.isEmpty {
                         body["tools"] = OpenAIMessageEncoder.encodeTools(tools)
                     }
+
+                    OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
+                        body: &body,
+                        model: model,
+                        profile: profile,
+                        hasTools: !tools.isEmpty
+                    )
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
                     let requestBody = request.httpBody ?? Data()
@@ -316,24 +335,39 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     var sseParser = SSEByteStreamParser()
                     let decoder = OpenAISSEDecoder()
                     var parser = OpenAIStreamParser()
+                    var lastUsage = UsageStats()
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
                         for block in sseParser.feed(byte) {
                             let parsed = parser.parse(events: decoder.decodeLines(block))
-                            for event in parsed { continuation.yield(event) }
+                            for event in parsed {
+                                if case let .completed(_, usage) = event {
+                                    lastUsage = usage
+                                }
+                                continuation.yield(event)
+                            }
                         }
                     }
 
                     for block in sseParser.finish() {
                         let parsed = parser.parse(events: decoder.decodeLines(block))
-                        for event in parsed { continuation.yield(event) }
+                        for event in parsed {
+                            if case let .completed(_, usage) = event {
+                                lastUsage = usage
+                            }
+                            continuation.yield(event)
+                        }
                     }
                     for event in parser.finish() {
                         continuation.yield(event)
                     }
 
-                    NewPiLogger.logLLMStreamFinished(category: "openai-compatible", model: model.modelID)
+                    NewPiLogger.logLLMStreamFinished(
+                        category: "openai-compatible",
+                        model: model.modelID,
+                        usage: lastUsage
+                    )
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish(throwing: AgentError.aborted)
@@ -356,6 +390,39 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
 
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+}
+
+enum OpenAICompatibleRequestPolicy {
+    private static let deepSeekMinimumMaxTokens = 16_384
+
+    static func isDeepSeekModel(_ modelID: String, profile: ProviderProfile) -> Bool {
+        let normalizedModel = modelID.lowercased()
+        if normalizedModel.contains("deepseek") {
+            return true
+        }
+
+        let baseURL = profile.option(.baseURL)?.lowercased() ?? ""
+        return baseURL.contains("deepseek.com")
+    }
+
+    static func effectiveMaxTokens(model: ModelConfig, profile: ProviderProfile) -> Int {
+        guard isDeepSeekModel(model.modelID, profile: profile) else {
+            return model.maxTokens
+        }
+        return max(model.maxTokens, deepSeekMinimumMaxTokens)
+    }
+
+    /// DeepSeek V4 thinking tokens share the completion budget with content/tool calls.
+    /// Disable thinking for tool-using coding-agent requests so output budget remains usable.
+    static func applyDeepSeekThinkingPolicy(
+        body: inout [String: Any],
+        model: ModelConfig,
+        profile: ProviderProfile,
+        hasTools: Bool
+    ) {
+        guard isDeepSeekModel(model.modelID, profile: profile), hasTools else { return }
+        body["thinking"] = ["type": "disabled"]
     }
 }
 

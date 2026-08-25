@@ -121,4 +121,48 @@ struct OpenAIStreamParserStopReasonTests {
             }
         })
     }
+
+    @Test("maps reasoning_content deltas to thinkingDelta")
+    func reasoningContentDelta() {
+        let decoder = OpenAISSEDecoder()
+        let lines = [
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me inspect\"}}]}",
+            "",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"}}]}",
+            "",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+            "",
+        ]
+
+        var parser = OpenAIStreamParser()
+        let events = parser.parse(events: decoder.decodeLines(lines))
+        #expect(events.contains { if case let .thinkingDelta(text) = $0 { text == "Let me inspect" } else { false } })
+        #expect(events.contains { if case let .textDelta(text) = $0 { text == "Done" } else { false } })
+    }
+}
+
+@Suite("OpenAIMessageEncoder reasoning")
+struct OpenAIMessageEncoderReasoningTests {
+    @Test("round-trips assistant reasoning_content for tool history")
+    func roundTripsReasoning() {
+        let messages: [AgentMessage] = [
+            .assistant(
+                AssistantMessage(
+                    text: "",
+                    reasoningContent: "Need to read files first.",
+                    toolCalls: [
+                        ToolCallContent(id: "call_1", name: "read", arguments: .object(["path": .string("a.swift")])),
+                    ],
+                    provider: "openaiCompatible",
+                    modelID: "deepseek-v4-flash",
+                    stopReason: .toolUse
+                )
+            ),
+        ]
+
+        let encoded = OpenAIMessageEncoder.encodeMessages(messages)
+        #expect(encoded.count == 1)
+        #expect(encoded[0]["reasoning_content"] as? String == "Need to read files first.")
+        #expect(encoded[0]["tool_calls"] != nil)
+    }
 }

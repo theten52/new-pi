@@ -72,6 +72,7 @@ public struct AgentLoop: Sendable {
                             details: """
                             stopReason=\(assistant.stopReason.rawValue)
                             textLength=\(assistant.text.count)
+                            reasoningLength=\(assistant.reasoningContent.count)
                             toolCalls=\(assistant.toolCalls.count)
                             \(assistant.toolCalls.map { "- \($0.name) (\($0.id))" }.joined(separator: "\n"))
                             """
@@ -153,6 +154,7 @@ public struct AgentLoop: Sendable {
         continuation: AsyncStream<AgentEvent>.Continuation
     ) async throws -> AssistantMessage {
         var text = ""
+        var reasoningContent = ""
         var toolCalls: [ToolCallContent] = []
         var stopReason: StopReason = .stop
         var usage = UsageStats()
@@ -182,6 +184,7 @@ public struct AgentLoop: Sendable {
                 text += delta
                 continuation.yield(.textDelta(delta))
             case let .thinkingDelta(delta):
+                reasoningContent += delta
                 continuation.yield(.thinkingDelta(delta))
             case let .toolCall(call):
                 toolCalls.append(call)
@@ -193,6 +196,7 @@ public struct AgentLoop: Sendable {
 
         return AssistantMessage(
             text: text,
+            reasoningContent: reasoningContent,
             toolCalls: toolCalls,
             provider: config.model.provider,
             modelID: config.model.modelID,
