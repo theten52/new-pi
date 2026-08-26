@@ -63,23 +63,23 @@ struct NewPiChatView: View {
                         }
                     }
                     .onAppear {
-                        pinScrollToBottom(using: proxy)
+                        schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: viewModel.transcript.last?.id) { _, _ in
                         guard viewModel.isStreaming else { return }
-                        pinScrollToBottom(using: proxy)
+                        schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: viewModel.isStreaming) { _, isStreaming in
                         if !isStreaming {
-                            pinScrollToBottom(using: proxy)
+                            schedulePinScrollToBottom(using: proxy)
                         }
                     }
                     .onChange(of: viewModel.transcript.last?.body) { _, _ in
                         guard viewModel.isStreaming else { return }
-                        pinScrollToBottom(using: proxy)
+                        schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: composerHeight) { _, _ in
-                        pinScrollToBottom(using: proxy)
+                        schedulePinScrollToBottom(using: proxy)
                     }
                 }
 
@@ -96,10 +96,25 @@ struct NewPiChatView: View {
         }
         .onPreferenceChange(ComposerHeightPreferenceKey.self) { height in
             guard height > 0 else { return }
-            composerHeight = height
+            scheduleComposerHeightUpdate(height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(viewModel.chatNavigationTitle)
+    }
+
+    /// Defer scroll pinning until after the current layout pass completes.
+    private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            pinScrollToBottom(using: proxy)
+        }
+    }
+
+    /// Preference updates arrive during layout; defer @State writes to the next run loop.
+    private func scheduleComposerHeightUpdate(_ height: CGFloat) {
+        DispatchQueue.main.async {
+            guard abs(composerHeight - height) > 0.5 else { return }
+            composerHeight = height
+        }
     }
 
     private func pinScrollToBottom(using proxy: ScrollViewProxy) {
