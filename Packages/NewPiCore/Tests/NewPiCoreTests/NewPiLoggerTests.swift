@@ -73,8 +73,14 @@ struct NewPiLoggerTests {
         #expect(FileManager.default.fileExists(atPath: projectLog.path))
 
         let projectContents = try String(contentsOf: projectLog, encoding: .utf8)
-        #expect(projectContents.contains(sessionID))
-        #expect(projectContents.contains("[DEBUG] [test-file] disk write"))
+        let globalContents = try String(contentsOf: globalLog, encoding: .utf8)
+        // The file sink is a process-wide singleton, so other concurrently
+        // running suites may append their own log lines to both files around
+        // the time this test writes. We therefore assert only on this test's
+        // own marker line, not on the sole contents or the session header.
+        let marker = "[DEBUG] [test-file] disk write"
+        #expect(projectContents.contains(marker))
         #expect(projectContents.contains("payload"))
+        #expect(globalContents.contains(marker))
     }
 }
