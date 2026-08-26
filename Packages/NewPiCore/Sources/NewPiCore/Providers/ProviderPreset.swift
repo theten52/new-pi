@@ -13,6 +13,7 @@ public enum ProviderPreset: String, Sendable, Codable, CaseIterable, Identifiabl
 public enum ProviderOptionKey: String, Sendable, Codable, CaseIterable {
     case baseURL
     case apiVersion
+    case apiMode
     case organization
     case httpReferer
     case appTitle
@@ -165,6 +166,26 @@ public enum ProviderPresetCatalog {
         environmentVariable: "OPENAI_API_KEY",
         quickSetupDefaults: [
             .baseURL: "https://api.deepseek.com/v1/chat/completions",
+            .apiMode: ProviderAPIMode.chatCompletions.rawValue,
+        ]
+    )
+
+    public static let deepSeekResponsesQuickSetup = ProviderPresetDefinition(
+        preset: .openaiCompatible,
+        displayName: "DeepSeek (Responses)",
+        systemImage: "bolt.circle.fill",
+        defaultBaseURL: "https://api.deepseek.com",
+        defaultModels: [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash-vision-exp",
+        ],
+        optionFields: openaiCompatible.optionFields,
+        credentialRequired: true,
+        environmentVariable: "OPENAI_API_KEY",
+        quickSetupDefaults: [
+            .baseURL: "https://api.deepseek.com",
+            .apiMode: ProviderAPIMode.responses.rawValue,
         ]
     )
 
@@ -179,6 +200,14 @@ public enum ProviderPresetCatalog {
     }
 
     public static var quickAddTemplates: [ProviderPresetDefinition] {
-        [anthropic, openai, deepSeekQuickSetup, openRouter, ollama, openaiCompatible]
+        [
+            anthropic,
+            openai,
+            deepSeekQuickSetup,
+            deepSeekResponsesQuickSetup,
+            openRouter,
+            ollama,
+            openaiCompatible,
+        ]
     }
 }

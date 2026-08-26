@@ -35,6 +35,9 @@ public enum LLMProviderFactory {
                 apiVersion: apiVersion
             )
         case .openai, .openaiCompatible, .openRouter, .ollama:
+            if profile.apiMode == .responses {
+                return ResponsesAPIProvider(profile: profile, apiKeyProvider: apiKeyProvider)
+            }
             return OpenAICompatibleProvider(profile: profile, apiKeyProvider: apiKeyProvider)
         }
     }

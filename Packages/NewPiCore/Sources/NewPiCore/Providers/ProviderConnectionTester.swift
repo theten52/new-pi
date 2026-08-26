@@ -26,6 +26,9 @@ public enum ProviderConnectionTester {
                 return try await testAnthropic(profile: profile, apiKey: apiKey, session: session)
             case .openai, .openaiCompatible, .openRouter:
                 let apiKey = try await credentialResolver.apiKey(for: profile)
+                if profile.apiMode == .responses {
+                    return try await testResponsesAPI(profile: profile, apiKey: apiKey, session: session)
+                }
                 return try await testOpenAICompatible(profile: profile, apiKey: apiKey, session: session)
             }
         } catch {
@@ -77,6 +80,36 @@ public enum ProviderConnectionTester {
 
         let (_, response) = try await session.data(for: request)
         return result(from: response, successMessage: "Anthropic API accepted the request.")
+    }
+
+    private static func testResponsesAPI(
+        profile: ProviderProfile,
+        apiKey: String,
+        session: URLSession
+    ) async throws -> TestResult {
+        let url = try ResponsesEndpoint.resolveURL(for: profile)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+
+        let definition = ProviderPresetCatalog.definition(for: profile.preset)
+        ResponsesRequestPolicy.applyCommonHeaders(
+            request: &request,
+            profile: profile,
+            apiKey: apiKey,
+            definition: definition
+        )
+
+        let body: [String: Any] = [
+            "model": profile.modelID,
+            "input": "ping",
+            "max_output_tokens": 16,
+            "stream": false,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (_, response) = try await session.data(for: request)
+        return result(from: response, successMessage: "Responses API accepted the request.")
     }
 
     private static func testOpenAICompatible(

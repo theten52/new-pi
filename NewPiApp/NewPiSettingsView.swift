@@ -110,6 +110,14 @@ struct NewPiProviderRow: View {
                         .padding(.vertical, 2)
                         .background(.quaternary)
                         .clipShape(Capsule())
+                    if item.profile.supportsAPIModeSelection, item.profile.apiMode == .responses {
+                        Text("Responses")
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.blue.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
                     Text(item.profile.modelID)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -245,11 +253,29 @@ struct NewPiEditProviderSheet: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
+                if profile.supportsAPIModeSelection {
+                    Section("API") {
+                        Picker("API Mode", selection: apiModeBinding) {
+                            ForEach(ProviderAPIMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(apiModeHelpText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if !definition.optionFields.isEmpty {
                     Section("Options") {
                         ForEach(definition.optionFields, id: \.key) { field in
-                            TextField(field.label, text: optionBinding(for: field.key), prompt: Text(field.placeholder))
-                                .textFieldStyle(.roundedBorder)
+                            TextField(
+                                field.label,
+                                text: optionBinding(for: field.key),
+                                prompt: Text(baseURLPlaceholder(for: field.key))
+                            )
+                            .textFieldStyle(.roundedBorder)
                         }
                     }
                 }
@@ -311,6 +337,46 @@ struct NewPiEditProviderSheet: View {
             get: { profile.option(key) ?? "" },
             set: { profile.setOption(key, value: $0) }
         )
+    }
+
+    private var apiModeBinding: Binding<ProviderAPIMode> {
+        Binding(
+            get: { profile.apiMode },
+            set: { newMode in
+                profile.setAPIMode(newMode)
+                normalizeBaseURLForAPIMode(newMode)
+            }
+        )
+    }
+
+    private var apiModeHelpText: String {
+        switch profile.apiMode {
+        case .chatCompletions:
+            "Uses POST /v1/chat/completions (OpenAI-compatible chat format)."
+        case .responses:
+            "Uses POST /responses (OpenAI Responses format). Required for DeepSeek V4 Codex-style models."
+        }
+    }
+
+    private func baseURLPlaceholder(for key: ProviderOptionKey) -> String {
+        if key == .baseURL, profile.supportsAPIModeSelection {
+            return ResponsesEndpoint.defaultBaseURLPlaceholder(for: profile.apiMode)
+        }
+        return definition.optionFields.first(where: { $0.key == key })?.placeholder ?? ""
+    }
+
+    private func normalizeBaseURLForAPIMode(_ mode: ProviderAPIMode) {
+        let current = profile.option(.baseURL) ?? ""
+        switch mode {
+        case .responses:
+            if current.contains("/chat/completions") || current.isEmpty {
+                profile.setOption(.baseURL, value: "https://api.deepseek.com")
+            }
+        case .chatCompletions:
+            if current.contains("deepseek.com"), !current.contains("/chat/completions") {
+                profile.setOption(.baseURL, value: "https://api.deepseek.com/v1/chat/completions")
+            }
+        }
     }
 
     private func testConnection() async {
