@@ -65,6 +65,12 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 | P7-UX | Chat UX polish | done | empty state, auto-scroll, copy, bubbles |
 | P7-MCP | MCP client | done | stdio MCP + Settings UI |
 
+## Backlog — 待实现功能
+
+| ID | Item | Priority | Notes |
+|---|---|---|---|
+| BACKLOG-TOKEN-BAR | 状态栏显示当前对话的 token 用量 | P1 | 在 app 状态栏/工具栏展示当前会话累计的 input/output token。数据源：LLM 流式响应中的 `UsageStats`（见 `ModelTypes.swift`）与会话事件（`AgentSession.events()`）。需累计本回合/整个会话的总量，可同时显示本次与累计值；考虑与 `NewPiViewModel` 的统计状态集成。 |
+
 ## Known environment noise (no action)
 
 - `com.apple.linkd.autoShortcut` — App Intents registration in Xcode debug; benign
