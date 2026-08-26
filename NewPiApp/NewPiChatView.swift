@@ -5,9 +5,17 @@ struct NewPiChatView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @State private var input = ""
     @State private var composerHeight: CGFloat = 120
+    /// After the user jumps via the message rail, skip pin-to-bottom until the next agent turn.
+    @State private var suppressAutoPinDuringStreaming = false
 
     /// Gap between the last bubble bottom and the status bar top.
     private let messageBottomGap: CGFloat = 16
+
+    private var userMessageMarkers: [UserMessageMarker] {
+        viewModel.transcript
+            .filter { $0.title == "You" }
+            .map { UserMessageMarker(id: $0.id, preview: $0.body) }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -15,64 +23,77 @@ struct NewPiChatView: View {
 
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            Spacer(minLength: 0)
+                    ZStack(alignment: .trailing) {
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                Spacer(minLength: 0)
 
-                            LazyVStack(alignment: .leading, spacing: 12) {
-                                if viewModel.transcript.isEmpty {
-                                    NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
-                                }
-
-                                ForEach(viewModel.transcript) { item in
-                                    NewPiTranscriptRow(
-                                        item: item,
-                                        isStreaming: viewModel.isStreaming,
-                                        isActiveStreamingItem: viewModel.isStreaming
-                                            && item.id == viewModel.transcript.last?.id
-                                            && (item.title == "NewPi" || item.title == "Summary")
-                                    ) { index in
-                                        Task { await viewModel.forkFromMessage(index: index) }
+                                LazyVStack(alignment: .leading, spacing: 12) {
+                                    if viewModel.transcript.isEmpty {
+                                        NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
                                     }
-                                    .id(item.id)
+
+                                    ForEach(viewModel.transcript) { item in
+                                        NewPiTranscriptRow(
+                                            item: item,
+                                            isStreaming: viewModel.isStreaming,
+                                            isActiveStreamingItem: viewModel.isStreaming
+                                                && item.id == viewModel.transcript.last?.id
+                                                && (item.title == "NewPi" || item.title == "Summary")
+                                        ) { index in
+                                            Task { await viewModel.forkFromMessage(index: index) }
+                                        }
+                                        .id(item.id)
+                                    }
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Color.clear
+                                    .frame(height: messageBottomGap)
+
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id(NewPiChatScrollSupport.bottomAnchorID)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                            // Gap must sit *above* the scroll anchor so it stays visible when pinned to bottom.
-                            Color.clear
-                                .frame(height: messageBottomGap)
-
-                            Color.clear
-                                .frame(height: 1)
-                                .id(NewPiChatScrollSupport.bottomAnchorID)
+                            .padding()
+                            .frame(
+                                maxWidth: .infinity,
+                                minHeight: scrollViewportHeight,
+                                alignment: .bottom
+                            )
                         }
-                        .padding()
-                        .frame(
-                            maxWidth: .infinity,
-                            minHeight: scrollViewportHeight,
-                            alignment: .bottom
+                        .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .scrollBounceBehavior(.basedOnSize)
+                        .transaction { transaction in
+                            if viewModel.isStreaming {
+                                transaction.disablesAnimations = true
+                            }
+                        }
+
+                        NewPiUserMessageRail(
+                            markers: userMessageMarkers,
+                            onSelect: { messageID in
+                                suppressAutoPinDuringStreaming = true
+                                jumpToUserMessage(messageID, using: proxy)
+                            }
                         )
-                    }
-                    .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .scrollBounceBehavior(.basedOnSize)
-                    .transaction { transaction in
-                        if viewModel.isStreaming {
-                            transaction.disablesAnimations = true
-                        }
+                        .padding(.trailing, 10)
                     }
                     .onAppear {
                         schedulePinScrollToBottom(using: proxy)
                     }
+                    .onChange(of: viewModel.isStreaming) { wasStreaming, isStreaming in
+                        if isStreaming, !wasStreaming {
+                            suppressAutoPinDuringStreaming = false
+                        }
+                        if !isStreaming, !suppressAutoPinDuringStreaming {
+                            schedulePinScrollToBottom(using: proxy)
+                        }
+                    }
                     .onChange(of: viewModel.transcript.last?.id) { _, _ in
                         guard viewModel.isStreaming else { return }
                         schedulePinScrollToBottom(using: proxy)
-                    }
-                    .onChange(of: viewModel.isStreaming) { _, isStreaming in
-                        if !isStreaming {
-                            schedulePinScrollToBottom(using: proxy)
-                        }
                     }
                     .onChange(of: viewModel.transcript.last?.body) { _, _ in
                         guard viewModel.isStreaming else { return }
@@ -102,18 +123,29 @@ struct NewPiChatView: View {
         .navigationTitle(viewModel.chatNavigationTitle)
     }
 
-    /// Defer scroll pinning until after the current layout pass completes.
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
+        guard shouldAutoPinToBottom else { return }
         DispatchQueue.main.async {
             pinScrollToBottom(using: proxy)
         }
     }
 
-    /// Preference updates arrive during layout; defer @State writes to the next run loop.
+    private var shouldAutoPinToBottom: Bool {
+        !(suppressAutoPinDuringStreaming && viewModel.isStreaming)
+    }
+
     private func scheduleComposerHeightUpdate(_ height: CGFloat) {
         DispatchQueue.main.async {
             guard abs(composerHeight - height) > 0.5 else { return }
             composerHeight = height
+        }
+    }
+
+    private func jumpToUserMessage(_ messageID: UUID, using proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(messageID, anchor: .top)
+            }
         }
     }
 

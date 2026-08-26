@@ -11,6 +11,7 @@
 		AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000110000000000000001 /* NewPiLastProjectStore.swift */; };
 		AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000100000000000000001 /* NewPiChatScrollHelper.swift */; };
 		AA0000140000000000000001 /* NewPiChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000140000000000000001 /* NewPiChatView.swift */; };
+		AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000150000000000000001 /* NewPiUserMessageRail.swift */; };
 		AA0000020000000000000001 /* NewPiViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000020000000000000001 /* NewPiViewModel.swift */; };
 		AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000030000000000000001 /* NewPiSettingsView.swift */; };
 		AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */; };
@@ -32,6 +33,7 @@
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
+		BB0000150000000000000001 /* NewPiUserMessageRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiUserMessageRail.swift; sourceTree = "<group>"; };
 		BB0000020000000000000001 /* NewPiViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiViewModel.swift; sourceTree = "<group>"; };
 		BB0000030000000000000001 /* NewPiSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSettingsView.swift; sourceTree = "<group>"; };
 		BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiToolApprovalSheet.swift; sourceTree = "<group>"; };
@@ -75,6 +77,7 @@
 			children = (
 				BB0000010000000000000001 /* NewPiApp.swift */,
 				BB0000140000000000000001 /* NewPiChatView.swift */,
+				BB0000150000000000000001 /* NewPiUserMessageRail.swift */,
 				BB0000100000000000000001 /* NewPiChatScrollHelper.swift */,
 				BB0000110000000000000001 /* NewPiLastProjectStore.swift */,
 				BB0000020000000000000001 /* NewPiViewModel.swift */,
@@ -183,6 +186,7 @@
 			files = (
 				AA0000010000000000000001 /* NewPiApp.swift in Sources */,
 				AA0000140000000000000001 /* NewPiChatView.swift in Sources */,
+				AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */,
 				AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */,
 				AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */,
 				AA0000020000000000000001 /* NewPiViewModel.swift in Sources */,
