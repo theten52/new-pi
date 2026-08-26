@@ -65,10 +65,8 @@
     }
 
     lastPostedHeight = height;
-    if (!streaming) {
-      root.style.minHeight = height + "px";
-    }
-    postHeight(height);
+    root.style.minHeight = height + "px";
+    postHeight(streaming ? height + 12 : height);
   }
 
   function scheduleHeightPost(force) {

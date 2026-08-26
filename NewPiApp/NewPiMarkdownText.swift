@@ -12,24 +12,37 @@ struct NewPiMarkdownText: View {
 
     var body: some View {
         Group {
-            if let rendererScriptURL = NewPiMarkdownWebDocument.rendererScriptURL(), !webRendererFailed {
+            if flushRendering,
+               let rendererScriptURL = NewPiMarkdownWebDocument.rendererScriptURL(),
+               !webRendererFailed {
                 NewPiMarkdownWebRendererView(
                     markdown: content,
                     rendererScriptURL: rendererScriptURL,
                     height: $webHeight,
-                    flushRendering: flushRendering,
+                    flushRendering: true,
                     onRenderingFailed: {
                         webRendererFailed = true
                     }
                 )
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .frame(height: webHeight, alignment: .topLeading)
+                .clipped()
                 .animation(nil, value: webHeight)
                 .accessibilityLabel(content)
             } else {
-                nativeFallback
+                streamingNativeBody
             }
         }
+        .onChange(of: content) { oldContent, newContent in
+            if newContent.count < oldContent.count / 2 {
+                webHeight = 44
+            }
+        }
+    }
+
+    /// Native text during streaming: intrinsic height avoids WebView mount jumps.
+    private var streamingNativeBody: some View {
+        nativeFallback
     }
 
     private var nativeFallback: some View {
@@ -261,8 +274,8 @@ struct NewPiChatEmptyStateView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
         }
-        .frame(maxWidth: .infinity, minHeight: 320)
-        .padding()
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
     }
 }
 

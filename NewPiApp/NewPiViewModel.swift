@@ -37,15 +37,24 @@ struct NewPiProviderListItem: Identifiable, Equatable {
     var id: String { profile.id }
 }
 
+enum NewPiAgentActivity: Equatable {
+    case idle
+    case thinking
+    case runningTool(String)
+    case writing
+}
+
 @MainActor
 final class NewPiViewModel: ObservableObject {
     @Published var projectURL: URL?
     @Published var transcript: [NewPiTranscriptItem] = []
     @Published var isStreaming = false
+    @Published var agentActivity: NewPiAgentActivity = .idle
     @Published var pendingToolApproval: ToolApprovalRequest?
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
     @Published var savedSessions: [SessionSummary] = []
+    @Published var activeSessionID: UUID?
     @Published var activeProviderName = "Anthropic"
     @Published var activeProviderID: String?
     @Published var activeProviderModel = ""
@@ -62,6 +71,60 @@ final class NewPiViewModel: ObservableObject {
     private let jsonlStore = JSONLSessionStore()
     private let sessionExporter = SessionExporter()
     private var liveMessageCount = 0
+
+    var agentStatusPresentation: NewPiAgentStatusPresentation {
+        if pendingToolApproval != nil {
+            return NewPiAgentStatusPresentation(
+                systemImage: "hand.raised.circle",
+                label: "NewPi is waiting for approval…",
+                isActive: true
+            )
+        }
+        if isStreaming {
+            switch agentActivity {
+            case .idle:
+                return NewPiAgentStatusPresentation(
+                    systemImage: "sparkles",
+                    label: "NewPi is working…",
+                    isActive: true
+                )
+            case .thinking:
+                return NewPiAgentStatusPresentation(
+                    systemImage: "brain.head.profile",
+                    label: "NewPi is thinking…",
+                    isActive: true
+                )
+            case .writing:
+                return NewPiAgentStatusPresentation(
+                    systemImage: "text.append",
+                    label: "NewPi is writing…",
+                    isActive: true
+                )
+            case let .runningTool(name):
+                return NewPiAgentStatusPresentation(
+                    systemImage: NewPiAgentStatusPresentation.toolIcon(for: name),
+                    label: "NewPi is running \(name)…",
+                    isActive: true
+                )
+            }
+        }
+        if projectURL == nil {
+            return NewPiAgentStatusPresentation(
+                systemImage: "folder",
+                label: "NewPi is ready — open a project",
+                isActive: false
+            )
+        }
+        return NewPiAgentStatusPresentation(
+            systemImage: "checkmark.circle",
+            label: "NewPi is ready",
+            isActive: false
+        )
+    }
+
+    var chatNavigationTitle: String {
+        isForkedBranch ? "Chat (branch)" : "Chat"
+    }
 
     init() {
         Task {
@@ -360,6 +423,8 @@ final class NewPiViewModel: ObservableObject {
         eventTask?.cancel()
         transcript.removeAll()
         pendingToolApproval = nil
+        isStreaming = false
+        agentActivity = .idle
 
         guard let projectURL else { return }
 
@@ -408,6 +473,7 @@ final class NewPiViewModel: ObservableObject {
             await agentSession.attachPersistence(fileURL: sessionFileURL, header: header)
             session = agentSession
             currentSessionFileURL = sessionFileURL
+            activeSessionID = header.id
 
             let entryIDs = await agentSession.branchEntryIDs()
             rebuildTranscript(from: messages, entryIDs: entryIDs)
@@ -451,6 +517,7 @@ final class NewPiViewModel: ObservableObject {
 
         appendTranscript(title: "You", body: text)
         isStreaming = true
+        agentActivity = .thinking
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
         Task {
             await session.prompt(text)
@@ -492,6 +559,7 @@ final class NewPiViewModel: ObservableObject {
     func abort() {
         NewPiLogger.info(category: "app", message: "User aborted agent run")
         pendingToolApproval = nil
+        agentActivity = .idle
         Task {
             await session?.abort()
             isStreaming = false
@@ -511,6 +579,7 @@ final class NewPiViewModel: ObservableObject {
         switch event {
         case .agentStart:
             isStreaming = true
+            agentActivity = .thinking
             NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
@@ -523,6 +592,7 @@ final class NewPiViewModel: ObservableObject {
                 )
             }
         case let .textDelta(delta):
+            agentActivity = .writing
             appendOrUpdateAssistant(delta)
         case let .thinkingDelta(delta):
             NewPiLogger.debug(
@@ -542,6 +612,7 @@ final class NewPiViewModel: ObservableObject {
                 """
             )
         case let .toolExecutionStart(_, name, arguments):
+            agentActivity = .runningTool(name)
             appendTranscript(title: "Tool", body: "Running \(name)…")
             NewPiLogger.info(
                 category: "app",
@@ -569,8 +640,10 @@ final class NewPiViewModel: ObservableObject {
                 message: result.isError ? "UI: tool failed" : "UI: tool finished",
                 details: "\(name): \(NewPiLogFormat.truncate(result.content, maxLength: 2000))"
             )
+            agentActivity = .thinking
         case .agentEnd:
             isStreaming = false
+            agentActivity = .idle
             pendingToolApproval = nil
             NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
@@ -581,6 +654,7 @@ final class NewPiViewModel: ObservableObject {
         case let .error(error):
             appendTranscript(title: "Error", body: error.localizedDescription)
             isStreaming = false
+            agentActivity = .idle
             pendingToolApproval = nil
             NewPiLogger.error(
                 category: "app",

@@ -58,7 +58,39 @@ final class NewPiRootViewModelStore {
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
-    static let newPiStreamingLayoutDidChange = Notification.Name("com.new-pi.streamingLayoutDidChange")
+    static let newPiStreamingContentDidGrow = Notification.Name("com.new-pi.streamingContentDidGrow")
+}
+
+private struct SessionRow: View {
+    let summary: SessionSummary
+    let isActive: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if isActive {
+                Image(systemName: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.tint)
+                    .padding(.top, 1)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(summary.label ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.subheadline)
+                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+                    .fontWeight(isActive ? .semibold : .regular)
+                Text("\(summary.messageCount) messages")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+    }
 }
 
 struct NewPiRootView: View {
@@ -105,13 +137,10 @@ struct NewPiRootView: View {
                             Button {
                                 Task { await viewModel.resumeSession(summary) }
                             } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(summary.label ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                        .font(.subheadline)
-                                    Text("\(summary.messageCount) messages")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
+                                SessionRow(
+                                    summary: summary,
+                                    isActive: summary.id == viewModel.activeSessionID
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -170,6 +199,7 @@ struct NewPiRootView: View {
             .navigationTitle("NewPi")
         } detail: {
             NewPiChatView(viewModel: viewModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             .toolbar {
                 ToolbarItem(placement: .automatic) {
                     Menu {
@@ -211,126 +241,6 @@ struct NewPiRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowLogs)) { _ in
             showLogs = true
-        }
-    }
-}
-
-struct NewPiStreamingStatusView: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("NewPi is thinking…")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
-        .padding(.horizontal, 4)
-        .accessibilityLabel("NewPi is thinking")
-    }
-}
-
-private enum NewPiChatScrollAnchor {
-    static let bottom = "chat-bottom"
-}
-
-struct NewPiChatView: View {
-    @ObservedObject var viewModel: NewPiViewModel
-    @State private var input = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if viewModel.transcript.isEmpty {
-                            NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
-                        }
-
-                        ForEach(viewModel.transcript) { item in
-                            NewPiTranscriptRow(
-                                item: item,
-                                isStreaming: viewModel.isStreaming,
-                                isActiveStreamingItem: viewModel.isStreaming
-                                    && item.id == viewModel.transcript.last?.id
-                                    && (item.title == "NewPi" || item.title == "Summary")
-                            ) { index in
-                                Task { await viewModel.forkFromMessage(index: index) }
-                            }
-                            .id(item.id)
-                        }
-
-                        if viewModel.isStreaming {
-                            NewPiStreamingStatusView()
-                        }
-
-                        Color.clear
-                            .frame(height: 1)
-                            .id(NewPiChatScrollAnchor.bottom)
-
-                        NewPiChatScrollAnchorView()
-                            .frame(width: 0, height: 0)
-                    }
-                    .padding()
-                }
-                .transaction { transaction in
-                    if viewModel.isStreaming {
-                        transaction.disablesAnimations = true
-                    }
-                }
-                .onAppear {
-                    syncScroll(using: proxy, animated: false)
-                }
-                .onChange(of: viewModel.transcript.count) {
-                    syncScroll(using: proxy, animated: !viewModel.isStreaming)
-                }
-                .onChange(of: viewModel.isStreaming) { _, isStreaming in
-                    syncScroll(using: proxy, animated: !isStreaming)
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .newPiStreamingLayoutDidChange)) { _ in
-                    guard viewModel.isStreaming else { return }
-                    NewPiChatScrollController.shared.requestFollow()
-                }
-            }
-
-            Divider()
-
-            HStack(alignment: .bottom) {
-                TextField("Message NewPi…", text: $input, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1 ... 6)
-                    .disabled(viewModel.isStreaming)
-
-                if viewModel.isStreaming {
-                    Button("Stop") {
-                        viewModel.abort()
-                    }
-                }
-
-                Button("Send") {
-                    let text = input
-                    input = ""
-                    viewModel.send(text)
-                }
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isStreaming)
-            }
-            .padding()
-        }
-        .navigationTitle(viewModel.isForkedBranch ? "Chat (branch)" : "Chat")
-    }
-
-    private func syncScroll(using proxy: ScrollViewProxy, animated: Bool) {
-        if viewModel.isStreaming {
-            NewPiChatScrollController.shared.scrollToBottomImmediately()
-            return
-        }
-
-        if animated {
-            withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(NewPiChatScrollAnchor.bottom, anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo(NewPiChatScrollAnchor.bottom, anchor: .bottom)
         }
     }
 }

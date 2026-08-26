@@ -161,8 +161,6 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var lastRenderedMarkdown: String?
         private var rendererScriptURL: URL?
         private var throttleWorkItem: DispatchWorkItem?
-        private var heightWorkItem: DispatchWorkItem?
-        private var pendingReportedHeight: CGFloat?
         private var isFlushRendering = true
         private var isRenderingJavaScript = false
         private var rerenderAfterFlight = false
@@ -172,9 +170,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var scrollWheelMonitor: Any?
 
         /// Minimum interval between streaming renders (throttle, not debounce).
-        private let throttleInterval: TimeInterval = 0.1
-        private let heightDebounceInterval: TimeInterval = 0.05
-        private let streamingHeightEpsilon: CGFloat = 1
+        private let throttleInterval: TimeInterval = 0.05
+        private let streamingHeightEpsilon: CGFloat = 4
 
         init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
             _height = height
@@ -236,8 +233,6 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func cancelPendingUpdate() {
             throttleWorkItem?.cancel()
             throttleWorkItem = nil
-            heightWorkItem?.cancel()
-            heightWorkItem = nil
         }
 
         func installScrollWheelForwarding(for webView: WKWebView) {
@@ -314,33 +309,22 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         private func scheduleHeightUpdate(_ reportedHeight: CGFloat) {
-            pendingReportedHeight = reportedHeight
-
             if isFlushRendering {
-                heightWorkItem?.cancel()
-                heightWorkItem = nil
                 if abs(reportedHeight - height) >= streamingHeightEpsilon {
                     height = reportedHeight
                 }
                 return
             }
 
-            heightWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self, let pendingReportedHeight = self.pendingReportedHeight else { return }
-                self.heightWorkItem = nil
-                self.applyStreamingHeight(pendingReportedHeight)
-            }
-            heightWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + heightDebounceInterval, execute: workItem)
+            applyStreamingHeight(reportedHeight)
         }
 
         private func applyStreamingHeight(_ reportedHeight: CGFloat) {
             let nextHeight = max(height, max(1, reportedHeight))
-            guard nextHeight > height + streamingHeightEpsilon else { return }
+            guard nextHeight > height else { return }
 
             height = nextHeight
-            NotificationCenter.default.post(name: .newPiStreamingLayoutDidChange, object: nil)
+            NotificationCenter.default.post(name: .newPiStreamingContentDidGrow, object: nil)
         }
 
         // SECURITY-REVIEW: Only local file resources and about:blank are allowed.
