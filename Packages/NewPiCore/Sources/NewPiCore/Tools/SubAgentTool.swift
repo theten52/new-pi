@@ -66,6 +66,7 @@ public struct SubAgentTool: AgentTool {
         let systemPrompt = """
         You are a focused NewPi sub-agent. Complete the assigned task using available tools, \
         then reply with a concise summary of findings or results. Do not ask follow-up questions.
+        Reply in Simplified Chinese (简体中文).
         """
 
         var subContext = AgentContext(

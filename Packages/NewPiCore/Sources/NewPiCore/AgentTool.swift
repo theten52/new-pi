@@ -38,7 +38,8 @@ public struct BeforeToolCallDecision: Sendable, Equatable {
 }
 
 public struct AgentLoopConfig: Sendable {
-    public static let defaultMaxTurns = 20
+    /// Upper bound on LLM↔tool round-trips per user prompt (safety valve against runaway loops).
+    public static let defaultMaxTurns = 200
 
     public var model: ModelConfig
     public var llm: any LLMProvider

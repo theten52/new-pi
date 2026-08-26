@@ -60,6 +60,20 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
         self.usage = usage
         self.timestamp = timestamp
     }
+
+    /// Tolerant decoder for backwards compatibility with older session files
+    /// written before `reasoningContent` (and other optional fields) existed.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.text = try container.decode(String.self, forKey: .text)
+        self.reasoningContent = try container.decodeIfPresent(String.self, forKey: .reasoningContent) ?? ""
+        self.toolCalls = try container.decodeIfPresent([ToolCallContent].self, forKey: .toolCalls) ?? []
+        self.provider = try container.decode(String.self, forKey: .provider)
+        self.modelID = try container.decode(String.self, forKey: .modelID)
+        self.stopReason = try container.decode(StopReason.self, forKey: .stopReason)
+        self.usage = try container.decodeIfPresent(UsageStats.self, forKey: .usage) ?? UsageStats()
+        self.timestamp = try container.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
+    }
 }
 
 public struct ToolResultMessage: Sendable, Codable, Equatable {

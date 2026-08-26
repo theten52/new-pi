@@ -113,18 +113,18 @@ public struct ProviderCredentialResolver: Sendable {
         }
     }
 
-    /// Migrates legacy `anthropic-api-key` to the default profile account (Keychain mode only).
+    /// Migrates legacy `anthropic-api-key` to the default profile account.
+    /// Operates on the unified `store` abstraction, so it works for any
+    /// `CredentialStore` (Keychain, Layered, or in-memory test stores). The
+    /// store itself decides which backing layer(s) to read from and write to.
     public func migrateLegacyAnthropicKeyIfNeeded() throws {
-        guard ProviderCredentialPreferences.load().useKeychain else { return }
-
         let legacyAccount = Self.legacyAnthropicAccount
         let newAccount = Self.keychainAccount(for: ProviderConfigFile.defaultAnthropicProfileID)
-        guard try store.load(account: newAccount) == nil else { return }
-
-        let keychainStore = (store as? LayeredCredentialStore)?.keychainStore ?? KeychainCredentialStore()
-        guard let legacy = try keychainStore.load(account: legacyAccount)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !legacy.isEmpty else {
+        guard try store.load(account: newAccount) == nil,
+              let legacy = try store.load(account: legacyAccount)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !legacy.isEmpty
+        else {
             return
         }
         try store.save(account: newAccount, secret: legacy)

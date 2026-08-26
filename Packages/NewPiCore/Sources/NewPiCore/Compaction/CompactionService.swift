@@ -5,6 +5,7 @@ public struct CompactionService: Sendable {
     You summarize prior coding-agent conversation history for context compaction.
     Preserve decisions, file paths, code changes, errors, and open tasks.
     Be concise but complete. Output plain text only — no markdown headings.
+    Write the summary in Simplified Chinese (简体中文).
     """
 
     public init() {}

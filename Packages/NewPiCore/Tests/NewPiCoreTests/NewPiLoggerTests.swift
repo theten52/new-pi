@@ -25,19 +25,34 @@ struct NewPiLoggerTests {
     @Test("delivers entries to configured handler")
     func handlerDelivery() async {
         final class CaptureBox: @unchecked Sendable {
+            private let lock = NSLock()
             var entries: [NewPiLogEntry] = []
+            func append(_ entry: NewPiLogEntry) {
+                lock.lock()
+                defer { lock.unlock() }
+                entries.append(entry)
+            }
+            func matching(category: String, message: String, details: String) -> [NewPiLogEntry] {
+                lock.lock()
+                defer { lock.unlock() }
+                return entries.filter { $0.category == category && $0.message == message && $0.details == details }
+            }
         }
         let box = CaptureBox()
         NewPiLogger.setHandler { entry in
-            box.entries.append(entry)
+            box.append(entry)
         }
         defer { NewPiLogger.setHandler(nil) }
 
         NewPiLogger.info(category: "test", message: "hello", details: "world", secrets: ["secret"])
-        #expect(box.entries.count == 1)
-        #expect(box.entries[0].category == "test")
-        #expect(box.entries[0].message == "hello")
-        #expect(box.entries[0].details == "world")
+        // The handler is a global; other concurrently running suites may also
+        // emit logs into it. Match on our own marker instead of assuming a
+        // single captured entry.
+        let mine = box.matching(category: "test", message: "hello", details: "world")
+        #expect(mine.count == 1)
+        #expect(mine.first?.category == "test")
+        #expect(mine.first?.message == "hello")
+        #expect(mine.first?.details == "world")
     }
 
     @Test("writes debug entries to configured file sink")

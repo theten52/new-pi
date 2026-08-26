@@ -26,6 +26,30 @@ struct JSONLSessionCodecTests {
         #expect(SessionManager.messages(from: loaded).count == 1)
     }
 
+    @Test("decodes legacy session written before reasoningContent field existed")
+    func legacySessionWithoutReasoningContent() throws {
+        // Reproduces the on-disk format produced by an older `AssistantMessage`
+        // that predated the `reasoningContent` property. The synthesized Codable
+        // would have failed on the assistant entry; the tolerant decoder must not.
+        let legacyJSONL = """
+        {"header":{"createdAt":"2026-08-25T22:37:54Z","id":"F7BB77CD-D89A-4753-814D-8AF5BADC1672","modelID":"deepseek-v4-flash-vision-exp","providerProfileID":"FC50D42A-8332-49D4-A2C0-D9760F6066D3","version":1,"workingDirectory":"file:///tmp/project"},"recordType":"header"}
+        {"entry":{"id":"e2d61a51","message":{"user":{"_0":{"content":"你好","timestamp":"2026-08-25T22:38:01Z"}}},"timestamp":"2026-08-25T22:38:03Z","type":"message"},"recordType":"entry"}
+        {"entry":{"id":"c982ecd8","parentID":"e2d61a51","message":{"assistant":{"_0":{"modelID":"deepseek-v4-flash-vision-exp","provider":"openaiCompatible","stopReason":"stop","text":"你好！","timestamp":"2026-08-25T22:38:03Z","toolCalls":[],"usage":{"inputTokens":0,"outputTokens":0}}}},"timestamp":"2026-08-25T22:38:03Z","type":"message"},"recordType":"entry"}
+        """
+        let codec = JSONLSessionCodec()
+        let context = try codec.decode(Data(legacyJSONL.utf8))
+
+        let messages = SessionManager.messages(from: context)
+        #expect(messages.count == 2)
+        guard case let .assistant(assistant) = messages.last else {
+            Issue.record("expected assistant message as last entry")
+            return
+        }
+        // Missing field must default to empty string, not fail decode.
+        #expect(assistant.reasoningContent == "")
+        #expect(assistant.text == "你好！")
+    }
+
     @Test("branch preserves message order")
     func branchOrder() throws {
         var context = SessionContext(
