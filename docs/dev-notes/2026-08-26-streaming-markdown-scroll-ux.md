@@ -1,5 +1,11 @@
 # 开发笔记：流式 Markdown + 聊天滚屏 UX（2026-08-26）
 
+> ⚠️ **本文档为历史迭代记录，部分结论已过时。**
+>
+> **当前 Agent 请以 [`chat-scroll-layout.md`](./chat-scroll-layout.md) 为准**（基线 commit `5354447`）。
+>
+> 下文保留早期试错时间线，供追溯；勿按本文「AppKit 滚屏 helper / 流式 WebView 统一渲染」等建议改代码。
+
 本文记录 NewPi 聊天界面在 **WKWebView 流式 Markdown 渲染** 与 **自动滚屏** 迭代过程中暴露的问题、已尝试的修复、当前状态与待办。
 
 相关文件：
@@ -148,7 +154,9 @@
 
 ## 当前状态（提交时）
 
-- **自动滚屏**：基本可用（AppKit helper + 底部锚点）。
-- **换行/布局跳动**：**未解决**，暂缓；优先待办见 `docs/TODO.md` Phase 6c（UX-HEIGHT-CLIP、UX-REBUILD-ID 等）。
-- 估算高度 + `.clipped()` 方案已回退（曾导致长文空白页）。
+> **已 supersede**：见 [`chat-scroll-layout.md`](./chat-scroll-layout.md) 与 commit `5354447`。
+
+- ~~自动滚屏：AppKit helper + 底部锚点~~ → 现仅 `ScrollViewReader.scrollTo(anchor)`
+- ~~流式 WebView 统一渲染~~ → 现流式 native Text，完成后再 WebView
+- 换行/布局跳动：通过原生流式 Text **大幅缓解**；终态切 WebView 仍可能有轻微高度调整
 
