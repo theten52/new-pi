@@ -13,6 +13,8 @@ public struct NewPiLogEntry: Sendable, Identifiable, Equatable {
     public let category: String
     public let message: String
     public let details: String?
+    /// Precomputed once at creation so repeated `logText` assembly is cheap.
+    public let formattedMessage: String
 
     public init(
         id: UUID = UUID(),
@@ -28,15 +30,23 @@ public struct NewPiLogEntry: Sendable, Identifiable, Equatable {
         self.category = category
         self.message = message
         self.details = details
+        let header = "[\(Self.formattedTimestamp(timestamp))] [\(level.rawValue)] [\(category)] \(message)"
+        if let details, !details.isEmpty {
+            self.formattedMessage = "\(header)\n\(details)"
+        } else {
+            self.formattedMessage = header
+        }
     }
 
-    public var formattedMessage: String {
-        let formatter = ISO8601DateFormatter()
-        let header = "[\(formatter.string(from: timestamp))] [\(level.rawValue)] [\(category)] \(message)"
-        guard let details, !details.isEmpty else {
-            return header
-        }
-        return "\(header)\n\(details)"
+    /// Thread-safe shared formatter so we do not allocate a new `ISO8601DateFormatter`
+    /// for every log entry (a notable cost when assembling large log views).
+    private nonisolated(unsafe) static let timestampFormatter = ISO8601DateFormatter()
+    private static let timestampFormatterLock = NSLock()
+
+    private static func formattedTimestamp(_ date: Date) -> String {
+        timestampFormatterLock.lock()
+        defer { timestampFormatterLock.unlock() }
+        return timestampFormatter.string(from: date)
     }
 }
 
