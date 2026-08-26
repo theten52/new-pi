@@ -120,6 +120,57 @@ public struct JSONLSessionCodec: Sendable {
 
         return SessionContext(header: header, entries: entries, leafID: entries.last?.id)
     }
+
+    /// Reads only the session header and counts message/compaction entries without decoding message bodies.
+    public func decodeSummary(_ data: Data, fileURL: URL) throws -> SessionSummary {
+        guard !data.isEmpty else {
+            throw JSONLSessionStoreError.emptyFile
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        var header: SessionHeader?
+        var messageCount = 0
+        var lineNumber = 0
+
+        for lineData in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            lineNumber += 1
+            if lineNumber == 1 {
+                let record = try decoder.decode(JSONLSessionRecord.self, from: Data(lineData))
+                guard case let .header(value) = record else {
+                    throw JSONLSessionStoreError.missingHeader
+                }
+                header = value
+                continue
+            }
+
+            if Self.lineCountsTowardMessageTotal(lineData) {
+                messageCount += 1
+            }
+        }
+
+        guard let header else {
+            throw JSONLSessionStoreError.missingHeader
+        }
+
+        return SessionSummary(
+            id: header.id,
+            fileURL: fileURL,
+            createdAt: header.createdAt,
+            label: header.label,
+            messageCount: messageCount,
+            providerProfileID: header.providerProfileID,
+            modelID: header.modelID,
+            archived: header.archived
+        )
+    }
+
+    private static func lineCountsTowardMessageTotal(_ line: some DataProtocol) -> Bool {
+        guard let text = String(data: Data(line), encoding: .utf8) else { return false }
+        guard text.contains(#""recordType":"entry""#) else { return false }
+        return text.contains(#""type":"message""#) || text.contains(#""type":"compaction""#)
+    }
 }
 
 public struct JSONLSessionStore: Sendable {
@@ -132,6 +183,11 @@ public struct JSONLSessionStore: Sendable {
     public func load(from fileURL: URL) throws -> SessionContext {
         let data = try Data(contentsOf: fileURL)
         return try codec.decode(data)
+    }
+
+    public func loadSummary(from fileURL: URL) throws -> SessionSummary {
+        let data = try Data(contentsOf: fileURL)
+        return try codec.decodeSummary(data, fileURL: fileURL)
     }
 
     public func save(_ context: SessionContext, to fileURL: URL) throws {
@@ -152,6 +208,7 @@ public struct SessionSummary: Sendable, Equatable, Identifiable {
     public var messageCount: Int
     public var providerProfileID: String?
     public var modelID: String?
+    public var archived: Bool
 
     public init(
         id: UUID,
@@ -160,7 +217,8 @@ public struct SessionSummary: Sendable, Equatable, Identifiable {
         label: String? = nil,
         messageCount: Int = 0,
         providerProfileID: String? = nil,
-        modelID: String? = nil
+        modelID: String? = nil,
+        archived: Bool = false
     ) {
         self.id = id
         self.fileURL = fileURL
@@ -169,6 +227,7 @@ public struct SessionSummary: Sendable, Equatable, Identifiable {
         self.messageCount = messageCount
         self.providerProfileID = providerProfileID
         self.modelID = modelID
+        self.archived = archived
     }
 }
 
@@ -222,7 +281,8 @@ public enum SessionManager {
     public static func listSessions(
         for projectURL: URL,
         root: URL = sessionsRoot(),
-        store: JSONLSessionStore = JSONLSessionStore()
+        store: JSONLSessionStore = JSONLSessionStore(),
+        includeArchived: Bool = false
     ) throws -> [SessionSummary] {
         let directory = projectDirectory(for: projectURL, root: root)
         guard FileManager.default.fileExists(atPath: directory.path) else {
@@ -241,19 +301,59 @@ public enum SessionManager {
             return lDate > rDate
         }
 
-        return try files.map { fileURL in
-            let context = try store.load(from: fileURL)
-            let messageCount = context.entries.filter { $0.type == .message || $0.type == .compaction }.count
-            return SessionSummary(
-                id: context.header.id,
-                fileURL: fileURL,
-                createdAt: context.header.createdAt,
-                label: context.header.label,
-                messageCount: messageCount,
-                providerProfileID: context.header.providerProfileID,
-                modelID: context.header.modelID
-            )
+        return try files.compactMap { fileURL in
+            let summary = try store.loadSummary(from: fileURL)
+            guard includeArchived || !summary.archived else { return nil }
+            return summary
         }
+    }
+
+    /// Removes session files that contain no messages (header only).
+    @discardableResult
+    public static func deleteEmptySessions(
+        for projectURL: URL,
+        excluding excludedFileURL: URL? = nil,
+        root: URL = sessionsRoot(),
+        store: JSONLSessionStore = JSONLSessionStore()
+    ) throws -> Int {
+        let directory = projectDirectory(for: projectURL, root: root)
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return 0
+        }
+
+        let summaries = try listSessions(
+            for: projectURL,
+            root: root,
+            store: store,
+            includeArchived: true
+        )
+        var deleted = 0
+        for summary in summaries where summary.messageCount == 0 {
+            guard summary.fileURL != excludedFileURL else { continue }
+            try FileManager.default.removeItem(at: summary.fileURL)
+            deleted += 1
+        }
+        return deleted
+    }
+
+    public static func setArchived(
+        _ archived: Bool,
+        for fileURL: URL,
+        store: JSONLSessionStore = JSONLSessionStore()
+    ) throws {
+        var context = try store.load(from: fileURL)
+        context.header.archived = archived
+        try store.save(context, to: fileURL)
+    }
+
+    public static func updateLabel(
+        _ label: String,
+        for fileURL: URL,
+        store: JSONLSessionStore = JSONLSessionStore()
+    ) throws {
+        var context = try store.load(from: fileURL)
+        context.header.label = label
+        try store.save(context, to: fileURL)
     }
 
     public static func findSession(

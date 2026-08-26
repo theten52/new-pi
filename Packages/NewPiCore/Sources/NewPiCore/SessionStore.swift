@@ -8,6 +8,8 @@ public struct SessionHeader: Sendable, Codable, Equatable {
     public var providerProfileID: String?
     public var modelID: String?
     public var label: String?
+    /// When true, session is hidden from the sidebar and excluded from startup listing.
+    public var archived: Bool
 
     public init(
         id: UUID = UUID(),
@@ -16,7 +18,8 @@ public struct SessionHeader: Sendable, Codable, Equatable {
         workingDirectory: URL,
         providerProfileID: String? = nil,
         modelID: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        archived: Bool = false
     ) {
         self.id = id
         self.version = version
@@ -25,6 +28,44 @@ public struct SessionHeader: Sendable, Codable, Equatable {
         self.providerProfileID = providerProfileID
         self.modelID = modelID
         self.label = label
+        self.archived = archived
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case version
+        case createdAt
+        case workingDirectory
+        case providerProfileID
+        case modelID
+        case label
+        case archived
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        workingDirectory = try container.decode(URL.self, forKey: .workingDirectory)
+        providerProfileID = try container.decodeIfPresent(String.self, forKey: .providerProfileID)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        archived = try container.decodeIfPresent(Bool.self, forKey: .archived) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(version, forKey: .version)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encodeIfPresent(providerProfileID, forKey: .providerProfileID)
+        try container.encodeIfPresent(modelID, forKey: .modelID)
+        try container.encodeIfPresent(label, forKey: .label)
+        if archived {
+            try container.encode(archived, forKey: .archived)
+        }
     }
 }
 

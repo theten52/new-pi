@@ -71,6 +71,8 @@ final class NewPiViewModel: ObservableObject {
     private let jsonlStore = JSONLSessionStore()
     private let sessionExporter = SessionExporter()
     private var liveMessageCount = 0
+    private var cachedMCPTools: [MCPAgentTool]?
+    private var mcpToolsLoadTask: Task<[MCPAgentTool], Never>?
 
     var agentStatusPresentation: NewPiAgentStatusPresentation {
         if pendingToolApproval != nil {
@@ -166,6 +168,7 @@ final class NewPiViewModel: ObservableObject {
             projectLog=\(NewPiFileLogSink.shared.projectLogURL(for: url).path)
             """
         )
+        await cleanupEmptySessions()
         await refreshSessionList()
         await startNewSession()
     }
@@ -176,6 +179,7 @@ final class NewPiViewModel: ObservableObject {
             providerConfig = try providerConfigStore.load()
             await refreshProviderList()
             if projectURL != nil {
+                await cleanupEmptySessions()
                 await refreshSessionList()
                 await startNewSession()
             }
@@ -189,7 +193,11 @@ final class NewPiViewModel: ObservableObject {
             savedSessions = []
             return
         }
-        savedSessions = (try? SessionManager.listSessions(for: projectURL)) ?? []
+        let projectPath = projectURL
+        let summaries = await Task.detached(priority: .userInitiated) {
+            (try? SessionManager.listSessions(for: projectPath)) ?? []
+        }.value
+        savedSessions = summaries
     }
 
     func setUseKeychainForCredentials(_ enabled: Bool) {
@@ -223,7 +231,7 @@ final class NewPiViewModel: ObservableObject {
                 profile: profile,
                 credentialResolver: providerCredentialResolver
             )
-            let mcpTools = await MCPToolLoader.loadAgentTools()
+            let mcpTools = await loadMCPTools()
             let newConfig = AgentLoopConfig(
                 model: profile.modelConfig,
                 llm: llm,
@@ -321,9 +329,33 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func resumeSession(_ summary: SessionSummary) async {
+        guard summary.fileURL != currentSessionFileURL else { return }
+
         do {
-            let context = try jsonlStore.load(from: summary.fileURL)
-            await beginSession(restoredContext: context, fileURL: summary.fileURL)
+            let fileURL = summary.fileURL
+            let context = try await Task.detached(priority: .userInitiated) {
+                try JSONLSessionStore().load(from: fileURL)
+            }.value
+            await beginSession(restoredContext: context, fileURL: fileURL)
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
+    func archiveSession(_ summary: SessionSummary) async {
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try SessionManager.setArchived(true, for: summary.fileURL)
+            }.value
+            if summary.fileURL == currentSessionFileURL {
+                await startNewSession()
+            }
+            await refreshSessionList()
+            NewPiLogger.info(
+                category: "app",
+                message: "Session archived",
+                details: summary.fileURL.lastPathComponent
+            )
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
@@ -446,7 +478,7 @@ final class NewPiViewModel: ObservableObject {
                 profile: profile,
                 credentialResolver: providerCredentialResolver
             )
-            let mcpTools = await MCPToolLoader.loadAgentTools()
+            let mcpTools = await loadMCPTools()
             let agentSession = AgentSessionFactory.codingSession(
                 workingDirectory: projectURL,
                 llm: llm,
@@ -487,7 +519,9 @@ final class NewPiViewModel: ObservableObject {
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
 
             subscribe(to: agentSession)
-            await refreshSessionList()
+            if restoredContext == nil {
+                await refreshSessionList()
+            }
             NewPiLogger.info(
                 category: "app",
                 message: "Agent session ready",
@@ -649,6 +683,7 @@ final class NewPiViewModel: ObservableObject {
             Task {
                 await appendTruncatedOutputNoticeIfNeeded()
                 await syncTranscriptMessageIndices()
+                await autoLabelCurrentSessionIfNeeded()
                 await refreshSessionList()
             }
         case let .error(error):
@@ -781,6 +816,79 @@ final class NewPiViewModel: ObservableObject {
             return streamingAssistantID
         }
         return UUID()
+    }
+
+    private func cleanupEmptySessions() async {
+        guard let projectURL else { return }
+        let deleted = await Task.detached(priority: .utility) {
+            (try? SessionManager.deleteEmptySessions(for: projectURL)) ?? 0
+        }.value
+        if deleted > 0 {
+            NewPiLogger.info(
+                category: "app",
+                message: "Deleted empty sessions on startup",
+                details: "count=\(deleted)"
+            )
+        }
+    }
+
+    private func autoLabelCurrentSessionIfNeeded() async {
+        guard let session, currentSessionFileURL != nil else { return }
+        guard let header = await session.attachedSessionHeader else { return }
+        let existingLabel = header.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard existingLabel.isEmpty else { return }
+
+        let messages = await session.context.messages
+        guard let exchange = SessionLabelService.firstExchange(from: messages) else { return }
+
+        do {
+            let profile = try resolveProfile(for: header)
+            let llm = try LLMProviderFactory.make(
+                profile: profile,
+                credentialResolver: providerCredentialResolver
+            )
+            let label = try await SessionLabelService.generateLabel(
+                userMessage: exchange.user,
+                assistantMessage: exchange.assistant,
+                model: profile.modelConfig,
+                llm: llm
+            )
+            guard !label.isEmpty else { return }
+            await session.updateSessionLabel(label)
+            NewPiLogger.info(
+                category: "app",
+                message: "Session auto-labeled",
+                details: label
+            )
+        } catch {
+            NewPiLogger.error(
+                category: "app",
+                message: "Failed to auto-label session",
+                details: error.localizedDescription
+            )
+        }
+    }
+
+    private func loadMCPTools() async -> [MCPAgentTool] {
+        if let cachedMCPTools {
+            return cachedMCPTools
+        }
+        if let mcpToolsLoadTask {
+            return await mcpToolsLoadTask.value
+        }
+
+        let task = Task { await MCPToolLoader.loadAgentTools() }
+        mcpToolsLoadTask = task
+        let tools = await task.value
+        cachedMCPTools = tools
+        mcpToolsLoadTask = nil
+        return tools
+    }
+
+    private func invalidateMCPToolsCache() {
+        cachedMCPTools = nil
+        mcpToolsLoadTask?.cancel()
+        mcpToolsLoadTask = nil
     }
 
     private func appendTruncatedOutputNoticeIfNeeded() async {

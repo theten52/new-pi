@@ -78,9 +78,16 @@ private struct SessionRow: View {
                     .font(.subheadline)
                     .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                     .fontWeight(isActive ? .semibold : .regular)
-                Text("\(summary.messageCount) messages")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if summary.label != nil {
+                        Text(summary.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        Text("·")
+                    }
+                    Text("\(summary.messageCount) messages")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
@@ -143,6 +150,11 @@ struct NewPiRootView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                Button("Archive Session") {
+                                    Task { await viewModel.archiveSession(summary) }
+                                }
+                            }
                         }
 
                         if viewModel.savedSessions.count > recentSessionLimit {

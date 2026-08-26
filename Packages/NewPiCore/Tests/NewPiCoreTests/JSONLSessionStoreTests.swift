@@ -90,6 +90,44 @@ struct SessionManagerTests {
         #expect(fileURL.path.contains(SessionManager.projectHash(for: project)))
     }
 
+    @Test("loadSummary message count matches full decode")
+    func loadSummaryMessageCount() throws {
+        var context = SessionContext(
+            header: SessionHeader(workingDirectory: URL(fileURLWithPath: "/tmp/project"), label: "summary test")
+        )
+        _ = SessionManager.appendMessage(.user("one"), to: &context, parentID: nil)
+        _ = SessionManager.appendMessage(
+            .assistant(
+                AssistantMessage(
+                    text: "two",
+                    provider: "anthropic",
+                    modelID: "claude",
+                    stopReason: .stop
+                )
+            ),
+            to: &context,
+            parentID: context.leafID
+        )
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = SessionManager.makeSessionFileURL(
+            in: root,
+            sessionID: context.header.id,
+            createdAt: context.header.createdAt
+        )
+        let store = JSONLSessionStore()
+        try store.save(context, to: fileURL)
+
+        let summary = try store.loadSummary(from: fileURL)
+        let loaded = try store.load(from: fileURL)
+
+        #expect(summary.id == context.header.id)
+        #expect(summary.label == "summary test")
+        #expect(summary.messageCount == SessionManager.messages(from: loaded).count)
+        #expect(summary.messageCount == 2)
+    }
+
     @Test("lists sessions sorted by recency")
     func listSessions() throws {
         let root = FileManager.default.temporaryDirectory
@@ -109,6 +147,79 @@ struct SessionManagerTests {
     func projectHashStable() {
         let url = URL(fileURLWithPath: "/tmp/stable")
         #expect(SessionManager.projectHash(for: url) == SessionManager.projectHash(for: url))
+    }
+
+    @Test("archived sessions are hidden from default list")
+    func archivedSessionsHidden() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = URL(fileURLWithPath: "/tmp/new-pi-archive-test")
+        let store = JSONLSessionStore()
+
+        let (_, activeURL) = try SessionManager.createSession(
+            workingDirectory: project,
+            label: "active",
+            root: root,
+            store: store
+        )
+        let (_, archivedURL) = try SessionManager.createSession(
+            workingDirectory: project,
+            label: "archived",
+            root: root,
+            store: store
+        )
+        try SessionManager.setArchived(true, for: archivedURL, store: store)
+
+        let visible = try SessionManager.listSessions(for: project, root: root, store: store)
+        let all = try SessionManager.listSessions(
+            for: project,
+            root: root,
+            store: store,
+            includeArchived: true
+        )
+
+        #expect(visible.count == 1)
+        #expect(visible.first?.fileURL.standardizedFileURL == activeURL.standardizedFileURL)
+        #expect(all.count == 2)
+    }
+
+    @Test("deleteEmptySessions removes header-only files")
+    func deleteEmptySessions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = URL(fileURLWithPath: "/tmp/new-pi-delete-empty-test")
+        let store = JSONLSessionStore()
+
+        let (_, emptyURL) = try SessionManager.createSession(workingDirectory: project, root: root, store: store)
+        var context = SessionContext(
+            header: SessionHeader(workingDirectory: project, label: "with messages")
+        )
+        _ = SessionManager.appendMessage(.user("hello"), to: &context, parentID: nil)
+        let nonemptyURL = SessionManager.makeSessionFileURL(
+            in: SessionManager.projectDirectory(for: project, root: root),
+            sessionID: context.header.id,
+            createdAt: context.header.createdAt
+        )
+        try store.save(context, to: nonemptyURL)
+
+        let deleted = try SessionManager.deleteEmptySessions(for: project, root: root, store: store)
+        #expect(deleted == 1)
+        #expect(FileManager.default.fileExists(atPath: emptyURL.path) == false)
+        #expect(FileManager.default.fileExists(atPath: nonemptyURL.path))
+    }
+
+    @Test("updateLabel persists in session header")
+    func updateLabel() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let project = URL(fileURLWithPath: "/tmp/new-pi-label-test")
+        let store = JSONLSessionStore()
+        let (_, fileURL) = try SessionManager.createSession(workingDirectory: project, root: root, store: store)
+
+        try SessionManager.updateLabel("自动命名测试", for: fileURL, store: store)
+        let summary = try store.loadSummary(from: fileURL)
+
+        #expect(summary.label == "自动命名测试")
     }
 }
 

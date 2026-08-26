@@ -19,7 +19,7 @@ struct NewPiChatView: View {
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
 
-                            VStack(alignment: .leading, spacing: 12) {
+                            LazyVStack(alignment: .leading, spacing: 12) {
                                 if viewModel.transcript.isEmpty {
                                     NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
                                 }

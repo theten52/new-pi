@@ -143,6 +143,16 @@ public actor AgentSession {
         persistenceHeader
     }
 
+    public func updateSessionLabel(_ label: String) {
+        guard var persisted = persistenceContext, let fileURL = persistenceFileURL else { return }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        persisted.header.label = trimmed
+        persistenceHeader = persisted.header
+        persistenceContext = persisted
+        try? jsonlStore.save(persisted, to: fileURL)
+    }
+
     public var activeBranchLeafID: String? {
         persistenceLeafID
     }
