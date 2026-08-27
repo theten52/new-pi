@@ -101,6 +101,26 @@ struct BuiltInToolsTests {
         #expect(result.content.contains("[exit 0]"))
     }
 
+    @Test("bash output is capped at maxOutputBytes")
+    func bashOutputCapped() async throws {
+        let project = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: project) }
+
+        // 回归：原实现先 readDataToEndOfFile 再截断，大输出会撑爆内存。
+        let tool = BashTool(timeoutSeconds: 10, maxOutputBytes: 1024)
+        let context = ToolContext(workingDirectory: project)
+        let result = try await tool.execute(
+            id: "1",
+            arguments: .object(["command": .string("head -c 1000000 /dev/zero | tr '\\0' 'a'")]),
+            context: context,
+            onUpdate: nil
+        )
+
+        #expect(result.content.contains("[output truncated at 1024 bytes]"))
+        #expect(result.content.count < 2048)
+        #expect(result.content.contains("[exit 0]"))
+    }
+
     @Test("read accepts file_path alias")
     func readFilePathAlias() async throws {
         let project = try makeTempProject()

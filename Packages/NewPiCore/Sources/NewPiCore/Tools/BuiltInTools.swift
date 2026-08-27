@@ -375,9 +375,28 @@ public struct BashTool: AgentTool {
     }
 
     private func readPipe(_ pipe: Pipe, maxBytes: Int) -> String {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let clipped = data.prefix(maxBytes)
-        return String(data: clipped, encoding: .utf8) ?? ""
+        // 增量读取：内存占用以 maxBytes 为上限（原实现 readDataToEndOfFile
+        // 会先把全部输出读进内存，yes/find / 等命令可致 OOM）。
+        // 注意：达到上限后仍要继续读取并丢弃，否则管道写满后子进程会阻塞。
+        let handle = pipe.fileHandleForReading
+        var collected = Data()
+        var truncated = false
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            if collected.count < maxBytes {
+                let remaining = maxBytes - collected.count
+                collected.append(chunk.prefix(remaining))
+                if chunk.count > remaining { truncated = true }
+            } else {
+                truncated = true
+            }
+        }
+        var text = String(data: collected, encoding: .utf8) ?? ""
+        if truncated {
+            text += "\n…[output truncated at \(maxBytes) bytes]"
+        }
+        return text
     }
 }
 
