@@ -100,4 +100,49 @@ struct SubAgentToolTests {
         #expect(result.isError == false)
         #expect(result.content.contains("Found 3 files"))
     }
+
+    @Test("sub-agent tool calls go through parent approval chain")
+    func subAgentBashRequiresApproval() async throws {
+        let llm = MockLLMProviderBox(scripts: [
+            [
+                .toolCall(ToolCallContent(id: "call_1", name: "bash", arguments: .object(["command": .string("echo hi")]))),
+                .completed(stopReason: .toolUse, usage: UsageStats()),
+            ],
+            [
+                .textDelta("Could not run the command."),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ],
+        ])
+
+        // 回归：子代理曾硬编码 .allowAll，bash 不经审批直接执行。
+        let recorded = ApprovalRecorder()
+        let context = ToolContext(
+            workingDirectory: URL(fileURLWithPath: "/tmp"),
+            toolPolicy: .codingAgentDefault,
+            requestToolApproval: { request in
+                await recorded.record(request.toolName)
+                return .deny
+            }
+        )
+
+        let tool = SubAgentTool(llm: llm, model: AgentLoopTestSupport.defaultModel, maxTurns: 3)
+        let result = try await tool.execute(
+            id: "sub_2",
+            arguments: .object(["task": .string("Run echo")]),
+            context: context,
+            onUpdate: nil
+        )
+
+        #expect(await recorded.names == ["bash"])
+        // bash 被拒绝，子代理带着错误结果收尾
+        #expect(result.isError == false)
+        #expect(result.content.contains("Could not run the command."))
+    }
+}
+
+private actor ApprovalRecorder {
+    private(set) var names: [String] = []
+    func record(_ name: String) {
+        names.append(name)
+    }
 }

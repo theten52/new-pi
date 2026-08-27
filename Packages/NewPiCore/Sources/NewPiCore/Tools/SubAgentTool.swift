@@ -80,7 +80,14 @@ public struct SubAgentTool: AgentTool {
             llm: llm,
             tools: workingTools,
             toolExecution: .parallel,
-            toolPolicy: .allowAll
+            // 继承主会话的审批链与危险评估：子代理的 bash 等副作用工具
+            // 必须走同一套策略，不允许 .allowAll 旁路。
+            toolPolicy: context.toolPolicy,
+            beforeToolCall: context.beforeToolCall,
+            requestToolApproval: context.requestToolApproval,
+            toolApprovalTracker: context.toolApprovalTracker,
+            dangerEvaluator: context.dangerEvaluator,
+            dangerCache: context.dangerCache
         )
 
         let loop = AgentLoop()

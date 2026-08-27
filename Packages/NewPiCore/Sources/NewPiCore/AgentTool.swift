@@ -3,10 +3,34 @@ import Foundation
 public struct ToolContext: Sendable {
     public var workingDirectory: URL
     public var environment: [String: String]
+    /// 工具的审批/危险评估链路（由 AgentLoop 从 config 透传）。
+    /// 需要派生子代理的工具（如 SubAgentTool）应把它继续传给子代理的
+    /// AgentLoopConfig，确保子代理的副作用工具同样受策略约束。
+    public var toolPolicy: ToolPolicyRules
+    public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
+    public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)?
+    public var toolApprovalTracker: ToolApprovalTracker?
+    public var dangerEvaluator: DangerEvaluator?
+    public var dangerCache: DangerAssessmentCache?
 
-    public init(workingDirectory: URL, environment: [String: String] = [:]) {
+    public init(
+        workingDirectory: URL,
+        environment: [String: String] = [:],
+        toolPolicy: ToolPolicyRules = .codingAgentDefault,
+        beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
+        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)? = nil,
+        toolApprovalTracker: ToolApprovalTracker? = nil,
+        dangerEvaluator: DangerEvaluator? = nil,
+        dangerCache: DangerAssessmentCache? = nil
+    ) {
         self.workingDirectory = workingDirectory
         self.environment = environment
+        self.toolPolicy = toolPolicy
+        self.beforeToolCall = beforeToolCall
+        self.requestToolApproval = requestToolApproval
+        self.toolApprovalTracker = toolApprovalTracker
+        self.dangerEvaluator = dangerEvaluator
+        self.dangerCache = dangerCache
     }
 }
 

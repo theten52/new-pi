@@ -223,7 +223,15 @@ public struct AgentLoop: Sendable {
         for tool in config.tools {
             registry[tool.name] = tool
         }
-        let toolContext = ToolContext(workingDirectory: context.workingDirectory)
+        let toolContext = ToolContext(
+            workingDirectory: context.workingDirectory,
+            toolPolicy: config.toolPolicy,
+            beforeToolCall: config.beforeToolCall,
+            requestToolApproval: config.requestToolApproval,
+            toolApprovalTracker: config.toolApprovalTracker,
+            dangerEvaluator: config.dangerEvaluator,
+            dangerCache: config.dangerCache
+        )
 
         NewPiLogger.info(
             category: "tool",
