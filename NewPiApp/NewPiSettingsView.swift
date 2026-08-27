@@ -25,9 +25,14 @@ struct NewPiSettingsView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(viewModel.providerListItems) { item in
-                        NewPiProviderRow(item: item) {
-                            editingProfile = item.profile
-                        }
+                        NewPiProviderRow(
+                            item: item,
+                            onEdit: { editingProfile = item.profile },
+                            onDelete: {
+                                Task { await viewModel.deleteProfile(id: item.profile.id) }
+                            },
+                            canDelete: viewModel.providerListItems.count > 1
+                        )
                     }
                 }
 
@@ -108,6 +113,9 @@ struct NewPiSettingsView: View {
 struct NewPiProviderRow: View {
     let item: NewPiProviderListItem
     let onEdit: () -> Void
+    let onDelete: () -> Void
+    var canDelete: Bool = true
+    @State private var confirmDelete = false
 
     var body: some View {
         HStack {
@@ -137,6 +145,23 @@ struct NewPiProviderRow: View {
             Spacer()
             credentialStatus
             Button("Edit", action: onEdit)
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canDelete)
+            .help(canDelete ? "Delete this provider" : "Cannot delete the last provider")
+            .confirmationDialog(
+                "Delete provider “\(item.profile.name)”?",
+                isPresented: $confirmDelete
+            ) {
+                Button("Delete", role: .destructive) { onDelete() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the profile and its saved API key. This cannot be undone.")
+            }
         }
     }
 

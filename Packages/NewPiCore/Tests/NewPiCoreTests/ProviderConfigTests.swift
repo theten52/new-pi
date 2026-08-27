@@ -65,6 +65,38 @@ struct ProviderConfigStoreTests {
         #expect(loaded.defaultProfileID == ProviderConfigFile.defaultAnthropicProfileID)
     }
 
+    @Test("delete profile removes it and re-points default")
+    func deleteProfile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configURL = directory.appendingPathComponent("providers.json")
+        let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore())
+        let store = ProviderConfigStore(configURL: configURL, credentialResolver: resolver)
+
+        var config = ProviderConfigStore.bootstrapDefaultConfig()
+        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        config.profiles.append(deepSeek)
+        try store.save(config)
+
+        // 删除非默认的 DeepSeek：只移除该 profile，default 保持不变
+        try store.deleteProfile(id: deepSeek.id, from: &config)
+        #expect(config.profiles.count == 1)
+        #expect(config.profiles.first?.id == ProviderConfigFile.defaultAnthropicProfileID)
+        #expect(config.defaultProfileID == ProviderConfigFile.defaultAnthropicProfileID)
+
+        // 删除默认的 Anthropic：default 重设为剩余第一个（此时只剩 DeepSeek 之外没有，回到 0 个）
+        var single = config
+        let defaultID = single.defaultProfileID
+        try store.deleteProfile(id: defaultID!, from: &single)
+        #expect(single.profiles.isEmpty)
+        #expect(single.defaultProfileID == nil)
+
+        // 持久化验证：重新 load 也应一致
+        let reloaded = try store.load()
+        #expect(reloaded.profiles.count == 0)
+        #expect(reloaded.defaultProfileID == nil)
+    }
+
     @Test("new profile becomes default")
     func newProfileDefault() throws {
         let directory = FileManager.default.temporaryDirectory
