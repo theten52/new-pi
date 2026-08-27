@@ -389,7 +389,16 @@ public enum SessionManager {
         from context: SessionContext,
         leafID: String?
     ) -> [(SessionEntry, AgentMessage)] {
-        context.branch(from: leafID).compactMap { entry in
+        let branch = context.branch(from: leafID)
+        // compaction entry 是屏障：它取代之前的历史。重建视图从分支上最后一个
+        // compaction entry 开始，与 CompactionService 压缩后的内存视图一致。
+        let visible: ArraySlice<SessionEntry>
+        if let lastCompaction = branch.lastIndex(where: { $0.type == .compaction }) {
+            visible = branch[lastCompaction...]
+        } else {
+            visible = branch[...]
+        }
+        return visible.compactMap { entry in
             if entry.type == .compaction, let summary = entry.compactionSummary {
                 return (entry, .compactionSummary(summary))
             }
@@ -424,8 +433,36 @@ public enum SessionManager {
         leafID: inout String?
     ) {
         let existing = Self.messages(from: context, leafID: leafID)
-        guard messages.count >= existing.count else { return }
-        guard messagesMatchForSync(Array(messages.prefix(existing.count)), existing) else { return }
+        let prefixMatches = messages.count >= existing.count
+            && messagesMatchForSync(Array(messages.prefix(existing.count)), existing)
+
+        // Compaction 会把消息数组改写为 [summary] + toKeep，与已持久化的前缀
+        // 永远不匹配。识别这一转换：在当前 leaf 之后追加 .compaction 屏障 entry，
+        // 再把屏障之后的所有消息（含被保留的 toKeep）重新挂载为新 entry。
+        // 此前这里静默 return，导致压缩点之后的新消息全部不落盘。
+        if !prefixMatches, !existing.isEmpty, case let .compactionSummary(summary) = messages.first {
+            let barrier = SessionEntry(
+                parentID: leafID,
+                type: .compaction,
+                compactionSummary: summary
+            )
+            context.entries.append(barrier)
+            var parent: String? = barrier.id
+            for message in messages.dropFirst() {
+                let entry = SessionEntry(
+                    parentID: parent,
+                    type: .message,
+                    message: message
+                )
+                context.entries.append(entry)
+                parent = entry.id
+            }
+            leafID = parent
+            context.leafID = leafID
+            return
+        }
+
+        guard prefixMatches else { return }
 
         var parent = leafID
         for message in messages.dropFirst(existing.count) {

@@ -72,6 +72,65 @@ struct JSONLSessionCodecTests {
 
 @Suite("SessionManager")
 struct SessionManagerTests {
+    @Test("syncMessages survives compaction rewrite")
+    func syncAfterCompaction() throws {
+        // 回归：compaction 把消息数组改写为 [summary] + toKeep 后，
+        // 旧的 syncMessages 前缀比对永远失败并静默 return，压缩点之后的
+        // 新消息不再落盘。
+        // 显式整秒时间戳：JSONL 编解码经 ISO8601 会丢失亚秒精度。
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        let u1 = AgentMessage.user(UserMessage(content: "u1", timestamp: t))
+        let a1 = AgentMessage.assistant(
+            AssistantMessage(text: "a1", provider: "mock", modelID: "m", stopReason: .stop, timestamp: t)
+        )
+        let u2 = AgentMessage.user(UserMessage(content: "u2", timestamp: t))
+
+        var context = SessionContext(
+            header: SessionHeader(workingDirectory: URL(fileURLWithPath: "/tmp/project"))
+        )
+        var leafID: String?
+
+        SessionManager.syncMessages([u1, a1, u2], into: &context, leafID: &leafID)
+        #expect(SessionManager.messages(from: context) == [u1, a1, u2])
+
+        // 模拟 CompactionService：[summary] + toKeep
+        let compacted: [AgentMessage] = [.compactionSummary("u1/a1 的摘要"), u2]
+        SessionManager.syncMessages(compacted, into: &context, leafID: &leafID)
+        #expect(SessionManager.messages(from: context) == compacted)
+
+        // 压缩后的新消息必须继续落盘
+        let a2 = AgentMessage.assistant(
+            AssistantMessage(text: "a2", provider: "mock", modelID: "m", stopReason: .stop, timestamp: t)
+        )
+        let continued = compacted + [a2]
+        SessionManager.syncMessages(continued, into: &context, leafID: &leafID)
+        #expect(SessionManager.messages(from: context) == continued)
+
+        // 编解码 round-trip 后视图保持一致
+        let codec = JSONLSessionCodec()
+        let loaded = try codec.decode(codec.encode(context))
+        #expect(SessionManager.messages(from: loaded) == continued)
+    }
+
+    @Test("second compaction replaces the first summary view")
+    func syncAfterSecondCompaction() throws {
+        let u1 = AgentMessage.user("u1")
+        var context = SessionContext(
+            header: SessionHeader(workingDirectory: URL(fileURLWithPath: "/tmp/project"))
+        )
+        var leafID: String?
+
+        SessionManager.syncMessages([u1], into: &context, leafID: &leafID)
+        let first: [AgentMessage] = [.compactionSummary("第一次摘要"), u1]
+        SessionManager.syncMessages(first, into: &context, leafID: &leafID)
+
+        // 第二次压缩：新摘要取代旧摘要视图
+        let u2 = AgentMessage.user("u2")
+        let second: [AgentMessage] = [.compactionSummary("第二次摘要"), u2]
+        SessionManager.syncMessages(second, into: &context, leafID: &leafID)
+        #expect(SessionManager.messages(from: context) == second)
+    }
+
     @Test("creates session file under project hash directory")
     func createSession() throws {
         let root = FileManager.default.temporaryDirectory
