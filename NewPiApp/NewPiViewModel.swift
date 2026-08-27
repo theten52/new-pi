@@ -56,6 +56,8 @@ final class SessionRuntime {
     var isForkedBranch = false
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
+    /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
+    var lastUsedAt = Date()
     /// 流式文本增量合并缓冲：textDelta 先累积到这里，按节流间隔一次性合并进 transcript，
     /// 避免每个 delta 都触发 O(n) 字符串拼接与全量 UI 重渲染（见流式渲染优化）。
     var pendingStreamingDelta = ""
@@ -265,6 +267,29 @@ final class NewPiViewModel: ObservableObject {
         activeRuntime = nil
     }
 
+    /// runtime 缓存上限（不含当前活跃）：超出后按最久未使用淘汰。
+    /// 此前 runtimes 只增不减，旧 runtime（含完整 transcript、事件循环）
+    /// 常驻内存直到切换项目。
+    private static let maxCachedRuntimes = 8
+
+    private func evictIdleRuntimesIfNeeded() {
+        while runtimes.count > Self.maxCachedRuntimes {
+            guard let victim = runtimes.values
+                .filter({ $0 !== activeRuntime })
+                .min(by: { $0.lastUsedAt < $1.lastUsedAt })
+            else { return }
+            NewPiLogger.info(
+                category: "app",
+                message: "Evicting idle session runtime",
+                details: "sessionFile=\(victim.fileURL.path)"
+            )
+            victim.eventTask?.cancel()
+            runtimes.removeValue(forKey: victim.fileURL.path)
+            let session = victim.session
+            Task { await session.shutdown() }
+        }
+    }
+
     func reloadProviders() async {
         do {
             useKeychainForCredentials = ProviderCredentialPreferences.load().useKeychain
@@ -289,6 +314,9 @@ final class NewPiViewModel: ObservableObject {
         let summaries = await Task.detached(priority: .userInitiated) {
             (try? SessionManager.listSessions(for: projectPath)) ?? []
         }.value
+        // 竞态防护：detached 遍历期间用户可能已切换项目，
+        // 旧项目的结果不得写回 UI。
+        guard self.projectURL == projectPath else { return }
         savedSessions = summaries
     }
 
@@ -573,6 +601,7 @@ final class NewPiViewModel: ObservableObject {
             if let header = await existing.session.attachedSessionHeader {
                 activeSessionID = header.id
             }
+            existing.lastUsedAt = Date()
             activeRuntime = existing
             reflectActive()
             await setActiveProviderState(profile)
@@ -638,8 +667,21 @@ final class NewPiViewModel: ObservableObject {
                 )
             }.value
 
+            // 竞态防护：构建期间（MCP 启动可能耗时数秒）用户可能已切换项目，
+            // 此时旧项目的 runtime 不得注册为活跃会话，直接丢弃。
+            guard self.projectURL == projectURL else {
+                NewPiLogger.info(
+                    category: "app",
+                    message: "Discarding session built for previous project",
+                    details: "sessionFile=\(payload.fileURL.path)"
+                )
+                await payload.session.shutdown()
+                return
+            }
+
             let runtime = SessionRuntime(session: payload.session, fileURL: payload.fileURL, sessionID: payload.header.id)
             runtimes[payload.fileURL.path] = runtime
+            evictIdleRuntimesIfNeeded()
             startRuntimeEventLoop(runtime)
             NewPiLogger.info(
                 category: "app",
@@ -656,6 +698,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.branchPointCount = payload.branchPointCount
             runtime.isForkedBranch = payload.isForkedBranch
             runtime.liveMessageCount = payload.liveMessageCount
+            runtime.lastUsedAt = Date()
             activeRuntime = runtime
             activeSessionID = payload.header.id
             reflectActive()
