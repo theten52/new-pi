@@ -26,9 +26,9 @@
 1. **每条 Markdown 消息 = 一个独立的 WKWebView**
    - `NewPiTranscriptRow` 对 `NewPi`/`Summary` 消息渲染 `NewPiMarkdownText`（`NewPiApp/NewPiMarkdownText.swift`），它内部走 `NewPiMarkdownWebRendererView`。
 
-2. **每个 WebView 都是全新配置，无共享进程池**
-   - `NewPiApp/NewPiMarkdownWebRendererView.swift` 的 `makeNSView` 每消息 `WKWebViewConfiguration()` 新建，`websiteDataStore = .nonPersistent()`，`userContentController.add(...)`，**没有共享 `WKProcessPool`**。
-   - ⇒ N 条消息 ≈ N 个 WebKit 内容进程的内存/句柄开销。
+2. **每条消息一个 WKWebView 的内存成本仍在**
+   - `NewPiApp/NewPiMarkdownWebRenderer.swift` 的 `makeNSView` 每条消息 `WKWebViewConfiguration()` 新建、`websiteDataStore = .nonPersistent()`、`userContentController.add(...)`。
+   - ⚠️ 注：macOS 12+ 的 WebKit 会**自动复用内容进程**，`WKProcessPool` 已无意义（创建多实例不再产生任何影响）。所以**内存账不在进程数，而在每条消息一个 WKWebView 的 DOM/图层/JS 渲染树**——这才是保活/虚拟化要解决的问题。
 
 3. **切 Session 时整棵消息视图树销毁重建**
    - 切会话 → `activeRuntime` 切换 → `reflectActive()` 将 `@Published transcript` 整体替换（`NewPiApp/NewPiViewModel.swift`）→ SwiftUI `ForEach` 按 `.id(item.id)` 全部失效 → 每条消息重新 `makeNSView`。此时：
@@ -48,7 +48,7 @@
 | 布局/渲染结果随数据缓存 | Telegram macOS | 每条消息的布局对象在数据入库时算好并随消息模型缓存；切会话只是把缓存布局绑定到复用 cell，不存在"解析"动作 |
 | 视图保活 | Safari | WKWebView 只要不销毁，DOM/布局/滚动偏移全部保留，重新挂回窗口是瞬时的 |
 | model/view 严格分离 | VS Code | 文本模型独立于视图存活；切 tab 只是把视图指向已有模型 + 恢复 view state |
-| 进程池共享 | 多 WebView 应用 | 共享 `WKProcessPool`，消除每消息一个 web 内容进程 |
+| （进程池共享，参考） | 多 WebView 应用 | macOS 12+ 已由 WebKit 自动复用内容进程，`WKProcessPool` 无效，本方案不采用 |
 | 原生文本渲染 | —— | `NSAttributedString` + TextKit 2，KB 级缓存，非连续布局只渲染可见区（长期终态，见文末） |
 
 ---
@@ -57,19 +57,19 @@
 
 > 目标：**任意会话切换都"秒显示"；常切会话原位恢复；被淘汰会话用位图兜底。** 保留现有 Markdown 观感。
 
-### ① 共享 WKProcessPool + 每消息高度/HTML 缓存（基础，必做）
-- 把 `makeNSView` 里每消息新建的配置改为**共享一个配置**（共享 `WKProcessPool`），消灭每消息一个 web 进程的内存/句柄开销。
-- 每条消息缓存**渲染后的 HTML + 实测高度**；冷重建时第一帧即用缓存高度，避免 0→真实高度的渐进测高闪烁。
-- 收益：内存大降、冷加载更快；是放宽保活数量上限的前提。
+### ① 每消息高度缓存（基础，必做）
+- 每条消息完成时缓存**实测高度**（`MarkdownRenderingCache`：NSCache + 哈希 key + 上限，避免无界增长）；冷重建时**第一帧即用缓存高度**，避免 0→真实高度的渐进测高闪烁。
+- 收益：冷重建首帧即正确布局、无高度回跳；配合 ② 保活，让"切到未保活会话"也已明显更快、更稳。
+- 说明：**不做共享 `WKProcessPool`**（macOS 12+ 已无效，WebKit 自动复用内容进程）；内存关键在"每条消息一个 WKWebView 的 DOM/图层"，由 ② 的 LRU 上限控制。
 
 ### ② 会话视图保活 + LRU（上限 5）
 - 把最近若干个会话的整个聊天面板（`ScrollView` + 全部 WebView）**保活**，切换 = 翻转显示/透明度。
 - 收益：保活名单内的会话**零重载**，DOM、测高、**滚动位置全部免费保留**。
 - 实现要点：
   - 隐藏视图用 `.opacity(0)` 保持真实 frame；**不要**用 `.hidden()` 或零尺寸（WKWebView 会停止渲染/加载）。
-  - 后台会话的流式渲染暂停：事件循环继续收数据但不喂 WebView，切回时一次性 flush。
-  - LRU 上限：**5**，超出按最久未使用淘汰；上限值可调（共享进程池后内存可控）。
-  - 内存随保活会话数线性增长，因此必须配套 ① 的进程池共享。
+  - 后台保活会话的流式渲染：**实现保持渲染**（各 WebView 仍按 40–50ms 节流刷新）。这是有意取舍——换取**切回零等待**，而非"暂停后台渲染、切回再一次性 flush"（后者复杂、易引入切回闪一下的回归）。当前桌面场景下后台渲染的 CPU 开销有限，成本主要算在内存（DOM/图层）而非 CPU。
+  - LRU 上限：**5**，超出按最久未使用淘汰（**不淘汰正在流式/有待审批的会话**）；上限值可调。
+  - 内存随保活会话数线性增长（每条消息一个 WKWebView 的 DOM/图层），靠 LRU 上限 + ① 的 NSCache 高度缓存控制。
 
 ### ③ 快照兜底（被淘汰会话）
 - 切走时对会话面板 `takeSnapshot` 存位图；切回被淘汰的会话时**先瞬间显示位图**，后台异步水合活视图后再交叉淡入。
@@ -80,7 +80,7 @@
 
 ## 五、落地步骤（实现顺序）
 
-1. **① 进程池共享 + 高度/HTML 缓存**（`NewPiMarkdownWebRendererView.swift`）—— 改动小、可独立验证。
+1. **① 每消息高度缓存**（`NewPiMarkdownWebRenderer.swift`）—— 改动小、可独立验证。
 2. **② 会话保活 + LRU 上限 5**（`NewPiViewModel` + `NewPiChatView` + 会话面板管理）—— 核心重构。
 3. **③ 快照兜底**（切走存快照 → 切回先显示快照再水合）。
 
@@ -90,7 +90,7 @@
 
 ## 六、内存与权衡 / 风险
 
-- **保活 + 进程池**：内存随保活会话数增长，配合共享进程池后增幅放缓；上限 5 为初值，可按实测内存调整（3–8）。
+- **保活内存**：每条消息一个 WKWebView 的 DOM/图层内存随保活会话数线性增长；WebKit 自动复用内容进程（`WKProcessPool` 已无效）。上限 5 为初值，可按实测内存调整（3–8）。
 - **快照内存**：只缓存最近若干张，LRU 淘汰。
 - **视觉回归**：①②③ 均**不改渲染引擎**，Markdown 预览观感不变——这是选这条路而非"原生 TextKit 2"的关键原因。
 - **长期终态（未纳入本轮）**：原生 `NSAttributedString` + TextKit 2（方案四）可把"每消息一个 WebView"的进程/显存负担彻底去掉，设为长期独立升级项；因工作量大、且需替换渲染引擎（代码高亮、块级样式、测高、交互），易造成视觉回归，本轮不做。
