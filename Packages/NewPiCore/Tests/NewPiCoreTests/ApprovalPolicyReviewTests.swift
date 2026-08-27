@@ -86,7 +86,13 @@ struct ReviewSafetyBoundariesTests {
     // MARK: - 授权追踪 / 持久化边界
 
     @Test func onceScopeIsNotRecorded() async {
-        let tracker = ToolApprovalTracker(persistentStore: PersistentApprovalStore())
+        // 隔离的持久化存储：默认构造器读真实 ~/.new-pi/agent/approvals.json，
+        // 机器上的 forever 记录会让断言失败。
+        let store = PersistentApprovalStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("test-approvals-\(UUID().uuidString).json")
+        )
+        let tracker = ToolApprovalTracker(persistentStore: store)
         await tracker.record(scope: .once, toolName: "bash", fingerprint: "abc", dangerLevel: .medium)
         let authorized = await tracker.isAuthorized(
             toolName: "bash", fingerprint: "abc", dangerLevel: .medium

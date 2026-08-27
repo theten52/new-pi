@@ -8,6 +8,8 @@ struct LayeredCredentialStoreTests {
     func userDefaultsFirst() throws {
         let userDefaults = UserDefaultsCredentialStore(defaults: makeIsolatedDefaults())
         let keychain = KeychainCredentialStore(service: "com.new-pi.test.\(UUID().uuidString)")
+        // 真实 Keychain 写入必须清理，避免每次测试累积垃圾项。
+        defer { try? keychain.delete(account: "provider:test:apiKey") }
         let store = LayeredCredentialStore(
             userDefaultsStore: userDefaults,
             keychainStore: keychain,
@@ -25,6 +27,7 @@ struct LayeredCredentialStoreTests {
     func keychainFallback() throws {
         let userDefaults = UserDefaultsCredentialStore(defaults: makeIsolatedDefaults())
         let keychain = KeychainCredentialStore(service: "com.new-pi.test.\(UUID().uuidString)")
+        defer { try? keychain.delete(account: "provider:test:apiKey") }
         let store = LayeredCredentialStore(
             userDefaultsStore: userDefaults,
             keychainStore: keychain,
@@ -41,6 +44,7 @@ struct LayeredCredentialStoreTests {
     func saveBehavior() throws {
         let userDefaults = UserDefaultsCredentialStore(defaults: makeIsolatedDefaults())
         let keychain = KeychainCredentialStore(service: "com.new-pi.test.\(UUID().uuidString)")
+        defer { try? keychain.delete(account: "provider:test:apiKey") }
         let store = LayeredCredentialStore(
             userDefaultsStore: userDefaults,
             keychainStore: keychain,
@@ -56,11 +60,19 @@ struct LayeredCredentialStoreTests {
     @Test("skips Keychain migration after first attempt")
     func migrationRunsOnce() throws {
         let migrationKey = ProviderCredentialPreferences.keychainMigrationAttemptedKey
-        let hadPriorAttempt = UserDefaults.standard.bool(forKey: migrationKey)
-        defer { UserDefaults.standard.set(hadPriorAttempt, forKey: migrationKey) }
+        // 完整恢复 prior 状态：键原本不存在时应移除而不是留下 false。
+        let priorValue = UserDefaults.standard.object(forKey: migrationKey)
+        defer {
+            if let priorValue {
+                UserDefaults.standard.set(priorValue, forKey: migrationKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: migrationKey)
+            }
+        }
         UserDefaults.standard.set(true, forKey: migrationKey)
 
         let keychain = KeychainCredentialStore(service: "com.new-pi.test.\(UUID().uuidString)")
+        defer { try? keychain.delete(account: "provider:test:apiKey") }
         try keychain.save(account: "provider:test:apiKey", secret: "secret")
 
         let userDefaults = UserDefaultsCredentialStore(defaults: makeIsolatedDefaults())
@@ -96,8 +108,10 @@ struct LayeredCredentialStoreTests {
 struct ProviderCredentialPreferencesTests {
     @Test("defaults useKeychain to false")
     func defaultOff() {
-        let defaults = UserDefaults(suiteName: "com.new-pi.prefs.\(UUID().uuidString)")!
-        defaults.removePersistentDomain(forName: defaults.description)
+        let suiteName = "com.new-pi.prefs.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        // 修正：应传 suite 名（此前误传 defaults.description，清理是死代码）。
+        defaults.removePersistentDomain(forName: suiteName)
         let prefs = ProviderCredentialPreferences.load(defaults: defaults, processEnvironment: [:])
         #expect(prefs.useKeychain == false)
     }

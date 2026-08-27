@@ -63,6 +63,13 @@ struct NewPiLoggerTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let sessionID = UUID().uuidString
+        // 重定向全局日志到临时目录，避免读写真实 ~/.new-pi/agent/logs
+        // （enable 会触发轮转检查，可能动到用户真实日志）。
+        NewPiFileLogSink.shared.setLogsDirectoryOverride(tempDir)
+        defer {
+            NewPiLogger.setProjectLogDirectory(nil)
+            NewPiFileLogSink.shared.setLogsDirectoryOverride(nil)
+        }
         NewPiLogger.bootstrapFileLogging(sessionID: sessionID)
         NewPiLogger.setProjectLogDirectory(tempDir)
         NewPiLogger.debug(category: "test-file", message: "disk write", details: "payload")

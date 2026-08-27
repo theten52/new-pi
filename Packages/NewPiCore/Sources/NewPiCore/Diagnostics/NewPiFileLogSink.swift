@@ -17,8 +17,20 @@ public final class NewPiFileLogSink: @unchecked Sendable {
     private init() {}
 
     public var globalLogURL: URL {
-        Self.defaultLogsDirectory.appendingPathComponent(Self.logFileName)
+        lock.lock()
+        let override = logsDirectoryOverride
+        lock.unlock()
+        return (override ?? Self.defaultLogsDirectory).appendingPathComponent(Self.logFileName)
     }
+
+    /// 测试用：重定向全局日志目录，避免测试读写真实 ~/.new-pi/agent/logs。
+    public func setLogsDirectoryOverride(_ url: URL?) {
+        lock.lock()
+        logsDirectoryOverride = url
+        lock.unlock()
+    }
+
+    private var logsDirectoryOverride: URL?
 
     public static var defaultLogsDirectory: URL {
         NewPiConfig.defaultAgentDirectory
@@ -34,7 +46,8 @@ public final class NewPiFileLogSink: @unchecked Sendable {
     public var activeLogURLs: [URL] {
         lock.lock()
         defer { lock.unlock() }
-        var urls = [globalLogURL]
+        let base = logsDirectoryOverride ?? Self.defaultLogsDirectory
+        var urls = [base.appendingPathComponent(Self.logFileName)]
         if let projectDirectory {
             urls.append(projectLogURL(for: projectDirectory))
         }

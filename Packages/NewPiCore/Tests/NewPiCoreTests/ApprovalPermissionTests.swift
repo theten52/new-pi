@@ -125,8 +125,17 @@ struct ToolApprovalFingerprintTests {
 }
 
 struct ToolApprovalTrackerTests {
+    /// 隔离的持久化存储：默认构造器会读写真实 ~/.new-pi/agent/approvals.json，
+    /// 测试结果不应依赖开发者机器上的既有授权记录。
+    private func makeIsolatedStore() -> PersistentApprovalStore {
+        PersistentApprovalStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("test-approvals-\(UUID().uuidString).json")
+        )
+    }
+
     @Test func highRiskNeverAuthorized() async {
-        let tracker = ToolApprovalTracker(persistentStore: PersistentApprovalStore())
+        let tracker = ToolApprovalTracker(persistentStore: makeIsolatedStore())
         let authorized = await tracker.isAuthorized(
             toolName: "bash",
             fingerprint: "abc",
@@ -136,7 +145,7 @@ struct ToolApprovalTrackerTests {
     }
 
     @Test func sessionApprovalWorks() async {
-        let tracker = ToolApprovalTracker(persistentStore: PersistentApprovalStore())
+        let tracker = ToolApprovalTracker(persistentStore: makeIsolatedStore())
         await tracker.record(scope: .session, toolName: "bash", fingerprint: "abc", dangerLevel: .medium)
         let authorized = await tracker.isAuthorized(
             toolName: "bash",
@@ -147,7 +156,7 @@ struct ToolApprovalTrackerTests {
     }
 
     @Test func sessionApprovalDoesNotMatchDifferentFingerprint() async {
-        let tracker = ToolApprovalTracker(persistentStore: PersistentApprovalStore())
+        let tracker = ToolApprovalTracker(persistentStore: makeIsolatedStore())
         await tracker.record(scope: .session, toolName: "bash", fingerprint: "abc", dangerLevel: .medium)
         let authorized = await tracker.isAuthorized(
             toolName: "bash",
