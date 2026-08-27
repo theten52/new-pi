@@ -4,6 +4,49 @@ import Testing
 
 @Suite("AnthropicMessageEncoder")
 struct AnthropicMessageEncoderTests {
+    @Test("replays thinking block with signature when present")
+    func replaysThinkingBlock() {
+        let messages: [AgentMessage] = [
+            .user("think"),
+            .assistant(
+                AssistantMessage(
+                    text: "答案",
+                    reasoningContent: "思考过程",
+                    reasoningSignature: "sig-abc",
+                    provider: "anthropic",
+                    modelID: "claude-sonnet-4-20250514",
+                    stopReason: .stop
+                )
+            ),
+        ]
+
+        let encoded = AnthropicMessageEncoder.encodeMessages(messages)
+        let assistant = encoded[1]
+        let content = assistant["content"] as? [[String: Any]]
+        #expect(content?.first?["type"] as? String == "thinking")
+        #expect(content?.first?["thinking"] as? String == "思考过程")
+        #expect(content?.first?["signature"] as? String == "sig-abc")
+    }
+
+    @Test("skips thinking replay when signature missing (legacy sessions)")
+    func skipsThinkingWithoutSignature() {
+        let messages: [AgentMessage] = [
+            .assistant(
+                AssistantMessage(
+                    text: "答案",
+                    reasoningContent: "思考过程",
+                    provider: "anthropic",
+                    modelID: "claude-sonnet-4-20250514",
+                    stopReason: .stop
+                )
+            ),
+        ]
+
+        let encoded = AnthropicMessageEncoder.encodeMessages(messages)
+        let content = encoded[0]["content"] as? [[String: Any]]
+        #expect(content?.contains { $0["type"] as? String == "thinking" } != true)
+    }
+
     @Test("encodes assistant tool calls as structured blocks")
     func assistantToolCalls() {
         let messages: [AgentMessage] = [
@@ -163,6 +206,31 @@ struct AnthropicStreamParserTests {
         events += parser.finish()
         let completions = events.filter { if case .completed = $0 { true } else { false } }
         #expect(completions.count == 1)
+    }
+
+    @Test("thinking delta and signature_delta flow through per-block feeding")
+    func thinkingSignatureFlowsThrough() {
+        var decoder = AnthropicSSEDecoder()
+        var parser = AnthropicStreamParser()
+
+        let blocks: [[String]] = [
+            [
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"想一想\"}}",
+            ],
+            [
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-xyz\"}}",
+            ],
+        ]
+
+        var events: [LLMStreamEvent] = []
+        for block in blocks {
+            events += parser.parse(events: decoder.decodeLines(block))
+        }
+
+        #expect(events.contains { if case let .thinkingDelta(text) = $0 { text == "想一想" } else { false } })
+        #expect(events.contains { if case let .thinkingSignature(sig) = $0 { sig == "sig-xyz" } else { false } })
     }
 }
 

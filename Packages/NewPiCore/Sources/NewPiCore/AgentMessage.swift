@@ -34,6 +34,9 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
     public var text: String
     /// Provider-specific chain-of-thought (e.g. DeepSeek `reasoning_content`).
     public var reasoningContent: String
+    /// Anthropic extended thinking 的签名；回放历史时与 thinking block 一起
+    /// 原样带回（无签名的 thinking block 会被 API 拒绝）。
+    public var reasoningSignature: String
     public var toolCalls: [ToolCallContent]
     public var provider: String
     public var modelID: String
@@ -44,6 +47,7 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
     public init(
         text: String,
         reasoningContent: String = "",
+        reasoningSignature: String = "",
         toolCalls: [ToolCallContent] = [],
         provider: String,
         modelID: String,
@@ -53,6 +57,7 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
     ) {
         self.text = text
         self.reasoningContent = reasoningContent
+        self.reasoningSignature = reasoningSignature
         self.toolCalls = toolCalls
         self.provider = provider
         self.modelID = modelID
@@ -67,6 +72,7 @@ public struct AssistantMessage: Sendable, Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.text = try container.decode(String.self, forKey: .text)
         self.reasoningContent = try container.decodeIfPresent(String.self, forKey: .reasoningContent) ?? ""
+        self.reasoningSignature = try container.decodeIfPresent(String.self, forKey: .reasoningSignature) ?? ""
         self.toolCalls = try container.decodeIfPresent([ToolCallContent].self, forKey: .toolCalls) ?? []
         self.provider = try container.decode(String.self, forKey: .provider)
         self.modelID = try container.decode(String.self, forKey: .modelID)

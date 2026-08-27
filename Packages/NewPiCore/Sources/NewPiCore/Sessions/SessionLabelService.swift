@@ -71,7 +71,7 @@ public struct SessionLabelService: Sendable {
                 title += delta
             case .completed:
                 break
-            case .thinkingDelta, .toolCall:
+            case .thinkingDelta, .thinkingSignature, .toolCall:
                 continue
             }
         }

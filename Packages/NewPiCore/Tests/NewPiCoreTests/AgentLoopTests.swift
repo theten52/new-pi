@@ -246,6 +246,37 @@ struct AgentLoopTests {
         }
     }
 
+    @Test("thinking signature is captured into assistant message")
+    func thinkingSignatureCaptured() async {
+        let llm = MockLLMProviderBox(scripts: [[
+            .thinkingDelta("想一想"),
+            .thinkingSignature("sig-xyz"),
+            .textDelta("答"),
+            .completed(stopReason: .stop, usage: UsageStats()),
+        ]])
+
+        let config = AgentLoopConfig(
+            model: AgentLoopTestSupport.defaultModel,
+            llm: llm
+        )
+
+        let events = await AgentLoopTestSupport.collectEvents(
+            prompt: .user("Hi"),
+            context: AgentContext(systemPrompt: "test"),
+            config: config
+        )
+
+        if let snapshot = events.compactMap({
+            if case let .contextSnapshot(context) = $0 { context } else { nil }
+        }).last,
+            case let .assistant(assistant) = snapshot.messages.last {
+            #expect(assistant.reasoningContent == "想一想")
+            #expect(assistant.reasoningSignature == "sig-xyz")
+        } else {
+            Issue.record("Missing assistant snapshot")
+        }
+    }
+
     @Test("LLM failure keeps user message in final snapshot")
     func llmFailureKeepsUserMessageInSnapshot() async {
         let config = AgentLoopConfig(

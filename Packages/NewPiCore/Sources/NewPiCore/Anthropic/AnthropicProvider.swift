@@ -63,6 +63,15 @@ public enum AnthropicMessageEncoder {
 
     private static func assistantPayload(_ assistant: AssistantMessage) -> Any {
         var blocks: [[String: Any]] = []
+        // 开启 extended thinking 时，历史 assistant 轮次须原样带回 thinking
+        // block（含签名），否则 API 400。无签名的旧会话记录无法合法回放，跳过。
+        if !assistant.reasoningContent.isEmpty, !assistant.reasoningSignature.isEmpty {
+            blocks.append([
+                "type": "thinking",
+                "thinking": assistant.reasoningContent,
+                "signature": assistant.reasoningSignature,
+            ])
+        }
         if !assistant.text.isEmpty {
             blocks.append([
                 "type": "text",
@@ -115,6 +124,8 @@ public struct AnthropicStreamParser: Sendable {
                 output.append(.textDelta(text))
             case let .thinkingDelta(text):
                 output.append(.thinkingDelta(text))
+            case let .thinkingSignature(signature):
+                output.append(.thinkingSignature(signature))
             case let .toolInputDelta(id, _, partialJSON):
                 toolInputs[id, default: ""] += partialJSON
             case let .contentBlockStop(id, name, input):
@@ -169,6 +180,7 @@ public struct AnthropicStreamParser: Sendable {
 public enum AnthropicStreamEvent: Sendable, Equatable {
     case textDelta(String)
     case thinkingDelta(String)
+    case thinkingSignature(String)
     case toolInputDelta(id: String, name: String, partialJSON: String)
     case contentBlockStop(id: String, name: String, input: JSONValue?)
     case messageDelta(reason: String?, inputTokens: Int, outputTokens: Int)
@@ -219,6 +231,10 @@ public struct AnthropicSSEDecoder: Sendable {
                     case "thinking_delta":
                         if let thinking = delta["thinking"] as? String {
                             events.append(.thinkingDelta(thinking))
+                        }
+                    case "signature_delta":
+                        if let signature = delta["signature"] as? String {
+                            events.append(.thinkingSignature(signature))
                         }
                     case "input_json_delta":
                         if let index = json["index"] as? Int,
@@ -301,10 +317,14 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                     }
 
                     if model.thinkingLevel != .off {
+                        let budget = thinkingBudget(for: model.thinkingLevel)
                         body["thinking"] = [
                             "type": "enabled",
-                            "budget_tokens": thinkingBudget(for: model.thinkingLevel),
+                            "budget_tokens": budget,
                         ]
+                        // Anthropic 要求 max_tokens > thinking.budget_tokens，
+                        // 相等时请求必 400（例如默认 maxTokens 8192 + high）。
+                        body["max_tokens"] = max(model.maxTokens, budget + 1)
                     }
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)

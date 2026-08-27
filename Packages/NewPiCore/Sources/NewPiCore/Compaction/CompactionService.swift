@@ -88,7 +88,7 @@ public struct CompactionService: Sendable {
                 summary += delta
             case .completed:
                 break
-            case .thinkingDelta, .toolCall:
+            case .thinkingDelta, .thinkingSignature, .toolCall:
                 continue
             }
         }

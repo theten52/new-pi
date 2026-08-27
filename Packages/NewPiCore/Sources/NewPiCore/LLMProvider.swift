@@ -3,6 +3,8 @@ import Foundation
 public enum LLMStreamEvent: Sendable, Equatable {
     case textDelta(String)
     case thinkingDelta(String)
+    /// Anthropic extended thinking 块的签名（signature_delta）。
+    case thinkingSignature(String)
     case toolCall(ToolCallContent)
     case completed(stopReason: StopReason, usage: UsageStats)
 }

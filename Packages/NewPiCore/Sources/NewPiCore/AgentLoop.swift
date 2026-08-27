@@ -162,6 +162,7 @@ public struct AgentLoop: Sendable {
     ) async throws -> AssistantMessage {
         var text = ""
         var reasoningContent = ""
+        var reasoningSignature = ""
         var toolCalls: [ToolCallContent] = []
         var stopReason: StopReason = .stop
         var usage = UsageStats()
@@ -193,6 +194,8 @@ public struct AgentLoop: Sendable {
             case let .thinkingDelta(delta):
                 reasoningContent += delta
                 continuation.yield(.thinkingDelta(delta))
+            case let .thinkingSignature(signature):
+                reasoningSignature += signature
             case let .toolCall(call):
                 toolCalls.append(call)
             case let .completed(reason, stats):
@@ -204,6 +207,7 @@ public struct AgentLoop: Sendable {
         return AssistantMessage(
             text: text,
             reasoningContent: reasoningContent,
+            reasoningSignature: reasoningSignature,
             toolCalls: toolCalls,
             provider: config.model.provider,
             modelID: config.model.modelID,
