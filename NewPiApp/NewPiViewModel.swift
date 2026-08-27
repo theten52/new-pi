@@ -379,7 +379,11 @@ final class NewPiViewModel: ObservableObject {
         do {
             let isNew = !providerConfig.profiles.contains(where: { $0.id == profile.id })
             let trimmedKey = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-            try await providerCredentialResolver.saveAPIKey(apiKeyDraft, for: profile)
+            // 留空表示保留已保存的 key（UI 文案 "Leave blank to keep the existing key."）；
+            // 空值传到 resolver 会被解释为删除凭据。
+            if !trimmedKey.isEmpty {
+                try await providerCredentialResolver.saveAPIKey(trimmedKey, for: profile)
+            }
 
             var setAsDefault = isNew
             if !setAsDefault,
