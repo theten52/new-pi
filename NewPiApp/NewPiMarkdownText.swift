@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Renders markdown via WKWebView (markdown-it + highlight.js) for streaming and completed messages.
-/// Falls back to native AttributedString when the bundle or WebView fails.
+/// 流式中的消息用原生 AttributedString 轻量解析（.inlineOnly，只渲染行内格式），
+/// 完成后切换为 WKWebView（markdown-it + highlight.js）完整解析块级结构与代码高亮。
+/// bundle 或 WebView 不可用时退回原生 AttributedString（完整解析，无高亮）。
 struct NewPiMarkdownText: View {
     let content: String
     var flushRendering: Bool
