@@ -1,37 +1,106 @@
 import AppKit
+import CryptoKit
 import Foundation
 import NewPiCore
 import SwiftUI
 import WebKit
 
-/// 每条消息渲染完成后的高度缓存。冷重建（切换回未保活会话）时首帧直接用缓存高度，
-/// 避免 0 → 真实高度的渐进测高闪烁，也减少一次布局回跳。
-/// 使用 NSCache：内存吃紧时自动淘汰，避免只增不减的内存泄漏；key 用哈希而非完整 markdown。
+/// 每条消息渲染完成后的高度缓存。冷重建（切换回未保活会话）或 rail 跳转前，
+/// 首帧直接用缓存高度，避免 0 → 真实高度的渐进测高闪烁，也让 LazyVStack 的
+/// 滚动位置估算足够准（rail 跳转定位依赖它）。
+/// - key 为内容的 SHA256（跨启动稳定，可持久化；`hashValue` 每次启动都会变，不能用）
+/// - 高度是宽度的函数：条目记录实测时的内容宽度，宽度变化即整体失效并重新填充
+/// - LRU 上限 512 条；debounce 持久化到 ~/.new-pi/agent/markdown-height-cache.json
 @MainActor
 final class MarkdownRenderingCache {
     static let shared = MarkdownRenderingCache()
-    private let cache = NSCache<NSString, NSNumber>()
+
+    private struct Entry: Codable {
+        var height: Double
+        var lastAccess: Date
+    }
+
+    /// 磁盘格式：宽度全局只有一份（同列宽下的高度才有效），宽度变则全表失效。
+    private struct DiskFormat: Codable {
+        var width: Double
+        var entries: [String: Entry]
+    }
+
+    private var entries: [String: Entry] = [:]
+    /// 当前生效的内容宽度（来自最近一次实测）；命中判定要求条目是在同宽度下测得的。
+    private var currentWidth: CGFloat = 0
+    private let maxEntries = 512
+    private var saveWorkItem: DispatchWorkItem?
+    private let fileURL: URL
 
     private init() {
-        cache.countLimit = 512
+        fileURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".new-pi/agent/markdown-height-cache.json")
+        load()
     }
 
-    func height(for markdown: String, flush: Bool) -> CGFloat? {
-        guard let number = cache.object(forKey: key(markdown, flush) as NSString) else { return nil }
-        return CGFloat(number.doubleValue)
+    func height(for markdown: String) -> CGFloat? {
+        guard currentWidth > 0, var entry = entries[key(for: markdown)] else { return nil }
+        entry.lastAccess = Date()
+        entries[key(for: markdown)] = entry
+        return CGFloat(entry.height)
     }
 
-    func setHeight(_ height: CGFloat, for markdown: String, flush: Bool) {
-        cache.setObject(NSNumber(value: height), forKey: key(markdown, flush) as NSString)
+    func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String) {
+        guard height > 0, width > 0 else { return }
+        if currentWidth > 0, abs(width - currentWidth) > 1 {
+            // 宽度变了（窗口 resize）：旧宽度下测得的高度全部失效
+            entries.removeAll()
+        }
+        currentWidth = width
+        entries[key(for: markdown)] = Entry(height: Double(height), lastAccess: Date())
+        evictIfNeeded()
+        scheduleSave()
     }
 
     /// 项目切换等场景下清空缓存，避免跨项目高度残留。
     func clear() {
-        cache.removeAllObjects()
+        entries.removeAll()
+        scheduleSave()
     }
 
-    private func key(_ markdown: String, _ flush: Bool) -> String {
-        "\(flush ? "f" : "s")|\(String(markdown.hashValue))"
+    private func key(for markdown: String) -> String {
+        SHA256.hash(data: Data(markdown.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func evictIfNeeded() {
+        guard entries.count > maxEntries else { return }
+        let overflow = entries.count - maxEntries + maxEntries / 5
+        let oldest = entries.sorted { $0.value.lastAccess < $1.value.lastAccess }.prefix(overflow)
+        for (key, _) in oldest {
+            entries.removeValue(forKey: key)
+        }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let disk = try? JSONDecoder().decode(DiskFormat.self, from: data) else { return }
+        entries = disk.entries
+        currentWidth = CGFloat(disk.width)
+    }
+
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.saveNow()
+        }
+        saveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+    }
+
+    private func saveNow() {
+        let disk = DiskFormat(width: Double(currentWidth), entries: entries)
+        guard let data = try? JSONEncoder().encode(disk) else { return }
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: fileURL, options: .atomic)
     }
 }
 
@@ -336,10 +405,12 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                     rendererScriptURL: rendererScriptURL,
                     streaming: !flush
                 )
-                // 禁止在视图更新周期内写 @Binding（makeNSView 里直接赋值会触发
-                // SwiftUI “Modifying state during view update” 运行时警告），延后到下一轮 runloop 再置初值。
+                // 不要无条件把高度重置为 44：NewPiMarkdownText 已用缓存高度初始化 webHeight，
+                // 这里若覆盖会架空高度缓存，使 LazyVStack 用 44 估算、滚动定位失真。
+                // 仅当无有效初值（<=0）时才兜底为 44。
                 DispatchQueue.main.async { [weak self] in
-                    self?.height = 44
+                    guard let self else { return }
+                    if self.height <= 0 { self.height = 44 }
                 }
                 isPageLoaded = false
                 lastRenderedMarkdown = nil
@@ -487,26 +558,34 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
             guard message.name == "height" else { return }
 
-            let reportedHeight: CGFloat
-            if let number = message.body as? NSNumber {
-                reportedHeight = max(1, CGFloat(truncating: number))
-            } else if let doubleValue = message.body as? Double {
-                reportedHeight = max(1, CGFloat(doubleValue))
+            // JS 上报 { height, width }：高度是宽度的函数，宽度随高度一起进缓存。
+            // 兼容旧的纯数字格式。
+            var reportedHeight: CGFloat = 0
+            var reportedWidth: CGFloat = 0
+            if let payload = message.body as? [String: Any] {
+                reportedHeight = Self.numericValue(payload["height"])
+                reportedWidth = Self.numericValue(payload["width"])
             } else {
-                return
+                reportedHeight = Self.numericValue(message.body)
             }
+            guard reportedHeight > 0 else { return }
 
-            scheduleHeightUpdate(reportedHeight)
+            scheduleHeightUpdate(reportedHeight, width: reportedWidth)
         }
 
-        private func scheduleHeightUpdate(_ reportedHeight: CGFloat) {
+        private static func numericValue(_ value: Any?) -> CGFloat {
+            guard let number = value as? NSNumber else { return 0 }
+            return CGFloat(truncating: number)
+        }
+
+        private func scheduleHeightUpdate(_ reportedHeight: CGFloat, width reportedWidth: CGFloat) {
             if isFlushRendering {
                 if abs(reportedHeight - height) >= streamingHeightEpsilon {
                     height = reportedHeight
                 }
                 // 最终渲染的高度写入缓存，供冷重建首帧直接用，避免 0→真实高度的闪烁。
                 if let markdown = lastRenderedMarkdown ?? pendingMarkdown {
-                    MarkdownRenderingCache.shared.setHeight(reportedHeight, for: markdown, flush: true)
+                    MarkdownRenderingCache.shared.setHeight(reportedHeight, width: reportedWidth, for: markdown)
                 }
                 return
             }

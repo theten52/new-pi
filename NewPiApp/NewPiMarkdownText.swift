@@ -14,8 +14,8 @@ struct NewPiMarkdownText: View {
     init(content: String, flushRendering: Bool) {
         self.content = content
         self.flushRendering = flushRendering
-        // 冷重建时首帧直接用缓存高度，避免 0→真实高度的渐进闪烁。
-        _webHeight = State(initialValue: MarkdownRenderingCache.shared.height(for: content, flush: true) ?? 44)
+        // 冷重建时首帧直接用缓存高度（内容哈希 + 当前宽度命中），避免 0→真实高度的渐进闪烁。
+        _webHeight = State(initialValue: MarkdownRenderingCache.shared.height(for: content) ?? 44)
     }
 
     var body: some View {

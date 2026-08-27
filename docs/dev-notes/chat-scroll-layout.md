@@ -220,6 +220,25 @@ scrollViewportHeight = geometry.size.height - composerHeight
 
 ---
 
+### 3.11 ❌ rail 跳转 `scrollTo(id, .top)` 在长对话中定位不准（已修）
+
+**现象**：多轮长对话中点击消息轨道横线，输入气泡落点偏离视口顶部。
+
+**根因**（三层叠加）：
+
+1. `LazyVStack` 对未布局行只有估算高度，长距离 `scrollTo` 的目标偏移一开始就建立在错误的累计高度上
+2. WebView 行高异步实测：滚动动画按"半成品高度"算落点，动画结束后上方行陆续撑高把目标往下推
+3. 一次性滚动，无收敛机制
+
+**修复（2026-08-28）**：
+
+- **收敛校正**：目标行用行内 `GeometryReader.onChange(of: minY, initial: true)` 直接回调写回面板状态（**不用** `PreferenceKey`——LazyVStack 惰性容器内的 preference 不向父级传播，`onPreferenceChange` 收不到）；`guard isActive` 隔离后台面板，连续 2 次达标提前结束，`jumpCorrectionCountLimit=6` + `jumpCorrectionWindow=1.8s` 双保险防振荡，偏差 >2pt 时无动画重滚贴顶
+- **高度缓存足够准**：`MarkdownRenderingCache` 按"内容 SHA256 + 实测宽度"缓存行高并持久化到 `~/.new-pi/agent/markdown-height-cache.json`，冷重建首帧即正确高度，LazyVStack 的估算误差大幅缩小。注意 `String.hashValue` 每次启动都会变，**不能**用作持久化 key
+
+**教训**：`scrollTo` 在长列表 + 异步测高场景必须配收敛校正；高度缓存的 key 要内容哈希 + 宽度。
+
+---
+
 ## 4. 滚动触发策略（当前实现）
 
 ### 应触发 `pinScrollToBottom`
@@ -292,6 +311,7 @@ private func pinScrollToBottom(using proxy: ScrollViewProxy) {
 - [ ] 仅两条短消息时：不可无意义上下滚动
 - [ ] 流式结束：WebView 终态渲染，无明显布局崩溃
 - [ ] 多轮对话：历史在上方，最新一轮贴底
+- [ ] 长对话 rail 跳转：目标气泡顶部对齐视口顶部，无二次漂移
 
 ---
 
