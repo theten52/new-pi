@@ -186,6 +186,9 @@ struct NewPiSessionPanel: View {
             scheduleComposerHeightUpdate(height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 把"面板是否活跃"注入环境：只有活跃面板的 Markdown WebView 启用滚轮转发，
+        // 否则保活多面板 frame 重叠会让滚轮命中所有层面板、滚动卡死。
+        .environment(\.panelIsActive, isActive)
     }
 
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {

@@ -32,6 +32,20 @@ final class MarkdownRenderingCache {
     }
 }
 
+/// 标记当前会话面板是否为活跃可交互面板。滚轮转发只在活跃面板内生效：
+/// 保活后多个会话面板 frame 重叠，若所有面板的 WebView 都注册转发，
+/// 每个滚轮事件都会同时命中多层面板导致转发混乱、滚动卡死。
+private struct PanelIsActiveEnvironmentKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var panelIsActive: Bool {
+        get { self[PanelIsActiveEnvironmentKey.self] }
+        set { self[PanelIsActiveEnvironmentKey.self] = newValue }
+    }
+}
+
 enum NewPiMarkdownWebDocument {
     enum DocumentError: Error {
         case invalidJSONString
@@ -209,7 +223,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         configureForEmbeddedMarkdown(webView)
         webView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         webView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        context.coordinator.installScrollWheelForwarding(for: webView)
+        // 只在活跃面板内启用滚轮转发，避免保活多面板 frame 重叠导致滚动卡死。
+        if context.environment.panelIsActive {
+            context.coordinator.installScrollWheelForwarding(for: webView)
+        }
         context.coordinator.loadInitial(
             markdown: markdown,
             rendererScriptURL: rendererScriptURL,
@@ -220,6 +237,15 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        // 面板活跃状态变化时同步滚轮转发的启用/停用（inactive 面板不转发）。
+        let shouldForward = context.environment.panelIsActive
+        if shouldForward != context.coordinator.isScrollForwardingEnabled {
+            if shouldForward {
+                context.coordinator.installScrollWheelForwarding(for: webView)
+            } else {
+                context.coordinator.removeScrollWheelForwarding()
+            }
+        }
         context.coordinator.scheduleUpdate(
             markdown: markdown,
             flush: flushRendering,
@@ -281,6 +307,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         /// 页面加载看门狗超时（秒）。
         private let loadWatchdogInterval: TimeInterval = 10
         private weak var scrollForwardingWebView: WKWebView?
+        /// 当前 WebView 是否已启用滚轮转发（随面板活跃状态同步）。
+        var isScrollForwardingEnabled = false
 
         /// Minimum interval between streaming renders (throttle, not debounce).
         private let throttleInterval: TimeInterval = 0.05
@@ -383,6 +411,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func installScrollWheelForwarding(for webView: WKWebView) {
             scrollForwardingWebView = webView
             MarkdownScrollWheelForwarder.shared.register(webView)
+            isScrollForwardingEnabled = true
         }
 
         func removeScrollWheelForwarding() {
@@ -390,6 +419,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                 MarkdownScrollWheelForwarder.shared.unregister(webView)
             }
             scrollForwardingWebView = nil
+            isScrollForwardingEnabled = false
         }
 
         private func renderPending(in webView: WKWebView) {
