@@ -81,6 +81,7 @@ Phase 2 adds:
 new-pi/
 ├── Packages/NewPiCore/     # SwiftPM library + CLI
 ├── NewPiApp/               # SwiftUI macOS app sources
+├── scripts/                # build/package scripts (see scripts/README.md)
 └── docs/                   # architecture notes
 ```
 
@@ -94,6 +95,16 @@ swift run new-pi sessions list --project /path/to/project
 swift run new-pi sessions show <session-id> --project /path/to/project
 swift run new-pi sessions export <session-id> --format markdown [--output file.jsonl]
 ```
+
+## Package (build the macOS app)
+
+```bash
+./scripts/package.sh            # Release → dist/NewPi.app
+./scripts/package.sh Debug      # Debug build
+open dist/NewPi.app             # run the packaged app
+```
+
+Full usage: see [`scripts/README.md`](scripts/README.md).
 
 ## Session branch & export (Phase 8)
 

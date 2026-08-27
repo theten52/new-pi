@@ -7,3 +7,6 @@ xcuserdata/
 .build/
 DerivedData/
 *.dmg
+# Build & packaging artifacts produced by scripts/package.sh
+build/
+dist/
