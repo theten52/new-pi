@@ -37,6 +37,33 @@ struct NewPiProviderListItem: Identifiable, Equatable {
     var id: String { profile.id }
 }
 
+/// 单个 Session 的独立运行态。
+///
+/// 每个 Session 拥有自己的一份转录、流式状态、进行中的审批、以及一个**常驻**的
+/// 事件循环 task。即便 UI 切到别的 session，该 task 仍在后台读取本 session 的事件，
+/// 持续更新它自己的转录与状态，从而做到会话隔离、互不阻塞。只有正在显示的那个
+/// runtime 会被映射到 ViewModel 的 @Published 属性上。
+@MainActor
+final class SessionRuntime {
+    let session: AgentSession
+    let fileURL: URL
+    let sessionID: UUID
+    var transcript: [NewPiTranscriptItem] = []
+    var isStreaming = false
+    var agentActivity: NewPiAgentActivity = .idle
+    var pendingToolApproval: ToolApprovalRequest?
+    var branchPointCount = 0
+    var isForkedBranch = false
+    var liveMessageCount = 0
+    var eventTask: Task<Void, Never>?
+
+    init(session: AgentSession, fileURL: URL, sessionID: UUID) {
+        self.session = session
+        self.fileURL = fileURL
+        self.sessionID = sessionID
+    }
+}
+
 enum NewPiAgentActivity: Equatable {
     case idle
     case thinking
@@ -62,15 +89,17 @@ final class NewPiViewModel: ObservableObject {
     @Published var branchPointCount = 0
     @Published var isForkedBranch = false
 
-    private var session: AgentSession?
-    private var eventTask: Task<Void, Never>?
-    private var currentSessionFileURL: URL?
+    private var runtimes: [String: SessionRuntime] = [:]
+    private var activeRuntime: SessionRuntime? {
+        didSet { reflectActive() }
+    }
+    private var session: AgentSession? { activeRuntime?.session }
+    private var currentSessionFileURL: URL? { activeRuntime?.fileURL }
     private let providerConfigStore = ProviderConfigStore()
     private let providerCredentialResolver = ProviderCredentialResolver.makeDefault()
     @Published var useKeychainForCredentials = ProviderCredentialPreferences.load().useKeychain
     private let jsonlStore = JSONLSessionStore()
     private let sessionExporter = SessionExporter()
-    private var liveMessageCount = 0
     private var cachedMCPTools: [MCPAgentTool]?
     private var mcpToolsLoadTask: Task<[MCPAgentTool], Never>?
 
@@ -157,7 +186,12 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func openProject(at url: URL) async {
-        projectURL = url.standardizedFileURL
+        let newURL = url.standardizedFileURL
+        // 切换到不同项目：先停掉并清理上个项目的后台 sessions（避免其继续运行/泄漏）。
+        if newURL != projectURL {
+            await stopAllLiveSessions()
+        }
+        projectURL = newURL
         NewPiLastProjectStore.save(url)
         NewPiLogStore.shared.setProjectDirectory(projectURL)
         NewPiLogger.info(
@@ -171,6 +205,16 @@ final class NewPiViewModel: ObservableObject {
         await cleanupEmptySessions()
         await refreshSessionList()
         await startNewSession()
+    }
+
+    /// 停止并清空所有后台的 AgentSession（在切换项目等场景下调用）。
+    private func stopAllLiveSessions() async {
+        for runtime in runtimes.values {
+            runtime.eventTask?.cancel()
+            await runtime.session.shutdown()
+        }
+        runtimes.removeAll()
+        activeRuntime = nil
     }
 
     func reloadProviders() async {
@@ -362,16 +406,22 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func forkFromMessage(index: Int) async {
-        guard !isStreaming, let session else { return }
+        guard !isStreaming, let runtime = activeRuntime else { return }
+        let session = runtime.session
         do {
             try await session.fork(atMessageIndex: index)
             let messages = await session.context.messages
-            rebuildTranscript(from: messages, entryIDs: await session.branchEntryIDs())
-            branchPointCount = await session.branchPointCount()
-            isForkedBranch = branchPointCount > 0
-            appendTranscript(title: "System", body: "Forked conversation from message \(index + 1). New replies continue on this branch.")
+            rebuildTranscript(from: messages, entryIDs: await session.branchEntryIDs(), on: runtime)
+            runtime.branchPointCount = await session.branchPointCount()
+            runtime.isForkedBranch = runtime.branchPointCount > 0
+            reflectActive()
+            appendTranscript(
+                title: "System",
+                body: "Forked conversation from message \(index + 1). New replies continue on this branch.",
+                on: runtime
+            )
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(title: "Error", body: error.localizedDescription, on: runtime)
         }
     }
 
@@ -452,13 +502,87 @@ final class NewPiViewModel: ObservableObject {
     }
 
     private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
-        eventTask?.cancel()
-        transcript.removeAll()
-        pendingToolApproval = nil
-        isStreaming = false
-        agentActivity = .idle
-
         guard let projectURL else { return }
+
+        let profile: ProviderProfile
+        do {
+            profile = try resolveProfile(for: restoredContext?.header)
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+            activeProviderReady = false
+            return
+        }
+
+        let restoredMessages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
+        let mcpTools = await loadMCPTools()
+        let sessionFileURL: URL
+
+        // 获取 / 复用目标 session 的 runtime。切回一个已在后台运行的 session 时直接
+        // 复用其 runtime（含常驻事件循环），既保留其进行中的输出，也避免同一 session
+        // 文件被多个并发的 agent 写入。
+        let runtime: SessionRuntime
+        let isNewRuntime: Bool
+        if let fileURL {
+            sessionFileURL = fileURL
+            if let existing = runtimes[fileURL.path] {
+                runtime = existing
+                isNewRuntime = false
+            } else {
+                do {
+                    let llm = try LLMProviderFactory.make(
+                        profile: profile,
+                        credentialResolver: providerCredentialResolver
+                    )
+                    let built = AgentSessionFactory.codingSession(
+                        workingDirectory: projectURL,
+                        llm: llm,
+                        model: profile.modelConfig,
+                        restoredMessages: restoredMessages,
+                        additionalTools: mcpTools
+                    )
+                    let header = restoredContext!.header
+                    await built.attachPersistence(fileURL: fileURL, header: header)
+                    runtime = SessionRuntime(session: built, fileURL: fileURL, sessionID: header.id)
+                    runtimes[fileURL.path] = runtime
+                    startRuntimeEventLoop(runtime)
+                    isNewRuntime = true
+                } catch {
+                    appendTranscript(title: "Error", body: error.localizedDescription)
+                    activeProviderReady = false
+                    return
+                }
+            }
+        } else {
+            // 全新 session。
+            do {
+                let llm = try LLMProviderFactory.make(
+                    profile: profile,
+                    credentialResolver: providerCredentialResolver
+                )
+                let created = try SessionManager.createSession(
+                    workingDirectory: projectURL,
+                    providerProfileID: profile.id,
+                    modelID: profile.modelID
+                )
+                let built = AgentSessionFactory.codingSession(
+                    workingDirectory: projectURL,
+                    llm: llm,
+                    model: profile.modelConfig,
+                    additionalTools: mcpTools
+                )
+                let header = created.context.header
+                await built.attachPersistence(fileURL: created.fileURL, header: header)
+                runtime = SessionRuntime(session: built, fileURL: created.fileURL, sessionID: header.id)
+                runtimes[created.fileURL.path] = runtime
+                startRuntimeEventLoop(runtime)
+                isNewRuntime = true
+                sessionFileURL = created.fileURL
+            } catch {
+                appendTranscript(title: "Error", body: error.localizedDescription)
+                activeProviderReady = false
+                return
+            }
+        }
 
         NewPiLogger.info(
             category: "app",
@@ -466,100 +590,67 @@ final class NewPiViewModel: ObservableObject {
             details: """
             project=\(projectURL.path)
             restored=\(restoredContext != nil)
-            sessionFile=\(fileURL?.path ?? "new")
+            sessionFile=\(sessionFileURL.path)
             """
         )
 
-        do {
-            let profile = try resolveProfile(for: restoredContext?.header)
-            let messages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
-
-            let llm = try LLMProviderFactory.make(
-                profile: profile,
-                credentialResolver: providerCredentialResolver
-            )
-            let mcpTools = await loadMCPTools()
-            let agentSession = AgentSessionFactory.codingSession(
-                workingDirectory: projectURL,
-                llm: llm,
-                model: profile.modelConfig,
-                restoredMessages: messages,
-                additionalTools: mcpTools
-            )
-
-            let sessionFileURL: URL
-            let header: SessionHeader
-            if let restoredContext, let fileURL {
-                sessionFileURL = fileURL
-                header = restoredContext.header
-            } else {
-                let created = try SessionManager.createSession(
-                    workingDirectory: projectURL,
-                    providerProfileID: profile.id,
-                    modelID: profile.modelID
-                )
-                sessionFileURL = created.fileURL
-                header = created.context.header
-            }
-
-            await agentSession.attachPersistence(fileURL: sessionFileURL, header: header)
-            session = agentSession
-            currentSessionFileURL = sessionFileURL
+        // 切换到该 runtime 所对应的视图状态（didSet 触发 reflectActive）。
+        activeRuntime = runtime
+        if let header = await runtime.session.attachedSessionHeader {
             activeSessionID = header.id
-
-            let entryIDs = await agentSession.branchEntryIDs()
-            rebuildTranscript(from: messages, entryIDs: entryIDs)
-            branchPointCount = await agentSession.branchPointCount()
-            isForkedBranch = branchPointCount > 0
-            liveMessageCount = messages.count
-
-            activeProviderID = profile.id
-            activeProviderName = profile.name
-            activeProviderModel = profile.modelID
-            activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
-
-            subscribe(to: agentSession)
-            if restoredContext == nil {
-                await refreshSessionList()
-            }
-            NewPiLogger.info(
-                category: "app",
-                message: "Agent session ready",
-                details: """
-                provider=\(profile.name) model=\(profile.modelID)
-                mcpTools=\(mcpTools.count)
-                restoredMessages=\(messages.count)
-                sessionFile=\(sessionFileURL.path)
-                """
-            )
-        } catch {
-            NewPiLogger.error(
-                category: "app",
-                message: "Failed to begin session",
-                details: error.localizedDescription
-            )
-            appendTranscript(title: "Error", body: error.localizedDescription)
-            activeProviderReady = false
         }
+
+        // 只有新创建 runtime 时才需要从 context 重建 transcript（此时常驻事件循环刚启动，
+        // 尚无内容）。复用的 runtime 其转录一直由事件循环维护，直接反映即可，避免覆盖
+        // 正在流式、尚未提交的部分输出。
+        if isNewRuntime {
+            let displayMessages = await runtime.session.context.messages
+            let entryIDs = await runtime.session.branchEntryIDs()
+            rebuildTranscript(from: displayMessages, entryIDs: entryIDs, on: runtime)
+            runtime.branchPointCount = await runtime.session.branchPointCount()
+            runtime.isForkedBranch = runtime.branchPointCount > 0
+            runtime.liveMessageCount = displayMessages.count
+        }
+        reflectActive()
+
+        activeProviderID = profile.id
+        activeProviderName = profile.name
+        activeProviderModel = profile.modelID
+        activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+
+        if restoredContext == nil {
+            await refreshSessionList()
+        }
+        NewPiLogger.info(
+            category: "app",
+            message: "Agent session ready",
+            details: """
+            provider=\(profile.name) model=\(profile.modelID)
+            mcpTools=\(mcpTools.count)
+            restoredMessages=\(restoredMessages.count)
+            sessionFile=\(sessionFileURL.path)
+            """
+        )
     }
 
     func send(_ text: String) {
-        guard let session else {
+        guard let runtime = activeRuntime else {
             appendTranscript(title: "System", body: "Open a project first.")
             return
         }
 
-        appendTranscript(title: "You", body: text)
-        isStreaming = true
-        agentActivity = .thinking
+        appendTranscript(title: "You", body: text, on: runtime)
+        runtime.isStreaming = true
+        runtime.agentActivity = .thinking
+        reflectActive()
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
         Task {
-            await session.prompt(text)
+            await runtime.session.prompt(text)
         }
     }
 
     func approvePendingTool(scope: ApprovalScope = .once) {
-        guard let request = pendingToolApproval, let session else {
+        guard let request = pendingToolApproval, let runtime = activeRuntime else {
             NewPiLogger.error(category: "app", message: "Approve tapped with no pending request")
             return
         }
@@ -568,14 +659,15 @@ final class NewPiViewModel: ObservableObject {
             message: "User approved tool",
             details: "requestID=\(request.id) tool=\(request.toolName) scope=\(scope.rawValue)"
         )
-        pendingToolApproval = nil
+        runtime.pendingToolApproval = nil
+        reflectActive()
         Task {
-            await session.respondToToolApproval(requestID: request.id, approved: true, scope: scope)
+            await runtime.session.respondToToolApproval(requestID: request.id, approved: true, scope: scope)
         }
     }
 
     func denyPendingTool() {
-        guard let request = pendingToolApproval, let session else {
+        guard let request = pendingToolApproval, let runtime = activeRuntime else {
             NewPiLogger.error(category: "app", message: "Deny tapped with no pending request")
             return
         }
@@ -584,41 +676,69 @@ final class NewPiViewModel: ObservableObject {
             message: "User denied tool",
             details: "requestID=\(request.id) tool=\(request.toolName)"
         )
-        pendingToolApproval = nil
+        runtime.pendingToolApproval = nil
+        reflectActive()
         Task {
-            await session.respondToToolApproval(requestID: request.id, approved: false)
+            await runtime.session.respondToToolApproval(requestID: request.id, approved: false)
         }
     }
 
     func abort() {
         NewPiLogger.info(category: "app", message: "User aborted agent run")
-        pendingToolApproval = nil
-        agentActivity = .idle
+        guard let runtime = activeRuntime else { return }
+        runtime.pendingToolApproval = nil
+        runtime.agentActivity = .idle
+        reflectActive()
         Task {
-            await session?.abort()
-            isStreaming = false
+            await runtime.session.abort()
+            runtime.isStreaming = false
+            reflectActive()
         }
     }
 
-    private func subscribe(to session: AgentSession) {
-        eventTask = Task { @MainActor in
+    /// 为某个 runtime 建立常驻事件循环：持续读取该 AgentSession 的事件，更新它自己
+    /// 的转录与状态。**不会**因 UI 切到其它 session 而取消，从而保证后台 session 的
+    /// 输出一直累积在自己名下。
+    private func startRuntimeEventLoop(_ runtime: SessionRuntime) {
+        runtime.eventTask?.cancel()
+        let session = runtime.session
+        runtime.eventTask = Task { @MainActor in
             let stream = await session.events()
             for await event in stream {
-                handle(event)
+                handle(event, on: runtime)
             }
         }
     }
 
-    private func handle(_ event: AgentEvent) {
+    /// 把 activeRuntime 的状态映射到 @Published 属性上，供 SwiftUI 渲染当前会话。
+    private func reflectActive() {
+        guard let r = activeRuntime else {
+            transcript = []
+            isStreaming = false
+            agentActivity = .idle
+            pendingToolApproval = nil
+            branchPointCount = 0
+            isForkedBranch = false
+            return
+        }
+        transcript = r.transcript
+        isStreaming = r.isStreaming
+        agentActivity = r.agentActivity
+        pendingToolApproval = r.pendingToolApproval
+        branchPointCount = r.branchPointCount
+        isForkedBranch = r.isForkedBranch
+    }
+
+    private func handle(_ event: AgentEvent, on runtime: SessionRuntime) {
         switch event {
         case .agentStart:
-            isStreaming = true
-            agentActivity = .thinking
+            runtime.isStreaming = true
+            runtime.agentActivity = .thinking
             NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
             if case let .compactionSummary(summary) = message {
-                appendTranscript(title: "Summary", body: summary)
+                appendTranscript(title: "Summary", body: summary, on: runtime)
                 NewPiLogger.info(
                     category: "agent",
                     message: "Context compacted",
@@ -626,8 +746,8 @@ final class NewPiViewModel: ObservableObject {
                 )
             }
         case let .textDelta(delta):
-            agentActivity = .writing
-            appendOrUpdateAssistant(delta)
+            runtime.agentActivity = .writing
+            appendOrUpdateAssistant(delta, on: runtime)
         case let .thinkingDelta(delta):
             NewPiLogger.debug(
                 category: "app",
@@ -635,7 +755,7 @@ final class NewPiViewModel: ObservableObject {
                 details: "length=\(delta.count)"
             )
         case let .toolApprovalRequired(request):
-            pendingToolApproval = request
+            runtime.pendingToolApproval = request
             NewPiLogger.info(
                 category: "app",
                 message: "UI: showing tool approval sheet",
@@ -646,8 +766,8 @@ final class NewPiViewModel: ObservableObject {
                 """
             )
         case let .toolExecutionStart(_, name, arguments):
-            agentActivity = .runningTool(name)
-            appendTranscript(title: "Tool", body: "Running \(name)…")
+            runtime.agentActivity = .runningTool(name)
+            appendTranscript(title: "Tool", body: "Running \(name)…", on: runtime)
             NewPiLogger.info(
                 category: "app",
                 message: "UI: tool execution started",
@@ -655,11 +775,11 @@ final class NewPiViewModel: ObservableObject {
             )
         case let .toolExecutionEnd(_, name, result):
             let body = result.isError ? "Error: \(result.content)" : result.content
-            if let lastIndex = transcript.indices.last,
-               transcript[lastIndex].title == "Tool",
-               transcript[lastIndex].body.hasPrefix("Running ") {
-                let running = transcript[lastIndex]
-                transcript[lastIndex] = NewPiTranscriptItem(
+            if let lastIndex = runtime.transcript.indices.last,
+               runtime.transcript[lastIndex].title == "Tool",
+               runtime.transcript[lastIndex].body.hasPrefix("Running ") {
+                let running = runtime.transcript[lastIndex]
+                runtime.transcript[lastIndex] = NewPiTranscriptItem(
                     id: running.id,
                     title: "Tool \(name)",
                     body: body,
@@ -667,30 +787,30 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: running.sessionEntryID
                 )
             } else {
-                appendTranscript(title: "Tool \(name)", body: body)
+                appendTranscript(title: "Tool \(name)", body: body, on: runtime)
             }
             NewPiLogger.info(
                 category: "app",
                 message: result.isError ? "UI: tool failed" : "UI: tool finished",
                 details: "\(name): \(NewPiLogFormat.truncate(result.content, maxLength: 2000))"
             )
-            agentActivity = .thinking
+            runtime.agentActivity = .thinking
         case .agentEnd:
-            isStreaming = false
-            agentActivity = .idle
-            pendingToolApproval = nil
+            runtime.isStreaming = false
+            runtime.agentActivity = .idle
+            runtime.pendingToolApproval = nil
             NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
-                await appendTruncatedOutputNoticeIfNeeded()
-                await syncTranscriptMessageIndices()
-                await autoLabelCurrentSessionIfNeeded()
+                await appendTruncatedOutputNoticeIfNeeded(on: runtime)
+                await syncTranscriptMessageIndices(on: runtime)
+                await autoLabelCurrentSessionIfNeeded(on: runtime)
                 await refreshSessionList()
             }
         case let .error(error):
-            appendTranscript(title: "Error", body: error.localizedDescription)
-            isStreaming = false
-            agentActivity = .idle
-            pendingToolApproval = nil
+            appendTranscript(title: "Error", body: error.localizedDescription, on: runtime)
+            runtime.isStreaming = false
+            runtime.agentActivity = .idle
+            runtime.pendingToolApproval = nil
             NewPiLogger.error(
                 category: "app",
                 message: "UI: agent error shown to user",
@@ -698,6 +818,9 @@ final class NewPiViewModel: ObservableObject {
             )
         default:
             break
+        }
+        if runtime === activeRuntime {
+            reflectActive()
         }
     }
 
@@ -726,26 +849,26 @@ final class NewPiViewModel: ObservableObject {
         return try providerConfig.defaultProfile()
     }
 
-    private func rebuildTranscript(from messages: [AgentMessage], entryIDs: [String] = []) {
+    private func rebuildTranscript(from messages: [AgentMessage], entryIDs: [String] = [], on runtime: SessionRuntime) {
         let existingByMessageIndex = Dictionary(
-            uniqueKeysWithValues: transcript.compactMap { item -> (Int, UUID)? in
+            uniqueKeysWithValues: runtime.transcript.compactMap { item -> (Int, UUID)? in
                 guard let messageIndex = item.messageIndex else { return nil }
                 return (messageIndex, item.id)
             }
         )
         let existingByEntryID = Dictionary(
-            uniqueKeysWithValues: transcript.compactMap { item -> (String, UUID)? in
+            uniqueKeysWithValues: runtime.transcript.compactMap { item -> (String, UUID)? in
                 guard let sessionEntryID = item.sessionEntryID else { return nil }
                 return (sessionEntryID, item.id)
             }
         )
-        let streamingAssistantID = transcript.last(where: { $0.title == "NewPi" && $0.messageIndex == nil })?.id
+        let streamingAssistantID = runtime.transcript.last(where: { $0.title == "NewPi" && $0.messageIndex == nil })?.id
         let lastAssistantMessageIndex = messages.lastIndex(where: {
             if case .assistant = $0 { return true }
             return false
         })
 
-        transcript.removeAll()
+        runtime.transcript.removeAll()
         for (index, message) in messages.enumerated() {
             let entryID = index < entryIDs.count ? entryIDs[index] : nil
             let preservedID = preservedTranscriptID(
@@ -759,7 +882,7 @@ final class NewPiViewModel: ObservableObject {
             )
             switch message {
             case let .user(user):
-                transcript.append(NewPiTranscriptItem(
+                runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     title: "You",
                     body: user.content,
@@ -767,7 +890,7 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: entryID
                 ))
             case let .assistant(assistant):
-                transcript.append(NewPiTranscriptItem(
+                runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     title: "NewPi",
                     body: assistant.text,
@@ -775,7 +898,7 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: entryID
                 ))
             case let .toolResult(result):
-                transcript.append(NewPiTranscriptItem(
+                runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     title: "Tool \(result.toolName)",
                     body: result.isError ? "Error: \(result.content)" : result.content,
@@ -783,7 +906,7 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: entryID
                 ))
             case let .compactionSummary(summary):
-                transcript.append(NewPiTranscriptItem(
+                runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     title: "Summary",
                     body: summary,
@@ -792,7 +915,10 @@ final class NewPiViewModel: ObservableObject {
                 ))
             }
         }
-        liveMessageCount = messages.count
+        runtime.liveMessageCount = messages.count
+        if runtime === activeRuntime {
+            transcript = runtime.transcript
+        }
     }
 
     private func preservedTranscriptID(
@@ -832,13 +958,12 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func autoLabelCurrentSessionIfNeeded() async {
-        guard let session, currentSessionFileURL != nil else { return }
-        guard let header = await session.attachedSessionHeader else { return }
+    private func autoLabelCurrentSessionIfNeeded(on runtime: SessionRuntime) async {
+        guard let header = await runtime.session.attachedSessionHeader else { return }
         let existingLabel = header.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard existingLabel.isEmpty else { return }
 
-        let messages = await session.context.messages
+        let messages = await runtime.session.context.messages
         guard let exchange = SessionLabelService.firstExchange(from: messages) else { return }
 
         do {
@@ -854,7 +979,7 @@ final class NewPiViewModel: ObservableObject {
                 llm: llm
             )
             guard !label.isEmpty else { return }
-            await session.updateSessionLabel(label)
+            await runtime.session.updateSessionLabel(label)
             NewPiLogger.info(
                 category: "app",
                 message: "Session auto-labeled",
@@ -891,9 +1016,8 @@ final class NewPiViewModel: ObservableObject {
         mcpToolsLoadTask = nil
     }
 
-    private func appendTruncatedOutputNoticeIfNeeded() async {
-        guard let session else { return }
-        let messages = await session.context.messages
+    private func appendTruncatedOutputNoticeIfNeeded(on runtime: SessionRuntime) async {
+        let messages = await runtime.session.context.messages
         guard case let .assistant(assistant) = messages.last else { return }
         guard assistant.stopReason == .length,
               assistant.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -904,7 +1028,7 @@ final class NewPiViewModel: ObservableObject {
         let notice = assistant.reasoningContent.isEmpty
             ? "模型输出达到长度上限且未返回内容。请新开 session 或简化请求后重试。"
             : "模型推理达到长度上限，未完成最终回答或工具调用。请新开 session 或简化请求后重试。"
-        appendTranscript(title: "System", body: notice)
+        appendTranscript(title: "System", body: notice, on: runtime)
         NewPiLogger.info(
             category: "app",
             message: "UI: truncated empty assistant output notice shown",
@@ -912,23 +1036,40 @@ final class NewPiViewModel: ObservableObject {
         )
     }
 
-    private func syncTranscriptMessageIndices() async {
-        guard let session else { return }
-        let messages = await session.context.messages
-        let entryIDs = await session.branchEntryIDs()
-        rebuildTranscript(from: messages, entryIDs: entryIDs)
-        branchPointCount = await session.branchPointCount()
-        isForkedBranch = branchPointCount > 0
+    private func syncTranscriptMessageIndices(on runtime: SessionRuntime) async {
+        let messages = await runtime.session.context.messages
+        let entryIDs = await runtime.session.branchEntryIDs()
+        rebuildTranscript(from: messages, entryIDs: entryIDs, on: runtime)
+        runtime.branchPointCount = await runtime.session.branchPointCount()
+        runtime.isForkedBranch = runtime.branchPointCount > 0
+        if runtime === activeRuntime {
+            branchPointCount = runtime.branchPointCount
+            isForkedBranch = runtime.isForkedBranch
+        }
     }
 
-    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil) {
-        transcript.append(NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex))
+    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
+        let item = NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
+        if let r = activeRuntime {
+            r.transcript.append(item)
+            transcript = r.transcript
+        } else {
+            transcript.append(item)
+        }
     }
 
-    private func appendOrUpdateAssistant(_ delta: String) {
-        if let last = transcript.last, last.title == "NewPi" {
-            let index = transcript.count - 1
-            transcript[index] = NewPiTranscriptItem(
+    /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
+    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
+        runtime.transcript.append(NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
+        if runtime === activeRuntime {
+            transcript = runtime.transcript
+        }
+    }
+
+    private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
+        if let last = runtime.transcript.last, last.title == "NewPi" {
+            let index = runtime.transcript.count - 1
+            runtime.transcript[index] = NewPiTranscriptItem(
                 id: last.id,
                 title: "NewPi",
                 body: last.body + delta,
@@ -936,7 +1077,10 @@ final class NewPiViewModel: ObservableObject {
                 sessionEntryID: last.sessionEntryID
             )
         } else {
-            appendTranscript(title: "NewPi", body: delta)
+            runtime.transcript.append(NewPiTranscriptItem(title: "NewPi", body: delta))
+        }
+        if runtime === activeRuntime {
+            transcript = runtime.transcript
         }
     }
 }

@@ -15,6 +15,8 @@ public actor AgentSession {
     private var persistenceContext: SessionContext?
     private var persistenceLeafID: String?
     private var jsonlStore = JSONLSessionStore()
+    /// 当前未落盘的 assistant 流式文本（用于生成途中被中断时保留部分输出）。
+    private var inFlightText = ""
 
     public init(context: AgentContext, config: AgentLoopConfig) {
         self.context = context
@@ -80,7 +82,12 @@ public actor AgentSession {
                 config: config,
                 steeringProvider: steeringProvider
             ) {
+                if case let .textDelta(delta) = event {
+                    inFlightText += delta
+                }
                 if case let .contextSnapshot(snapshot) = event {
+                    // 快照代表已提交，未完成的流式文本从此重置。
+                    inFlightText = ""
                     context = snapshot
                     persistIfNeeded()
                 }
@@ -124,6 +131,36 @@ public actor AgentSession {
         }
         broadcast(.error(.aborted))
         broadcast(.agentEnd)
+    }
+
+    /// 停止仍在运行的 agent run，并等待它停止后返回。
+    ///
+    /// 用于 UI 切换到另一个 session 时：若不先停止上一个 session，它会在后台
+    /// 继续流式输出（事件无处投递，内容丢失），且 context 不会及时落盘，
+    /// 导致"切回旧 session 看不到刚才的输出"。此方法取消 runTask 等待其退出，
+    /// 把尚未落盘的流式文本保留为一条 aborted 消息并写盘，再清掉续体与审批等待。
+    public func shutdown() async {
+        NewPiLogger.info(category: "agent-session", message: "Agent session shutdown requested")
+        runTask?.cancel()
+        if let task = runTask {
+            await task.value
+        }
+        await approvalGate.cancelAll()
+        // runTask 被取消时会丢弃缓冲的最终 contextSnapshot，因此把仍在流式、尚未
+        // 提交的部分文本作为一条 aborted 的 assistant 消息写回 context，再落盘，
+        // 确保"生成途中切走，回来还能看到已输出的部分内容"。
+        if !inFlightText.isEmpty {
+            context.messages.append(.assistant(AssistantMessage(
+                text: inFlightText,
+                reasoningContent: "",
+                provider: config.model.provider,
+                modelID: config.model.modelID,
+                stopReason: .aborted
+            )))
+            inFlightText = ""
+        }
+        persistIfNeeded()
+        eventContinuations.removeAll()
     }
 
     public func updateConfig(_ config: AgentLoopConfig) {

@@ -28,6 +28,9 @@ public struct AgentLoop: Sendable {
                     continuation.yield(.agentStart)
 
                     try appendMessage(prompt, to: &context, continuation: continuation)
+                    // 增量持久化：用户消息一到就落盘，避免生成途中切换 session 时
+                    // 连已提交的用户输入都丢失（后续每轮完成也会再发一次快照）。
+                    continuation.yield(.contextSnapshot(context))
 
                     var shouldContinue = true
                     var turnIndex = 0
@@ -65,6 +68,8 @@ public struct AgentLoop: Sendable {
                             continuation: continuation
                         )
                         try appendMessage(.assistant(assistant), to: &context, continuation: continuation)
+                        // 每轮完成即落盘（增量持久化），保证任何时刻切走都有已提交内容。
+                        continuation.yield(.contextSnapshot(context))
 
                         NewPiLogger.debug(
                             category: "agent-loop",
