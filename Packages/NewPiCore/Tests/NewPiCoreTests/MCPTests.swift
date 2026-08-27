@@ -4,16 +4,14 @@ import Testing
 
 @Suite("MCPJSONRPC")
 struct MCPJSONRPCTests {
-    @Test("encodeFrame prefixes content length")
+    @Test("encodeFrame produces newline-delimited JSON (spec)")
     func encodeFrame() {
         let payload = Data("{\"jsonrpc\":\"2.0\"}".utf8)
         let framed = MCPJSONRPC.encodeFrame(payload: payload)
-        let text = String(data: framed, encoding: .utf8)
-        #expect(text?.hasPrefix("Content-Length: \(payload.count)\r\n\r\n") == true)
-        #expect(framed.suffix(payload.count) == payload)
+        #expect(framed == payload + Data("\n".utf8))
     }
 
-    @Test("decode single frame from buffer")
+    @Test("decode single ndjson frame from buffer")
     func decodeSingleFrame() throws {
         let payload = Data("{\"jsonrpc\":\"2.0\",\"id\":1}".utf8)
         var buffer = MCPJSONRPC.encodeFrame(payload: payload)
@@ -23,16 +21,54 @@ struct MCPJSONRPCTests {
         #expect(buffer.isEmpty)
     }
 
-    @Test("incomplete frame waits for more bytes")
+    @Test("incomplete ndjson line waits for more bytes")
     func incompleteFrame() throws {
         let payload = Data("{\"id\":1}".utf8)
-        var buffer = Data("Content-Length: \(payload.count)\r\n\r\n".utf8)
-        #expect(throws: MCPJSONRPCFramingError.incompleteFrame) {
-            _ = try MCPJSONRPC.decodeFrames(from: &buffer)
-        }
-        buffer.append(payload)
+        var buffer = Data(payload.prefix(3))
+        // 没有换行符 = 帧不完整：不抛错、缓冲保留，等待更多数据。
+        #expect(try MCPJSONRPC.decodeFrames(from: &buffer).isEmpty)
+        #expect(buffer.count == 3)
+        buffer.append(payload.dropFirst(3) + Data("\n".utf8))
         let frames = try MCPJSONRPC.decodeFrames(from: &buffer)
         #expect(frames == [payload])
+        #expect(buffer.isEmpty)
+    }
+
+    @Test("accepts Content-Length framed messages (interop)")
+    func decodeContentLengthFrame() throws {
+        let payload = Data("{\"jsonrpc\":\"2.0\",\"id\":1}".utf8)
+        var buffer = Data("Content-Length: \(payload.count)\r\n\r\n".utf8) + payload
+        let frames = try MCPJSONRPC.decodeFrames(from: &buffer)
+        #expect(frames == [payload])
+        #expect(buffer.isEmpty)
+    }
+
+    @Test("content-length body split across chunks waits for more bytes")
+    func contentLengthPartialBody() throws {
+        let payload = Data("{\"id\":1}".utf8)
+        var buffer = Data("Content-Length: \(payload.count)\r\n\r\n".utf8)
+        #expect(try MCPJSONRPC.decodeFrames(from: &buffer).isEmpty)
+        buffer.append(payload)
+        #expect(try MCPJSONRPC.decodeFrames(from: &buffer) == [payload])
+    }
+
+    @Test("garbage lines are dropped without wedging the buffer")
+    func badLineRecovery() throws {
+        let payload = Data("{\"jsonrpc\":\"2.0\",\"id\":1}".utf8)
+        var buffer = Data("server log line that is not json\n".utf8)
+        buffer.append(Data("\n".utf8)) // 空行
+        buffer.append(payload + Data("\n".utf8))
+        let frames = try MCPJSONRPC.decodeFrames(from: &buffer)
+        #expect(frames == [payload])
+        #expect(buffer.isEmpty)
+    }
+
+    @Test("invalid content-length header throws")
+    func invalidContentLength() {
+        var buffer = Data("Content-Length: not-a-number\r\n\r\n{}".utf8)
+        #expect(throws: MCPJSONRPCFramingError.invalidContentLength) {
+            _ = try MCPJSONRPC.decodeFrames(from: &buffer)
+        }
     }
 }
 
@@ -158,6 +194,24 @@ struct MCPStdioTransportTests {
         await #expect(throws: MCPTransportError.timedOut) {
             _ = try await transport.receiveResponse(timeout: 0.2)
         }
+
+        await transport.close()
+    }
+
+    @Test("server notifications are not consumed as responses")
+    func notificationsDropped() async throws {
+        let transport = MCPStdioTransport()
+        try await transport.start(command: "/bin/cat", arguments: [], environment: [:])
+
+        // cat 会原样回显：先回显一条通知帧，再回显响应帧。
+        // 通知必须被丢弃，否则会被 FIFO 当作响应消费，破坏配对。
+        let notification = Data("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}".utf8)
+        let response = Data("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}".utf8)
+        try await transport.send(frame: MCPJSONRPC.encodeFrame(payload: notification))
+        try await transport.send(frame: MCPJSONRPC.encodeFrame(payload: response))
+
+        let received = try await transport.receiveResponse(timeout: 5)
+        #expect(received == response)
 
         await transport.close()
     }

@@ -189,19 +189,41 @@ actor MCPStdioTransport: MCPTransporting {
 
     private func appendChunk(_ chunk: Data) {
         buffer.append(chunk)
+        if buffer.count > MCPJSONRPC.maxFrameBytes {
+            // 防御恶意/异常服务器让缓冲无界增长。
+            NewPiLogger.error(
+                category: "mcp",
+                message: "MCP frame buffer overflow; resetting",
+                details: "bytes=\(buffer.count)"
+            )
+            buffer.removeAll()
+            return
+        }
         do {
             let frames = try MCPJSONRPC.decodeFrames(from: &buffer)
             for frame in frames {
                 deliver(frame)
             }
-        } catch MCPJSONRPCFramingError.incompleteFrame {
-            return
         } catch {
-            NewPiLogger.error(category: "mcp", message: "MCP frame decode failed")
+            // 坏帧（如非法 Content-Length 头）：清空缓冲恢复，
+            // 避免坏数据永远堵在头部导致后续所有帧都解不出来。
+            NewPiLogger.error(category: "mcp", message: "MCP frame decode failed; buffer reset")
+            buffer.removeAll()
         }
     }
 
     private func deliver(_ frame: Data) {
+        // 服务器主动发出的通知/请求（带 method 的帧）不属于任何在途请求，
+        // 记录并丢弃——否则会被 FIFO 派发给 waiter，破坏响应配对。
+        if let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+           object["method"] != nil {
+            NewPiLogger.info(
+                category: "mcp",
+                message: "MCP server notification dropped",
+                details: "method=\(object["method"] ?? "")"
+            )
+            return
+        }
         if let waiter = waiters.first {
             waiters.removeFirst()
             waiter.continuation.resume(returning: frame)
