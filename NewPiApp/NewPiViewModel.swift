@@ -4,7 +4,7 @@ import NewPiCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct NewPiTranscriptItem: Identifiable {
+struct NewPiTranscriptItem: Identifiable, Sendable {
     let id: UUID
     let title: String
     let body: String
@@ -64,6 +64,46 @@ final class SessionRuntime {
     }
 }
 
+/// 后台构建一个全新 Session 的结果（在 `Task.detached` 中生成，主线程组装）。
+private struct BuiltSessionPayload: Sendable {
+    let session: AgentSession
+    let header: SessionHeader
+    let fileURL: URL
+    let transcriptItems: [NewPiTranscriptItem]
+    let branchPointCount: Int
+    let isForkedBranch: Bool
+    let liveMessageCount: Int
+}
+
+/// 由消息列表构建转录条目（纯函数，供后台线程调用；新建 session 的转录为空，
+/// 无需保留既有条目的 id）。
+private func makeTranscriptItems(
+    from messages: [AgentMessage],
+    entryIDs: [String]
+) -> [NewPiTranscriptItem] {
+    var items: [NewPiTranscriptItem] = []
+    items.reserveCapacity(messages.count)
+    for (index, message) in messages.enumerated() {
+        let entryID = index < entryIDs.count ? entryIDs[index] : nil
+        switch message {
+        case let .user(user):
+            items.append(NewPiTranscriptItem(title: "You", body: user.content, messageIndex: index, sessionEntryID: entryID))
+        case let .assistant(assistant):
+            items.append(NewPiTranscriptItem(title: "NewPi", body: assistant.text, messageIndex: index, sessionEntryID: entryID))
+        case let .toolResult(result):
+            items.append(NewPiTranscriptItem(
+                title: "Tool \(result.toolName)",
+                body: result.isError ? "Error: \(result.content)" : result.content,
+                messageIndex: index,
+                sessionEntryID: entryID
+            ))
+        case let .compactionSummary(summary):
+            items.append(NewPiTranscriptItem(title: "Summary", body: summary, messageIndex: index, sessionEntryID: entryID))
+        }
+    }
+    return items
+}
+
 enum NewPiAgentActivity: Equatable {
     case idle
     case thinking
@@ -88,6 +128,8 @@ final class NewPiViewModel: ObservableObject {
     @Published var activeProviderReady = false
     @Published var branchPointCount = 0
     @Published var isForkedBranch = false
+    /// 正在切换 session（后台构建中），UI 据此显示加载指示。
+    @Published var isSwitchingSession = false
 
     private var runtimes: [String: SessionRuntime] = [:]
     private var activeRuntime: SessionRuntime? {
@@ -205,6 +247,8 @@ final class NewPiViewModel: ObservableObject {
         await cleanupEmptySessions()
         await refreshSessionList()
         await startNewSession()
+        // 预热 MCP 工具（后台，不阻塞打开流程），让用户首次切换 session 时无需当场等待。
+        Task { await self.loadMCPTools() }
     }
 
     /// 停止并清空所有后台的 AgentSession（在切换项目等场景下调用）。
@@ -503,6 +547,8 @@ final class NewPiViewModel: ObservableObject {
 
     private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
         guard let projectURL else { return }
+        isSwitchingSession = true
+        defer { isSwitchingSession = false }
 
         let profile: ProviderProfile
         do {
@@ -513,26 +559,33 @@ final class NewPiViewModel: ObservableObject {
             return
         }
 
-        let restoredMessages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
-        let mcpTools = await loadMCPTools()
-        let sessionFileURL: URL
+        // 复用已有的 runtime：不重建 agent / 不读文件 / 不加载 MCP，直接轻量切换并反映当前状态。
+        if let fileURL, let existing = runtimes[fileURL.path] {
+            NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
+            if let header = await existing.session.attachedSessionHeader {
+                activeSessionID = header.id
+            }
+            activeRuntime = existing
+            reflectActive()
+            await setActiveProviderState(profile)
+            return
+        }
 
-        // 获取 / 复用目标 session 的 runtime。切回一个已在后台运行的 session 时直接
-        // 复用其 runtime（含常驻事件循环），既保留其进行中的输出，也避免同一 session
-        // 文件被多个并发的 agent 写入。
-        let runtime: SessionRuntime
-        let isNewRuntime: Bool
-        if let fileURL {
-            sessionFileURL = fileURL
-            if let existing = runtimes[fileURL.path] {
-                runtime = existing
-                isNewRuntime = false
-            } else {
-                do {
-                    let llm = try LLMProviderFactory.make(
-                        profile: profile,
-                        credentialResolver: providerCredentialResolver
-                    )
+        let restoredMessages = restoredContext.map { SessionManager.messages(from: $0) } ?? []
+        let restoredHeader = restoredContext?.header
+
+        // 新建 runtime：把重活（构建 agent / 读写 session 文件 / 重建 transcript）放到
+        // 后台线程，主线程只做最终状态切换，避免切换卡顿、对话加载慢。
+        do {
+            let mcpTools = await loadMCPTools()
+            let resolver = providerCredentialResolver
+
+            let payload = try await Task.detached(priority: .userInitiated) { () throws -> BuiltSessionPayload in
+                let llm = try LLMProviderFactory.make(profile: profile, credentialResolver: resolver)
+                let session: AgentSession
+                let header: SessionHeader
+                let sessionFileURL: URL
+                if let fileURL {
                     let built = AgentSessionFactory.codingSession(
                         workingDirectory: projectURL,
                         llm: llm,
@@ -540,97 +593,98 @@ final class NewPiViewModel: ObservableObject {
                         restoredMessages: restoredMessages,
                         additionalTools: mcpTools
                     )
-                    let header = restoredContext!.header
-                    await built.attachPersistence(fileURL: fileURL, header: header)
-                    runtime = SessionRuntime(session: built, fileURL: fileURL, sessionID: header.id)
-                    runtimes[fileURL.path] = runtime
-                    startRuntimeEventLoop(runtime)
-                    isNewRuntime = true
-                } catch {
-                    appendTranscript(title: "Error", body: error.localizedDescription)
-                    activeProviderReady = false
-                    return
+                    let h = restoredHeader ?? SessionHeader(workingDirectory: projectURL)
+                    await built.attachPersistence(fileURL: fileURL, header: h)
+                    session = built
+                    header = h
+                    sessionFileURL = fileURL
+                } else {
+                    let created = try SessionManager.createSession(
+                        workingDirectory: projectURL,
+                        providerProfileID: profile.id,
+                        modelID: profile.modelID
+                    )
+                    let built = AgentSessionFactory.codingSession(
+                        workingDirectory: projectURL,
+                        llm: llm,
+                        model: profile.modelConfig,
+                        additionalTools: mcpTools
+                    )
+                    await built.attachPersistence(fileURL: created.fileURL, header: created.context.header)
+                    session = built
+                    header = created.context.header
+                    sessionFileURL = created.fileURL
                 }
+
+                let messages = await session.context.messages
+                let entryIDs = await session.branchEntryIDs()
+                let branchPointCount = await session.branchPointCount()
+                return BuiltSessionPayload(
+                    session: session,
+                    header: header,
+                    fileURL: sessionFileURL,
+                    transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs),
+                    branchPointCount: branchPointCount,
+                    isForkedBranch: branchPointCount > 0,
+                    liveMessageCount: messages.count
+                )
+            }.value
+
+            let runtime = SessionRuntime(session: payload.session, fileURL: payload.fileURL, sessionID: payload.header.id)
+            runtimes[payload.fileURL.path] = runtime
+            startRuntimeEventLoop(runtime)
+            NewPiLogger.info(
+                category: "app",
+                message: "Beginning agent session",
+                details: """
+                project=\(projectURL.path)
+                restored=\(restoredContext != nil)
+                sessionFile=\(payload.fileURL.path)
+                """
+            )
+
+            // 先填好 runtime 状态，再切 activeRuntime（didSet 反射时携带完整数据）。
+            runtime.transcript = payload.transcriptItems
+            runtime.branchPointCount = payload.branchPointCount
+            runtime.isForkedBranch = payload.isForkedBranch
+            runtime.liveMessageCount = payload.liveMessageCount
+            activeRuntime = runtime
+            activeSessionID = payload.header.id
+            reflectActive()
+
+            await setActiveProviderState(profile)
+
+            if restoredContext == nil {
+                // 后台刷新侧边列表，避免遍历会话文件拖慢切换完成。
+                Task { await self.refreshSessionList() }
             }
-        } else {
-            // 全新 session。
-            do {
-                let llm = try LLMProviderFactory.make(
-                    profile: profile,
-                    credentialResolver: providerCredentialResolver
-                )
-                let created = try SessionManager.createSession(
-                    workingDirectory: projectURL,
-                    providerProfileID: profile.id,
-                    modelID: profile.modelID
-                )
-                let built = AgentSessionFactory.codingSession(
-                    workingDirectory: projectURL,
-                    llm: llm,
-                    model: profile.modelConfig,
-                    additionalTools: mcpTools
-                )
-                let header = created.context.header
-                await built.attachPersistence(fileURL: created.fileURL, header: header)
-                runtime = SessionRuntime(session: built, fileURL: created.fileURL, sessionID: header.id)
-                runtimes[created.fileURL.path] = runtime
-                startRuntimeEventLoop(runtime)
-                isNewRuntime = true
-                sessionFileURL = created.fileURL
-            } catch {
-                appendTranscript(title: "Error", body: error.localizedDescription)
-                activeProviderReady = false
-                return
-            }
+            NewPiLogger.info(
+                category: "app",
+                message: "Agent session ready",
+                details: """
+                provider=\(profile.name) model=\(profile.modelID)
+                mcpTools=\(mcpTools.count)
+                restoredMessages=\(restoredMessages.count)
+                sessionFile=\(payload.fileURL.path)
+                """
+            )
+        } catch {
+            NewPiLogger.error(
+                category: "app",
+                message: "Failed to begin session",
+                details: error.localizedDescription
+            )
+            appendTranscript(title: "Error", body: error.localizedDescription)
+            activeProviderReady = false
         }
+    }
 
-        NewPiLogger.info(
-            category: "app",
-            message: "Beginning agent session",
-            details: """
-            project=\(projectURL.path)
-            restored=\(restoredContext != nil)
-            sessionFile=\(sessionFileURL.path)
-            """
-        )
-
-        // 切换到该 runtime 所对应的视图状态（didSet 触发 reflectActive）。
-        activeRuntime = runtime
-        if let header = await runtime.session.attachedSessionHeader {
-            activeSessionID = header.id
-        }
-
-        // 只有新创建 runtime 时才需要从 context 重建 transcript（此时常驻事件循环刚启动，
-        // 尚无内容）。复用的 runtime 其转录一直由事件循环维护，直接反映即可，避免覆盖
-        // 正在流式、尚未提交的部分输出。
-        if isNewRuntime {
-            let displayMessages = await runtime.session.context.messages
-            let entryIDs = await runtime.session.branchEntryIDs()
-            rebuildTranscript(from: displayMessages, entryIDs: entryIDs, on: runtime)
-            runtime.branchPointCount = await runtime.session.branchPointCount()
-            runtime.isForkedBranch = runtime.branchPointCount > 0
-            runtime.liveMessageCount = displayMessages.count
-        }
-        reflectActive()
-
+    /// 把当前 provider 状态同步到 @Published（供两个分支复用）。
+    private func setActiveProviderState(_ profile: ProviderProfile) async {
         activeProviderID = profile.id
         activeProviderName = profile.name
         activeProviderModel = profile.modelID
         activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
-
-        if restoredContext == nil {
-            await refreshSessionList()
-        }
-        NewPiLogger.info(
-            category: "app",
-            message: "Agent session ready",
-            details: """
-            provider=\(profile.name) model=\(profile.modelID)
-            mcpTools=\(mcpTools.count)
-            restoredMessages=\(restoredMessages.count)
-            sessionFile=\(sessionFileURL.path)
-            """
-        )
     }
 
     func send(_ text: String) {

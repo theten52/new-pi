@@ -30,7 +30,12 @@ struct NewPiChatView: View {
 
                                 LazyVStack(alignment: .leading, spacing: 12) {
                                     if viewModel.transcript.isEmpty {
-                                        NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                                        if viewModel.isSwitchingSession {
+                                            ProgressView("Loading session…")
+                                                .frame(maxWidth: .infinity, minHeight: 120)
+                                        } else {
+                                            NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                                        }
                                     }
 
                                     ForEach(viewModel.transcript) { item in
