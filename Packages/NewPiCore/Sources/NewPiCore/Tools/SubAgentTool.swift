@@ -69,7 +69,7 @@ public struct SubAgentTool: AgentTool {
         Reply in Simplified Chinese (简体中文).
         """
 
-        var subContext = AgentContext(
+        let subContext = AgentContext(
             systemPrompt: systemPrompt,
             messages: [],
             workingDirectory: context.workingDirectory
