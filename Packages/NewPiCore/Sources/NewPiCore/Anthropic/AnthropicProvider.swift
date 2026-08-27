@@ -97,14 +97,17 @@ public enum AnthropicMessageEncoder {
 }
 
 public struct AnthropicStreamParser: Sendable {
+    // 跨 SSE 块保持状态：生产路径按块调用 parse，toolInputs/stopReason/usage
+    // 若在函数内局部化会在块间丢失（工具调用永远拼不出完整 JSON）。
+    private var toolInputs: [String: String] = [:]
+    private var stopReason: StopReason = .stop
+    private var usage = UsageStats()
+    private var didEmitCompleted = false
+
     public init() {}
 
-    public func parse(events: [AnthropicStreamEvent]) -> [LLMStreamEvent] {
+    public mutating func parse(events: [AnthropicStreamEvent]) -> [LLMStreamEvent] {
         var output: [LLMStreamEvent] = []
-        var toolInputs: [String: String] = [:]
-        var toolNames: [String: String] = [:]
-        var stopReason: StopReason = .stop
-        var usage = UsageStats()
 
         for event in events {
             switch event {
@@ -112,8 +115,7 @@ public struct AnthropicStreamParser: Sendable {
                 output.append(.textDelta(text))
             case let .thinkingDelta(text):
                 output.append(.thinkingDelta(text))
-            case let .toolInputDelta(id, name, partialJSON):
-                toolNames[id] = name
+            case let .toolInputDelta(id, _, partialJSON):
                 toolInputs[id, default: ""] += partialJSON
             case let .contentBlockStop(id, name, input):
                 let arguments: JSONValue
@@ -126,13 +128,28 @@ public struct AnthropicStreamParser: Sendable {
                 }
                 output.append(.toolCall(ToolCallContent(id: id, name: name, arguments: arguments)))
             case let .messageDelta(reason, inputTokens, outputTokens):
-                stopReason = mapStopReason(reason)
+                if reason != nil {
+                    stopReason = mapStopReason(reason)
+                }
                 usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                if reason != nil {
+                    output.append(completedEvent())
+                }
             }
         }
 
-        output.append(.completed(stopReason: stopReason, usage: usage))
         return output
+    }
+
+    /// 流结束时调用：若 message_delta 未携带 stop_reason（异常截断等），
+    /// 补发一个携带最终状态的 .completed，保证事件流恰有一次完成事件。
+    public mutating func finish() -> [LLMStreamEvent] {
+        didEmitCompleted ? [] : [completedEvent()]
+    }
+
+    private mutating func completedEvent() -> LLMStreamEvent {
+        didEmitCompleted = true
+        return .completed(stopReason: stopReason, usage: usage)
     }
 
     private func mapStopReason(_ reason: String?) -> StopReason {
@@ -158,12 +175,15 @@ public enum AnthropicStreamEvent: Sendable, Equatable {
 }
 
 public struct AnthropicSSEDecoder: Sendable {
+    // 跨 SSE 块保持状态：content_block_start 登记的 openToolBlocks 必须在
+    // 后续块的 input_json_delta / content_block_stop 中仍然可见。
+    private var currentEventName: String?
+    private var openToolBlocks: [Int: (id: String, name: String)] = [:]
+
     public init() {}
 
-    public func decodeLines(_ lines: [String]) -> [AnthropicStreamEvent] {
+    public mutating func decodeLines(_ lines: [String]) -> [AnthropicStreamEvent] {
         var events: [AnthropicStreamEvent] = []
-        var currentEventName: String?
-        var openToolBlocks: [Int: (id: String, name: String)] = [:]
 
         for line in lines {
             if line.hasPrefix("event:") {
@@ -326,8 +346,8 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                     }
 
                     var sseParser = SSEByteStreamParser()
-                    let decoder = AnthropicSSEDecoder()
-                    let parser = AnthropicStreamParser()
+                    var decoder = AnthropicSSEDecoder()
+                    var parser = AnthropicStreamParser()
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
@@ -344,6 +364,10 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                         for event in parsed {
                             continuation.yield(event)
                         }
+                    }
+
+                    for event in parser.finish() {
+                        continuation.yield(event)
                     }
 
                     NewPiLogger.logLLMStreamFinished(category: "anthropic", model: model.modelID)

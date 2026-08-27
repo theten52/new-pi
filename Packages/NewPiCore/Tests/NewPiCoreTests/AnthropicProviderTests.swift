@@ -43,7 +43,7 @@ struct AnthropicMessageEncoderTests {
 struct AnthropicStreamParserTests {
     @Test("parses text and completion events")
     func textCompletion() {
-        let decoder = AnthropicSSEDecoder()
+        var decoder = AnthropicSSEDecoder()
         let lines = [
             "event: content_block_delta",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
@@ -53,7 +53,7 @@ struct AnthropicStreamParserTests {
             "",
         ]
 
-        let parser = AnthropicStreamParser()
+        var parser = AnthropicStreamParser()
         let events = parser.parse(events: decoder.decodeLines(lines))
         #expect(events.contains { if case let .textDelta(text) = $0 { text == "Hello" } else { false } })
         #expect(events.contains {
@@ -67,7 +67,7 @@ struct AnthropicStreamParserTests {
 
     @Test("parses tool use stream")
     func toolUse() {
-        let decoder = AnthropicSSEDecoder()
+        var decoder = AnthropicSSEDecoder()
         let lines = [
             "event: content_block_start",
             "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"echo\",\"input\":{}}}",
@@ -83,7 +83,7 @@ struct AnthropicStreamParserTests {
             "",
         ]
 
-        let parser = AnthropicStreamParser()
+        var parser = AnthropicStreamParser()
         let events = parser.parse(events: decoder.decodeLines(lines))
         #expect(events.contains {
             if case let .toolCall(call) = $0 {
@@ -95,6 +95,74 @@ struct AnthropicStreamParserTests {
         #expect(events.contains {
             if case let .completed(reason, _) = $0 { reason == .toolUse } else { false }
         })
+    }
+
+    @Test("tool use survives per-block incremental feeding (production path)")
+    func toolUseIncrementalBlocks() {
+        // 回归：生产路径按 SSE 块逐个调用 decodeLines/parse，
+        // 此前 openToolBlocks/toolInputs 是函数局部状态，跨块丢失导致工具调用永远丢失。
+        var decoder = AnthropicSSEDecoder()
+        var parser = AnthropicStreamParser()
+
+        let blocks: [[String]] = [
+            [
+                "event: content_block_start",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"echo\",\"input\":{}}}",
+            ],
+            [
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"text\\\":\"}}",
+            ],
+            [
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ping\\\"}\"}}",
+            ],
+            [
+                "event: content_block_stop",
+                "data: {\"type\":\"content_block_stop\",\"index\":1}",
+            ],
+            [
+                "event: message_delta",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}",
+            ],
+            [
+                "event: message_stop",
+                "data: {\"type\":\"message_stop\"}",
+            ],
+        ]
+
+        var events: [LLMStreamEvent] = []
+        for block in blocks {
+            events += parser.parse(events: decoder.decodeLines(block))
+        }
+        events += parser.finish()
+
+        let toolCalls = events.compactMap { event -> ToolCallContent? in
+            if case let .toolCall(call) = event { call } else { nil }
+        }
+        #expect(toolCalls.count == 1)
+        #expect(toolCalls.first?.id == "toolu_1")
+        #expect(toolCalls.first?.arguments.objectValue?["text"] == .string("ping"))
+
+        let completions = events.filter { if case .completed = $0 { true } else { false } }
+        #expect(completions.count == 1)
+        if case let .completed(reason, usage) = completions.first {
+            #expect(reason == .toolUse)
+            #expect(usage.outputTokens == 8)
+        }
+    }
+
+    @Test("finish emits completion when stream ends without message_delta")
+    func finishEmitsCompletionOnTruncatedStream() {
+        var decoder = AnthropicSSEDecoder()
+        var parser = AnthropicStreamParser()
+        var events = parser.parse(events: decoder.decodeLines([
+            "event: content_block_delta",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}",
+        ]))
+        events += parser.finish()
+        let completions = events.filter { if case .completed = $0 { true } else { false } }
+        #expect(completions.count == 1)
     }
 }
 
