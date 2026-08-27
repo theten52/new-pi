@@ -148,9 +148,10 @@ struct ToolApprovalTests {
         }
 
         try? await Task.sleep(nanoseconds: 50_000_000)
-        await gate.respond(requestID: "call-1", approved: true)
+        await gate.respond(requestID: "call-1", decision: .allowOnce)
         let approved = await waitTask.value
-        #expect(approved)
+        #expect(approved.approved)
+        #expect(approved.scope == .once)
 
         let denyTask = Task {
             await gate.wait(for: ToolApprovalRequest(
@@ -161,9 +162,9 @@ struct ToolApprovalTests {
             ))
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
-        await gate.respond(requestID: "call-2", approved: false)
+        await gate.respond(requestID: "call-2", decision: .deny)
         let denied = await denyTask.value
-        #expect(!denied)
+        #expect(!denied.approved)
     }
 
     @Test("tool policy requires approval for risky tools only")
