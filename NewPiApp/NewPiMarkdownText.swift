@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// 流式中的消息用原生 AttributedString 轻量解析（.inlineOnly，只渲染行内格式），
-/// 完成后切换为 WKWebView（markdown-it + highlight.js）完整解析块级结构与代码高亮。
+/// 流式与完成态统一使用 WKWebView（markdown-it + highlight.js）渲染，
+/// 流式期间由 JS 侧做块级增量更新，避免完成后切换引擎造成的视觉跳动。
 /// bundle 或 WebView 不可用时退回原生 AttributedString（完整解析，无高亮）。
 struct NewPiMarkdownText: View {
     let content: String
@@ -13,14 +13,13 @@ struct NewPiMarkdownText: View {
 
     var body: some View {
         Group {
-            if flushRendering,
-               let rendererScriptURL = NewPiMarkdownWebDocument.rendererScriptURL(),
+            if let rendererScriptURL = NewPiMarkdownWebDocument.rendererScriptURL(),
                !webRendererFailed {
                 NewPiMarkdownWebRendererView(
                     markdown: content,
                     rendererScriptURL: rendererScriptURL,
                     height: $webHeight,
-                    flushRendering: true,
+                    flushRendering: flushRendering,
                     onRenderingFailed: {
                         webRendererFailed = true
                     }
@@ -31,24 +30,14 @@ struct NewPiMarkdownText: View {
                 .animation(nil, value: webHeight)
                 .accessibilityLabel(content)
             } else {
-                streamingNativeBody
+                nativeFallback
             }
         }
-        .onChange(of: content) { oldContent, newContent in
-            if newContent.count < oldContent.count / 2 {
-                webHeight = 44
-            }
-        }
-    }
-
-    /// Native text during streaming: intrinsic height avoids WebView mount jumps.
-    private var streamingNativeBody: some View {
-        nativeFallback
     }
 
     private var nativeFallback: some View {
         Group {
-            if let attributed = Self.parsedMarkdown(from: content, streaming: !flushRendering) {
+            if let attributed = Self.parsedMarkdown(from: content) {
                 Text(attributed)
             } else {
                 Text(content)
@@ -60,15 +49,13 @@ struct NewPiMarkdownText: View {
     }
 
     /// Native fallback: line-by-line full Markdown so single `\n` are preserved.
-    private static func parsedMarkdown(from content: String, streaming: Bool) -> AttributedString? {
+    private static func parsedMarkdown(from content: String) -> AttributedString? {
         let segments = markdownLineSegments(from: content)
         guard !segments.isEmpty else { return nil }
 
         var result = AttributedString()
-        // 流式阶段用轻量 inline 解析：避免每个刷新窗口都对整条消息做昂贵的 .full 块级解析
-        //（代码块/列表/标题等块级结构会在消息完成后由 WebView 完整渲染）。完成/回退路径仍用 .full。
         let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: streaming ? .inlineOnly : .full,
+            interpretedSyntax: .full,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
 
@@ -164,10 +151,9 @@ struct NewPiTranscriptRow: View {
     var isActiveStreamingItem = false
     var onFork: ((Int) -> Void)?
 
+    @State private var isHovering = false
+
     private var isUser: Bool { item.title == "You" }
-    private var isAssistantLike: Bool {
-        item.title == "NewPi" || item.title == "Summary"
-    }
 
     private var usesMarkdown: Bool {
         item.title == "NewPi" || item.title == "Summary"
@@ -180,47 +166,68 @@ struct NewPiTranscriptRow: View {
                 Spacer(minLength: 72)
             } else if isUser {
                 Spacer(minLength: 72)
-                bubble
+                userBubble
             } else {
-                bubble
-                Spacer(minLength: 72)
+                assistantContent
             }
         }
+        .onHover { isHovering = $0 }
     }
 
-    private var bubble: some View {
+    /// 用户消息：右对齐 accent 气泡
+    private var userBubble: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(item.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Button {
-                    copyBody()
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .help("Copy message")
-
-                if item.canFork, let index = item.messageIndex, let onFork {
-                    Button {
-                        onFork(index)
-                    } label: {
-                        Image(systemName: "arrow.triangle.branch")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Fork from here")
-                    .disabled(isStreaming)
-                }
-            }
-
+            header
             messageBody
         }
         .padding(12)
-        .background(bubbleBackground)
+        .background(Color.accentColor.opacity(0.16))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .frame(maxWidth: 640, alignment: isUser ? .trailing : .leading)
+        .frame(maxWidth: 640, alignment: .trailing)
+    }
+
+    /// 助手消息：全宽、无气泡卡片
+    private var assistantContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            header
+            messageBody
+        }
+        .frame(maxWidth: 760, alignment: .leading)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text(item.title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            actionButtons
+        }
+    }
+
+    /// 复制 / fork 按钮：hover 显示（流式中的行保持可见）
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            Button {
+                copyBody()
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("Copy message")
+
+            if item.canFork, let index = item.messageIndex, let onFork {
+                Button {
+                    onFork(index)
+                } label: {
+                    Image(systemName: "arrow.triangle.branch")
+                }
+                .buttonStyle(.borderless)
+                .help("Fork from here")
+                .disabled(isStreaming)
+            }
+        }
+        .opacity(isHovering || isActiveStreamingItem ? 1 : 0)
     }
 
     @ViewBuilder
@@ -238,19 +245,6 @@ struct NewPiTranscriptRow: View {
             Text(item.body)
                 .textSelection(.enabled)
         }
-    }
-
-    private var bubbleBackground: Color {
-        if item.title == "Error" {
-            return Color.red.opacity(0.08)
-        }
-        if isUser {
-            return Color.accentColor.opacity(0.16)
-        }
-        if isAssistantLike {
-            return Color(nsColor: .controlBackgroundColor)
-        }
-        return Color(nsColor: .windowBackgroundColor)
     }
 
     private func copyBody() {

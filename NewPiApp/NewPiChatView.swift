@@ -7,9 +7,13 @@ struct NewPiChatView: View {
     @State private var composerHeight: CGFloat = 120
     /// After the user jumps via the message rail, skip pin-to-bottom until the next agent turn.
     @State private var suppressAutoPinDuringStreaming = false
+    /// 视口是否贴近底部（底部锚点在滚动坐标系中的位置推算），流式时只在贴底才自动钉底。
+    @State private var isNearBottom = true
 
     /// Gap between the last bubble bottom and the status bar top.
     private let messageBottomGap: CGFloat = 16
+    /// 距底多少 pt 内视为贴底（超过则释放自动钉底并显示“Jump to latest”）
+    private let nearBottomThreshold: CGFloat = 100
 
     private var userMessageMarkers: [UserMessageMarker] {
         viewModel.transcript
@@ -59,6 +63,16 @@ struct NewPiChatView: View {
                                 Color.clear
                                     .frame(height: 1)
                                     .id(NewPiChatScrollSupport.bottomAnchorID)
+                                    .background(
+                                        GeometryReader { anchorGeometry in
+                                            Color.clear.preference(
+                                                key: ChatBottomAnchorPreferenceKey.self,
+                                                value: anchorGeometry
+                                                    .frame(in: .named(NewPiChatScrollSupport.coordinateSpaceName))
+                                                    .minY
+                                            )
+                                        }
+                                    )
                             }
                             .padding()
                             .frame(
@@ -84,6 +98,27 @@ struct NewPiChatView: View {
                             }
                         )
                         .padding(.trailing, 10)
+                    }
+                    .overlay(alignment: .bottom) {
+                        if viewModel.isStreaming && !isNearBottom {
+                            Button {
+                                suppressAutoPinDuringStreaming = false
+                                pinScrollToBottom(using: proxy)
+                            } label: {
+                                Label("Jump to latest", systemImage: "arrow.down")
+                                    .font(.callout.weight(.medium))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(.regularMaterial, in: Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.bottom, 12)
+                            .transition(.opacity)
+                        }
                     }
                     .onAppear {
                         schedulePinScrollToBottom(using: proxy)
@@ -119,6 +154,10 @@ struct NewPiChatView: View {
                         }
                     }
             }
+            .onPreferenceChange(ChatBottomAnchorPreferenceKey.self) { anchorY in
+                let distanceFromBottom = anchorY - scrollViewportHeight
+                isNearBottom = distanceFromBottom <= nearBottomThreshold
+            }
         }
         .onPreferenceChange(ComposerHeightPreferenceKey.self) { height in
             guard height > 0 else { return }
@@ -136,7 +175,11 @@ struct NewPiChatView: View {
     }
 
     private var shouldAutoPinToBottom: Bool {
-        !(suppressAutoPinDuringStreaming && viewModel.isStreaming)
+        // 流式时只在贴底（且未被消息轨道跳转抑制）才钉底；非流式保持原行为
+        if viewModel.isStreaming {
+            return !suppressAutoPinDuringStreaming && isNearBottom
+        }
+        return true
     }
 
     private func scheduleComposerHeightUpdate(_ height: CGFloat) {

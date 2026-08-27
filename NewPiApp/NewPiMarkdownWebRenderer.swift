@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import NewPiCore
 import SwiftUI
 import WebKit
 
@@ -21,14 +22,14 @@ enum NewPiMarkdownWebDocument {
     // SECURITY-REVIEW: Model Markdown is untrusted. The source is double JSON-encoded
     // before entering inline script / evaluateJavaScript so characters such as </script>
     // cannot break out of the JavaScript string boundary.
-    static func documentHTML(markdown: String, rendererScriptURL: URL) throws -> String {
+    static func documentHTML(markdown: String, rendererScriptURL: URL, streaming: Bool = false) throws -> String {
         let rendererDirectoryURL = rendererScriptURL.deletingLastPathComponent()
         let markdownItURL = rendererDirectoryURL.appendingPathComponent("markdown-it.min.js")
         let highlightURL = rendererDirectoryURL.appendingPathComponent("highlight.min.js")
         let githubMarkdownCSSURL = rendererDirectoryURL.appendingPathComponent("github-markdown-light.css")
         let highlightCSSURL = rendererDirectoryURL.appendingPathComponent("highlight-github.min.css")
         let appCSSURL = rendererDirectoryURL.appendingPathComponent("markdown-renderer.css")
-        let markdownExpression = try jsonParseExpression(for: markdown)
+        let initialRenderScript = try renderJavaScript(for: markdown, streaming: streaming)
 
         return """
         <!doctype html>
@@ -43,10 +44,19 @@ enum NewPiMarkdownWebDocument {
         </head>
         <body>
           <article id="markdown-root" class="markdown-body"></article>
+          <script nonce="\(scriptNonce)">
+            window.onerror = function (message, source, line, column) {
+              if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.rendererError) {
+                window.webkit.messageHandlers.rendererError.postMessage(
+                  String(message) + " @ " + String(source) + ":" + String(line) + ":" + String(column)
+                );
+              }
+            };
+          </script>
           <script src="\(htmlAttributeEscaped(markdownItURL.absoluteString))"></script>
           <script src="\(htmlAttributeEscaped(highlightURL.absoluteString))"></script>
           <script src="\(htmlAttributeEscaped(rendererScriptURL.absoluteString))"></script>
-          <script nonce="\(scriptNonce)">window.renderMarkdown(\(markdownExpression));</script>
+          <script nonce="\(scriptNonce)">\(initialRenderScript)</script>
         </body>
         </html>
         """
@@ -84,6 +94,65 @@ enum NewPiMarkdownWebDocument {
     }
 }
 
+/// 所有 Markdown WebView 共享的滚轮转发器。
+/// 每条消息一个 WebView，若按实例各注册一个全局 NSEvent 监听，N 条消息会让
+/// 每个滚轮事件串行经过 N 个监听器；改为单例监听 + 弱引用注册表，命中即转发。
+@MainActor
+private final class MarkdownScrollWheelForwarder {
+    static let shared = MarkdownScrollWheelForwarder()
+
+    private var monitor: Any?
+    private let webViews = NSHashTable<WKWebView>.weakObjects()
+
+    private init() {}
+
+    func register(_ webView: WKWebView) {
+        webViews.add(webView)
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            MarkdownScrollWheelForwarder.shared.forward(event)
+        }
+    }
+
+    func unregister(_ webView: WKWebView) {
+        webViews.remove(webView)
+        guard webViews.count == 0, let monitor else { return }
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+    }
+
+    /// 垂直滚轮落在某个 WebView 上时，转发给它所在的外层 NSScrollView 并消费掉；
+    /// 否则原样返回，不影响其它视图。
+    private func forward(_ event: NSEvent) -> NSEvent? {
+        guard let eventWindow = event.window,
+              abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX),
+              event.scrollingDeltaY != 0 else {
+            return event
+        }
+
+        for webView in webViews.allObjects {
+            guard eventWindow === webView.window else { continue }
+            let point = webView.convert(event.locationInWindow, from: nil)
+            guard webView.bounds.contains(point) else { continue }
+            guard let scrollView = enclosingScrollView(outside: webView) else { return event }
+            scrollView.scrollWheel(with: event)
+            return nil
+        }
+        return event
+    }
+
+    private func enclosingScrollView(outside view: NSView) -> NSScrollView? {
+        var currentView = view.superview
+        while let view = currentView {
+            if let scrollView = view as? NSScrollView {
+                return scrollView
+            }
+            currentView = view.superview
+        }
+        return nil
+    }
+}
+
 struct NewPiMarkdownWebRendererView: NSViewRepresentable {
     let markdown: String
     let rendererScriptURL: URL
@@ -101,6 +170,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         configuration.suppressesIncrementalRendering = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "height")
+        configuration.userContentController.add(context.coordinator, name: "copyText")
+        configuration.userContentController.add(context.coordinator, name: "rendererError")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -112,6 +183,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         context.coordinator.loadInitial(
             markdown: markdown,
             rendererScriptURL: rendererScriptURL,
+            flush: flushRendering,
             in: webView
         )
         return webView
@@ -130,6 +202,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         coordinator.removeScrollWheelForwarding()
         coordinator.cancelPendingUpdate()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "height")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
     }
@@ -159,6 +233,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var isPageLoaded = false
         private var pendingMarkdown: String?
         private var lastRenderedMarkdown: String?
+        /// 上一次实际渲染是否为最终（flush）渲染。文本相同但 flush 状态翻转时
+        /// 也必须重渲染 —— 否则流式结束时的去抖会跳过最终渲染，
+        /// 导致流式光标残留、代码块永远拿不到 hljs 高亮。
+        private var lastRenderWasFlush = true
         private var rendererScriptURL: URL?
         private var throttleWorkItem: DispatchWorkItem?
         private var isFlushRendering = true
@@ -166,8 +244,13 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var rerenderAfterFlight = false
         private var lastRenderTime = Date.distantPast
         private var hasReportedFailure = false
+        /// 内容进程终止后只允许自动重建一次，反复崩溃则退回原生渲染。
+        private var hasAttemptedProcessRecovery = false
+        /// 页面加载看门狗：loadHTMLString 若始终不回调 didFinish，WebView 会永久白屏。
+        private var loadWatchdog: DispatchWorkItem?
+        /// 页面加载看门狗超时（秒）。
+        private let loadWatchdogInterval: TimeInterval = 10
         private weak var scrollForwardingWebView: WKWebView?
-        private var scrollWheelMonitor: Any?
 
         /// Minimum interval between streaming renders (throttle, not debounce).
         private let throttleInterval: TimeInterval = 0.05
@@ -178,13 +261,21 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             self.onRenderingFailed = onRenderingFailed
         }
 
-        func loadInitial(markdown: String, rendererScriptURL: URL, in webView: WKWebView) {
+        func loadInitial(markdown: String, rendererScriptURL: URL, flush: Bool, in webView: WKWebView) {
             self.rendererScriptURL = rendererScriptURL
+            isFlushRendering = flush
             pendingMarkdown = markdown
+            // 重建页面（如内容进程终止后的恢复）时，在途的 evaluateJavaScript 回调
+            // 不会再触发，必须重置在途状态，否则后续渲染会被永久卡住。
+            throttleWorkItem?.cancel()
+            throttleWorkItem = nil
+            isRenderingJavaScript = false
+            rerenderAfterFlight = false
             do {
                 let html = try NewPiMarkdownWebDocument.documentHTML(
                     markdown: markdown,
-                    rendererScriptURL: rendererScriptURL
+                    rendererScriptURL: rendererScriptURL,
+                    streaming: !flush
                 )
                 // 禁止在视图更新周期内写 @Binding（makeNSView 里直接赋值会触发
                 // SwiftUI “Modifying state during view update” 运行时警告），延后到下一轮 runloop 再置初值。
@@ -193,10 +284,29 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                 }
                 isPageLoaded = false
                 lastRenderedMarkdown = nil
+                lastRenderWasFlush = flush
                 webView.loadHTMLString(html, baseURL: rendererScriptURL.deletingLastPathComponent())
+                armLoadWatchdog(for: webView)
             } catch {
-                reportFailure()
+                reportFailure(reason: "documentHTML encoding failed: \(error.localizedDescription)")
             }
+        }
+
+        private func armLoadWatchdog(for webView: WKWebView) {
+            loadWatchdog?.cancel()
+            let workItem = DispatchWorkItem { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.loadWatchdog = nil
+                guard !self.isPageLoaded, webView.window != nil else { return }
+                self.reportFailure(reason: "page load watchdog timed out (\(self.loadWatchdogInterval)s without didFinish)")
+            }
+            loadWatchdog = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + loadWatchdogInterval, execute: workItem)
+        }
+
+        private func disarmLoadWatchdog() {
+            loadWatchdog?.cancel()
+            loadWatchdog = nil
         }
 
         func scheduleUpdate(
@@ -237,28 +347,24 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func cancelPendingUpdate() {
             throttleWorkItem?.cancel()
             throttleWorkItem = nil
+            disarmLoadWatchdog()
         }
 
         func installScrollWheelForwarding(for webView: WKWebView) {
             scrollForwardingWebView = webView
-            guard scrollWheelMonitor == nil else { return }
-
-            scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                self?.forwardVerticalScrollIfNeeded(event) ?? event
-            }
+            MarkdownScrollWheelForwarder.shared.register(webView)
         }
 
         func removeScrollWheelForwarding() {
-            if let scrollWheelMonitor {
-                NSEvent.removeMonitor(scrollWheelMonitor)
+            if let webView = scrollForwardingWebView {
+                MarkdownScrollWheelForwarder.shared.unregister(webView)
             }
-            scrollWheelMonitor = nil
             scrollForwardingWebView = nil
         }
 
         private func renderPending(in webView: WKWebView) {
             guard let markdown = pendingMarkdown else { return }
-            guard markdown != lastRenderedMarkdown else { return }
+            guard markdown != lastRenderedMarkdown || isFlushRendering != lastRenderWasFlush else { return }
 
             if isRenderingJavaScript {
                 rerenderAfterFlight = true
@@ -272,19 +378,23 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         private func renderViaJavaScript(markdown: String, in webView: WKWebView) {
             isRenderingJavaScript = true
+            // 本地捕获渲染模式：JS 在途期间新的 scheduleUpdate 可能翻转 isFlushRendering，
+            // 完成回调里要记录的是本次实际渲染所用的模式。
+            let flush = isFlushRendering
             do {
                 let script = try NewPiMarkdownWebDocument.renderJavaScript(
                     for: markdown,
-                    streaming: !isFlushRendering
+                    streaming: !flush
                 )
                 webView.evaluateJavaScript(script) { [weak self] _, error in
                     guard let self else { return }
                     self.isRenderingJavaScript = false
-                    if error != nil {
-                        self.reportFailure()
+                    if let error {
+                        self.reportFailure(reason: "evaluateJavaScript failed: \(error.localizedDescription)")
                         return
                     }
                     self.lastRenderedMarkdown = markdown
+                    self.lastRenderWasFlush = flush
                     self.lastRenderTime = Date()
                     if self.rerenderAfterFlight {
                         self.rerenderAfterFlight = false
@@ -293,11 +403,27 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                 }
             } catch {
                 isRenderingJavaScript = false
-                reportFailure()
+                reportFailure(reason: "renderJavaScript encoding failed: \(error.localizedDescription)")
             }
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            // JS 侧未捕获异常（含初始内联引导脚本，evaluateJavaScript 的错误回调覆盖不到）
+            if message.name == "rendererError" {
+                let detail = message.body as? String ?? "unknown"
+                reportFailure(reason: "window.onerror: \(detail)")
+                return
+            }
+
+            // 代码块复制按钮：file:// 源下 navigator.clipboard 不可靠，由原生写剪贴板
+            if message.name == "copyText" {
+                guard let text = message.body as? String else { return }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                return
+            }
+
             guard message.name == "height" else { return }
 
             let reportedHeight: CGFloat
@@ -324,11 +450,12 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         private func applyStreamingHeight(_ reportedHeight: CGFloat) {
+            // 流式期间高度只增不减，避免布局回跳；滚动跟随由 ChatView 监听
+            // transcript 变化驱动，无需在此额外发通知。
             let nextHeight = max(height, max(1, reportedHeight))
             guard nextHeight > height else { return }
 
             height = nextHeight
-            NotificationCenter.default.post(name: .newPiStreamingContentDidGrow, object: nil)
         }
 
         // SECURITY-REVIEW: Only local file resources and about:blank are allowed.
@@ -355,20 +482,43 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            reportFailure()
+            reportFailure(reason: "navigation failed: \(error.localizedDescription)")
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            reportFailure()
+            reportFailure(reason: "provisional navigation failed: \(error.localizedDescription)")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            disarmLoadWatchdog()
             isPageLoaded = true
             NewPiMarkdownWebRendererView.configureEmbeddedScrollViews(in: webView)
 
             if let markdown = pendingMarkdown, markdown != lastRenderedMarkdown {
                 renderViaJavaScript(markdown: markdown, in: webView)
             }
+        }
+
+        // WebKit 内容进程被终止（内存压力、同时挂载过多 WebView 等）时，
+        // WebView 会变成白屏且不再响应任何 evaluateJavaScript，且不会走 didFail 回调。
+        // 用当前内容重建一次页面；再次终止则退回原生渲染兜底。
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            NewPiLogger.error(
+                category: "app",
+                message: "Markdown web content process terminated",
+                details: "willRecover=\(!hasAttemptedProcessRecovery)"
+            )
+            guard !hasAttemptedProcessRecovery, let rendererScriptURL else {
+                reportFailure(reason: "web content process terminated again after recovery")
+                return
+            }
+            hasAttemptedProcessRecovery = true
+            loadInitial(
+                markdown: pendingMarkdown ?? lastRenderedMarkdown ?? "",
+                rendererScriptURL: rendererScriptURL,
+                flush: isFlushRendering,
+                in: webView
+            )
         }
 
         func webView(
@@ -380,44 +530,15 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             nil
         }
 
-        private func reportFailure() {
+        private func reportFailure(reason: String) {
             guard !hasReportedFailure else { return }
             hasReportedFailure = true
+            NewPiLogger.error(
+                category: "app",
+                message: "Markdown renderer failed, falling back to native text",
+                details: reason
+            )
             onRenderingFailed()
-        }
-
-        private func forwardVerticalScrollIfNeeded(_ event: NSEvent) -> NSEvent? {
-            guard
-                let webView = scrollForwardingWebView,
-                let eventWindow = event.window,
-                eventWindow === webView.window
-            else {
-                return event
-            }
-
-            let eventPoint = webView.convert(event.locationInWindow, from: nil)
-            guard webView.bounds.contains(eventPoint) else { return event }
-            guard abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX), event.scrollingDeltaY != 0 else {
-                return event
-            }
-
-            guard let outerScrollView = enclosingScrollView(outside: webView) else {
-                return event
-            }
-
-            outerScrollView.scrollWheel(with: event)
-            return nil
-        }
-
-        private func enclosingScrollView(outside view: NSView) -> NSScrollView? {
-            var currentView = view.superview
-            while let view = currentView {
-                if let scrollView = view as? NSScrollView {
-                    return scrollView
-                }
-                currentView = view.superview
-            }
-            return nil
         }
     }
 }

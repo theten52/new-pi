@@ -2,13 +2,17 @@
 
 > **受众**：后续 Agent / 开发者。在 macOS SwiftUI 聊天界面中实现「底对齐、流式不跳、不被状态栏遮挡」之前，请先读本文再改代码。
 >
-> **当前基线提交**：`5354447`（2026-08-26）
+> **当前基线**：分支 `feat/streaming-markdown-blocks`（2026-08-27，基于 `5354447` 之后的重构）
+>
+> **设计史与调研**：[`2026-08-28-streaming-markdown-rendering-context.md`](./2026-08-28-streaming-markdown-rendering-context.md) 记录了本轮渲染重构的设计意图、行业调研、踩坑与审查核查，改代码前建议先读。
 >
 > **相关文件**：
 > - `NewPiApp/NewPiChatView.swift` — 布局 + 滚动
-> - `NewPiApp/NewPiChatScrollHelper.swift` — 锚点 ID、composer 高度 PreferenceKey
+> - `NewPiApp/NewPiChatScrollHelper.swift` — 锚点 ID、composer 高度 / 底部锚点位置 PreferenceKey
 > - `NewPiApp/NewPiAgentStatusView.swift` — 输入区状态条 / 工具栏图标
-> - `NewPiApp/NewPiMarkdownText.swift` — 流式原生 Text / 完成 WebView
+> - `NewPiApp/NewPiMarkdownText.swift` — 消息行布局（助手全宽 / 用户气泡）
+> - `NewPiApp/NewPiMarkdownWebRenderer.swift` — WKWebView 渲染器（流式 + 终态统一）
+> - `NewPiApp/MarkdownRenderer/markdown-renderer.js` — 块级增量渲染、尾部修复、流式光标
 > - `NewPiApp/NewPiViewModel.swift` — `agentActivity`、`isStreaming`
 > - `NewPiApp/NewPiApp.swift` — RootView、Session 高亮
 
@@ -54,12 +58,20 @@ let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
 
 composer 高度通过 `ComposerHeightPreferenceKey` 在 `chatComposer` 上实测。
 
-### Markdown 渲染分工
+### Markdown 渲染分工（2026-08-27 起，本分支）
 
 | 阶段 | 渲染方式 | 原因 |
 |------|----------|------|
-| 流式输出中 | 原生 `Text` / `AttributedString`（`flushRendering == false`） | 高度连续、无 WebView 挂载跳变 |
-| 输出完成 | WKWebView + markdown-it（`flushRendering == true`） | 代码高亮、完整 MD 特性 |
+| 流式输出中 | WKWebView + markdown-it（`streaming: true`，块级增量渲染） | 单引擎，消除完成时的换引擎跳变 |
+| 输出完成 | 同一 WKWebView，一次全量重渲染 + hljs 高亮 | 归一化块结构、补高亮 |
+
+要点：
+
+- JS 侧按顶层块切分（围栏感知），已完成的块冻结不动，每帧只重渲染尾部块；尾部块的未闭合语法（围栏 / 行内代码 / 加粗）在**渲染副本**上修复。
+- 流式期间尾块跳过 hljs，冻结块带高亮；完成时一次全量高亮归一化。
+- 流式光标 ✦（渐变流光）；完成后进入静止终态（静态停留后淡出，绝对定位不参与布局）。
+- 旧方案「流式原生 Text、完成切 WebView」已废弃 —— 换引擎跳变是它解决不了的问题（见 §3.6 更新）。
+- 滚动跟随由 ChatView 监听 `transcript` 变化驱动；高度通知 `newPiStreamingContentDidGrow` 已删除（曾是只发不收的死代码）。
 
 ---
 
@@ -146,7 +158,7 @@ minHeight: isStreaming ? 0 : scrollViewportHeight
 
 ---
 
-### 3.6 ❌ WebView 流式渲染导致高度突变（回复气泡「跳一下」）
+### 3.6 ⚠️ WebView 流式渲染导致高度突变（回复气泡「跳一下」）— 已被新架构取代
 
 **现象**：助手气泡首次出现时突然跳变。
 
@@ -157,15 +169,11 @@ minHeight: isStreaming ? 0 : scrollViewportHeight
 3. HTML 加载 + JS 报高 → 一次跳到 200px+
 4. 同时 `onChange(last?.id)`、`onGeometryChange`、Notification 多次 scrollTo
 
-**最终方案**：
+**当时的方案**：流式期间用原生 Text，输出结束后再切 WebView。
 
-- **流式期间用原生 Text** → 高度随文字 intrinsic 增长
-- **输出结束后**再切 WebView
-- 去掉行级 `onGeometryChange` 触发滚动；流式路径不依赖 WebView 高度 Notification
+**2026-08-27 更新**：该方案因「完成瞬间换引擎跳变 + 流式裸语法外露」被废弃。当前实现为**单引擎**（流式/终态同一 WKWebView），靠 JS 侧块级增量渲染 + 高度只增不减（流式）+ 终态光标绝对定位来消除跳变。若未来要改回原生流式，需先解决双引擎样式不一致问题。
 
-**教训**：`NSViewRepresentable`（WKWebView）**不适合**做流式实时高度布局；流式用 SwiftUI Text，WebView 仅终态。
-
-> ⚠️ 早期方案「流式与终态统一 WebView + throttle」已在实践中证明易跳、易挡，见 `b458f1a` 时代；当前以原生流式为准。
+> ⚠️ 早期方案「流式与终态统一 WebView + throttle」曾在 `b458f1a` 时代证明易跳，但当时的根因是全量 `innerHTML` 重绘 + 双轨滚屏；本分支的块级增量渲染已消除该根因，不可直接套旧结论。
 
 ---
 
@@ -198,7 +206,17 @@ scrollViewportHeight = geometry.size.height - composerHeight
 
 **原因**：估算高度与 WebView 实测不一致，滚到底时视口落在空白区。
 
-**教训**：**不要用字符数估算代替实测或 intrinsic 高度**；若必须用 WebView，跟紧实测；流式优先 native Text。
+**教训**：**不要用字符数估算代替实测或 intrinsic 高度**；WebView 方案要跟紧实测高度。
+
+---
+
+### 3.10 ⚠️ 不要把消息列表从 LazyVStack 改回 VStack
+
+`62c4226` 重新引入了 `LazyVStack`（早于它的 `5354447` 曾把 LazyVStack → VStack 作为修复项）。
+
+**在单引擎 WebView 架构下，VStack 是有害的**：每条消息常驻一个 WKWebView，VStack 会急切挂载全部历史消息的 WebView → 内存压力 → WebContent 进程被杀 → 白屏（渲染器已对进程终止做一次自动重建 + 原生兜底，但不应主动制造压力）。
+
+原始失败机制（"LazyVStack 导致底部锚点未布局"）已不存在：**底部锚点在 LazyVStack 之外**，`scrollTo` 不依赖 LazyVStack 的惰性布局。
 
 ---
 
@@ -214,10 +232,16 @@ scrollViewportHeight = geometry.size.height - composerHeight
 
 ### 不应触发
 
-- WebView 高度 Notification（流式已不用 WebView）
+- ~~WebView 高度 Notification~~（`newPiStreamingContentDidGrow` 已于 2026-08-27 删除，滚动跟随只认 transcript 变化）
 - 每行 `onGeometryChange`（易抖动）
 - 多次 async scrollTo
 - 非流式时每次 id 变化（短对话靠 Spacer 底对齐）
+
+### 贴底检测与「Jump to latest」（2026-08-27 新增）
+
+- 底部锚点通过 `ChatBottomAnchorPreferenceKey` 上报在滚动坐标系中的 minY，`isNearBottom = anchorY - viewportHeight <= 100`
+- 流式时只在贴底才自动钉底；用户上翻超过阈值即释放钉底，并浮出 "Jump to latest" 胶囊（点击回底并重新吸附）
+- 消息轨道跳转的 `suppressAutoPinDuringStreaming` 仍然有效，与贴底检测是「且」的关系
 
 ### 实现模板
 
@@ -253,7 +277,7 @@ private func pinScrollToBottom(using proxy: ScrollViewProxy) {
 - [ ] `minHeight` 是否 = **视口高 − composer 高**？
 - [ ] 是否 **始终** 使用 Spacer + minHeight（不随 `isStreaming` 切换）？
 - [ ] 是否只有 **一种** scroll 机制（无 NSScrollView hack）？
-- [ ] 流式是否避免 WebView 固定高度布局？
+- [ ] 流式与终态是否仍走**同一个** WebView（不要恢复双引擎切换）？
 - [ ] 是否避免 `scrollTo(messageID)` 与 anchor scroll 并用？
 - [ ] 改完后手动测：空对话首条、长 MD 流式、多轮对话、未溢出不可滚、气泡底与状态栏 16pt
 
@@ -271,16 +295,18 @@ private func pinScrollToBottom(using proxy: ScrollViewProxy) {
 
 ---
 
-## 8. 已知未解决问题（截至 5354447）
-
-以下在本轮 **未** 修复，勿与滚动/layout 混为一谈：
+## 8. 已知未解决问题（截至 2026-08-27）
 
 | 项 | 说明 |
 |---|---|
-| `rebuildTranscript` 丢 UUID | `agentEnd` 后 remount WebView，可能闪屏 |
 | Sessions 侧边栏空 | 磁盘有 jsonl 但列表不显示 |
-| 流式结束切 WebView | 可能有轻微高度调整（可接受或后续 cross-fade） |
 | `defaultMaxTurns` | 若需 200，确认是否在独立 commit |
+
+已解决（勿再当 open issue 处理）：
+
+- ~~`rebuildTranscript` 丢 UUID~~ → `preservedTranscriptID` 按 entryID / messageIndex / 流式 assistant id 复用
+- ~~流式结束切 WebView 闪屏~~ → 单引擎渲染，完成时只做一次全量高亮归一化
+- ~~流式完成时 `+12` 高度缓冲移除导致闪缩~~ → 缓冲已删；终态光标绝对定位不参与布局，淡出移除时高度不二次收缩
 
 ---
 
@@ -295,7 +321,8 @@ private func pinScrollToBottom(using proxy: ScrollViewProxy) {
 | safeAreaInset + ZStack composer | 叠加输入区 | macOS 遮挡 |
 | scrollPosition | 绑定 anchor id | 长高不跟随 |
 | isStreaming 切换 layout | 去 Spacer | 发送/回复跳位 |
-| **当前** | VStack 固定 composer + 锚点上 spacer + 原生流式 Text | 见 `5354447` |
+| 双引擎（原生流式 Text + 终态 WebView） | 完成时换引擎 | 换引擎跳变、流式裸语法外露，已废弃 |
+| **当前** | VStack 固定 composer + 锚点上 spacer + 单引擎 WebView 块级增量渲染 | 见分支 `feat/streaming-markdown-blocks` |
 
 更细的时间线见：`docs/dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`（部分结论已被本文 supersede）。
 
@@ -305,19 +332,21 @@ private func pinScrollToBottom(using proxy: ScrollViewProxy) {
 
 | Commit | 说明 |
 |--------|------|
-| `b458f1a` | 流式/终态统一 WebView + throttle（后被原生流式替代） |
+| `b458f1a` | 流式/终态统一 WebView + throttle（全量 innerHTML，换行仍跳） |
 | `c504ab0` | 滚屏抖动、AppKit helper（helper 已移除） |
 | `beaf002` | Tool approval sheet 修复 |
-| **`5354447`** | **聊天布局、状态栏、原生流式 Text、滚动修复（当前基线） |
+| `5354447` | 聊天布局、状态栏、原生流式 Text、滚动修复（旧基线） |
+| `62c4226` | 消息轨道 + LazyVStack 回归（本分支保留 LazyVStack，见 §3.10） |
+| 分支 `feat/streaming-markdown-blocks` | 单引擎块级增量渲染、✦ 流式光标、贴底检测 + Jump to latest、滚轮监听单例化、WebContent 进程终止恢复 + 渲染器日志埋点 |
 
 ---
 
 ## 11. 一句话原则
 
-> **macOS 聊天 UI：composer 固定底部、间距在锚点上方、布局策略恒定、流式用原生 Text、滚动只滚 anchor、一种 scroll 机制。**
+> **macOS 聊天 UI：composer 固定底部、间距在锚点上方、布局策略恒定、流式与终态同一引擎（块级增量）、滚动只滚 anchor、一种 scroll 机制。**
 
 任何一条被打破，都容易复现「跳、挡、多余滚动」三类问题。
 
 ---
 
-*最后更新：2026-08-26*
+*最后更新：2026-08-27*

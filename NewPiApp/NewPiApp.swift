@@ -58,7 +58,6 @@ final class NewPiRootViewModelStore {
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
-    static let newPiStreamingContentDidGrow = Notification.Name("com.new-pi.streamingContentDidGrow")
 }
 
 private struct SessionRow: View {

@@ -15,6 +15,8 @@ body {
   padding: 0;
   background: transparent;
   font: -apple-system-body;
+  /* 终态光标绝对定位的包含块（offsetTop 也以它为基准） */
+  position: relative;
 }
 
 .markdown-body pre {
@@ -30,4 +32,143 @@ body {
 
 .markdown-body a {
   cursor: default;
+}
+
+/* ===== 排版：克制的标题层级（覆盖 github-markdown-light） ===== */
+.markdown-body h1 {
+  font-size: 1.3em;
+  font-weight: 600;
+  margin: 0.8em 0 0.4em;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.markdown-body h2 {
+  font-size: 1.2em;
+  font-weight: 600;
+  margin: 0.8em 0 0.4em;
+}
+
+.markdown-body h3 {
+  font-size: 1.1em;
+  font-weight: 600;
+  margin: 0.7em 0 0.3em;
+}
+
+/* 引用：左侧竖条 */
+.markdown-body blockquote {
+  margin: 0 0 16px;
+  padding: 0 0 0 12px;
+  border-left: 3px solid rgba(0, 0, 0, 0.15);
+  color: #57606a;
+}
+
+/* 增量渲染的块包装：末块尾距归零，与全量渲染的首末块规则对齐 */
+.markdown-body > .markdown-block:last-of-type > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body > .markdown-block:first-of-type > :first-child {
+  margin-top: 0;
+}
+
+/* ===== 流式光标：✦ 渐变流光 ===== */
+.streaming-caret {
+  display: inline-block;
+  margin-left: 3px;
+  font-size: 1em;
+  line-height: 1;
+  vertical-align: text-bottom;
+  background: linear-gradient(120deg, #0969da, #8250df, #0969da);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation:
+    newpi-caret-shimmer 1.4s linear infinite,
+    newpi-caret-pulse 1s ease-in-out infinite;
+}
+
+@keyframes newpi-caret-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes newpi-caret-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+}
+
+/* 静止终态：流式结束后停止流光与脉冲，静态停留片刻再淡出 */
+.streaming-caret.is-final {
+  background: #8250df;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: newpi-caret-fade 1.3s ease forwards;
+}
+
+@keyframes newpi-caret-fade {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ===== 代码块外框：语言标签 + 复制按钮 ===== */
+.code-block-container {
+  margin: 0 0 16px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.04);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  font: -apple-system-caption1;
+  color: #57606a;
+}
+
+.code-block-copy {
+  border: none;
+  background: transparent;
+  color: #57606a;
+  font: -apple-system-caption1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.code-block-container:hover .code-block-copy {
+  opacity: 1;
+}
+
+.code-block-copy:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.code-block-copy.copied {
+  opacity: 1;
+}
+
+.code-block-container pre {
+  margin: 0;
+  border-radius: 0;
 }
