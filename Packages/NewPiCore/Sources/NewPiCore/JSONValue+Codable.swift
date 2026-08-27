@@ -46,19 +46,16 @@ public enum JSONValueDecoder {
         switch value {
         case is NSNull:
             return .null
-        case let bool as Bool:
-            return .bool(bool)
-        case let int as Int:
-            return .int(int)
-        case let double as Double:
-            return .double(double)
+        // NSNumber 必须先于 Bool/Int/Double 判断：JSONSerialization 的数字都是
+        // NSNumber，而 `as Bool` 的桥接会把 JSON 的 0/1 误判为布尔。
         case let number as NSNumber:
             if CFGetTypeID(number) == CFBooleanGetTypeID() {
                 return .bool(number.boolValue)
             }
             let doubleValue = number.doubleValue
-            if floor(doubleValue) == doubleValue {
-                return .int(number.intValue)
+            if doubleValue.rounded(.towardZero) == doubleValue,
+               let intValue = Int(exactly: number) {
+                return .int(intValue)
             }
             return .double(doubleValue)
         case let string as String:
