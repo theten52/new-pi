@@ -264,7 +264,7 @@ public struct AnthropicProvider: LLMProvider, Sendable {
         apiKeyProvider: @escaping @Sendable () async throws -> String,
         baseURL: URL = AnthropicAPI.defaultBaseURL,
         apiVersion: String = AnthropicAPI.anthropicVersion,
-        session: URLSession = .shared
+        session: URLSession = .newPiDefault
     ) {
         self.apiKeyProvider = apiKeyProvider
         self.baseURL = baseURL

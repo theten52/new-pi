@@ -300,3 +300,29 @@ struct LLMProviderFactoryProfileTests {
         #expect(provider is OpenAICompatibleProvider)
     }
 }
+
+@Suite("ProviderNetworking")
+struct ProviderNetworkingTests {
+    /// 回归：三个 provider 的默认 session 曾用 URLSession.shared（resource
+    /// timeout 7 天），SSE 服务端挂起时流式请求永久卡住。
+    @Test func defaultSessionHasBoundedTimeouts() {
+        let configuration = URLSession.newPiDefault.configuration
+        #expect(configuration.timeoutIntervalForRequest <= 60)
+        #expect(configuration.timeoutIntervalForResource <= 600)
+        #expect(configuration.timeoutIntervalForResource > 0)
+    }
+
+    @Test func providersDefaultToBoundedSession() {
+        let anthropic = AnthropicProvider(apiKeyProvider: { "k" })
+        #expect(anthropic.session.configuration.timeoutIntervalForResource <= 600)
+
+        let profile = ProviderProfile(
+            name: "t", preset: .openaiCompatible, modelID: "m"
+        )
+        let openai = OpenAICompatibleProvider(profile: profile, apiKeyProvider: { "k" })
+        #expect(openai.session.configuration.timeoutIntervalForResource <= 600)
+
+        let responses = ResponsesAPIProvider(profile: profile, apiKeyProvider: { "k" })
+        #expect(responses.session.configuration.timeoutIntervalForResource <= 600)
+    }
+}

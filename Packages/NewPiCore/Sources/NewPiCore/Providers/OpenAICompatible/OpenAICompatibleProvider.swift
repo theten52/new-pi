@@ -234,7 +234,7 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
     public init(
         profile: ProviderProfile,
         apiKeyProvider: @escaping @Sendable () async throws -> String,
-        session: URLSession = .shared
+        session: URLSession = .newPiDefault
     ) {
         self.profile = profile
         self.apiKeyProvider = apiKeyProvider
