@@ -47,7 +47,7 @@ struct NewPiMarkdownText: View {
 
     private var nativeFallback: some View {
         Group {
-            if let attributed = Self.parsedMarkdown(from: content) {
+            if let attributed = Self.parsedMarkdown(from: content, streaming: !flushRendering) {
                 Text(attributed)
             } else {
                 Text(content)
@@ -59,13 +59,15 @@ struct NewPiMarkdownText: View {
     }
 
     /// Native fallback: line-by-line full Markdown so single `\n` are preserved.
-    private static func parsedMarkdown(from content: String) -> AttributedString? {
+    private static func parsedMarkdown(from content: String, streaming: Bool) -> AttributedString? {
         let segments = markdownLineSegments(from: content)
         guard !segments.isEmpty else { return nil }
 
         var result = AttributedString()
+        // 流式阶段用轻量 inline 解析：避免每个刷新窗口都对整条消息做昂贵的 .full 块级解析
+        //（代码块/列表/标题等块级结构会在消息完成后由 WebView 完整渲染）。完成/回退路径仍用 .full。
         let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
+            interpretedSyntax: streaming ? .inlineOnly : .full,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
 

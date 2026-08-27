@@ -56,6 +56,10 @@ final class SessionRuntime {
     var isForkedBranch = false
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
+    /// 流式文本增量合并缓冲：textDelta 先累积到这里，按节流间隔一次性合并进 transcript，
+    /// 避免每个 delta 都触发 O(n) 字符串拼接与全量 UI 重渲染（见流式渲染优化）。
+    var pendingStreamingDelta = ""
+    var streamingFlushTask: Task<Void, Never>?
 
     init(session: AgentSession, fileURL: URL, sessionID: UUID) {
         self.session = session
@@ -740,6 +744,7 @@ final class NewPiViewModel: ObservableObject {
     func abort() {
         NewPiLogger.info(category: "app", message: "User aborted agent run")
         guard let runtime = activeRuntime else { return }
+        flushStreamingDelta(on: runtime)
         runtime.pendingToolApproval = nil
         runtime.agentActivity = .idle
         reflectActive()
@@ -784,6 +789,15 @@ final class NewPiViewModel: ObservableObject {
     }
 
     private func handle(_ event: AgentEvent, on runtime: SessionRuntime) {
+        // 非文本事件是状态边界：先把未合并的流式增量冲刷掉，保证内容顺序一致且不丢失。
+        switch event {
+        case .messageStart, .toolExecutionStart, .toolExecutionEnd, .agentEnd, .error:
+            flushStreamingDelta(on: runtime)
+        default:
+            break
+        }
+
+        var hasVisibleStateChange = true
         switch event {
         case .agentStart:
             runtime.isStreaming = true
@@ -801,7 +815,11 @@ final class NewPiViewModel: ObservableObject {
             }
         case let .textDelta(delta):
             runtime.agentActivity = .writing
-            appendOrUpdateAssistant(delta, on: runtime)
+            enqueueStreamingDelta(delta, on: runtime)
+            if runtime === activeRuntime, agentActivity != .writing {
+                agentActivity = .writing
+            }
+            hasVisibleStateChange = false
         case let .thinkingDelta(delta):
             NewPiLogger.debug(
                 category: "app",
@@ -873,7 +891,7 @@ final class NewPiViewModel: ObservableObject {
         default:
             break
         }
-        if runtime === activeRuntime {
+        if hasVisibleStateChange, runtime === activeRuntime {
             reflectActive()
         }
     }
@@ -1118,6 +1136,36 @@ final class NewPiViewModel: ObservableObject {
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
+    }
+
+    /// 流式增量合并的节流间隔（毫秒）：间隔内到达的 textDelta 会合并成一次 transcript 刷新，
+    /// 避免逐字符触发 O(n) 拼接、全量 markdown 重解析与 UI 重渲染。
+    private let streamingFlushIntervalMS: UInt64 = 40
+
+    /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
+    private func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
+        runtime.pendingStreamingDelta += delta
+        guard runtime.streamingFlushTask == nil else { return }
+        runtime.streamingFlushTask = Task { @MainActor [weak runtime] in
+            do {
+                try await Task.sleep(nanoseconds: streamingFlushIntervalMS * 1_000_000)
+            } catch {
+                return
+            }
+            guard let runtime else { return }
+            runtime.streamingFlushTask = nil
+            flushStreamingDelta(on: runtime)
+        }
+    }
+
+    /// 立即把未合并的流式增量写入 transcript（在状态边界 / abort 前调用，防止文本丢失与乱序）。
+    private func flushStreamingDelta(on runtime: SessionRuntime) {
+        runtime.streamingFlushTask?.cancel()
+        runtime.streamingFlushTask = nil
+        guard !runtime.pendingStreamingDelta.isEmpty else { return }
+        let delta = runtime.pendingStreamingDelta
+        runtime.pendingStreamingDelta = ""
+        appendOrUpdateAssistant(delta, on: runtime)
     }
 
     private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
