@@ -13,8 +13,10 @@ public struct AgentLoop: Sendable {
     ) -> AsyncStream<AgentEvent> {
         AsyncStream { continuation in
             let task = Task {
+                // 注意：必须在 do 块外声明，否则 catch 分支只能看到 run 开始前的
+                // 初始快照，错误路径会把已提交的会话整体回滚。
+                var context = context
                 do {
-                    var context = context
                     NewPiLogger.info(
                         category: "agent-loop",
                         message: "Agent run started",

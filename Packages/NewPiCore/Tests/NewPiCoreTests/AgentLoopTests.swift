@@ -245,4 +245,30 @@ struct AgentLoopTests {
             Issue.record("Missing context snapshot")
         }
     }
+
+    @Test("LLM failure keeps user message in final snapshot")
+    func llmFailureKeepsUserMessageInSnapshot() async {
+        let config = AgentLoopConfig(
+            model: AgentLoopTestSupport.defaultModel,
+            llm: ThrowingLLMProvider()
+        )
+
+        let events = await AgentLoopTestSupport.collectEvents(
+            prompt: .user("Hi"),
+            context: AgentContext(systemPrompt: "test"),
+            config: config
+        )
+
+        #expect(events.contains { if case .error = $0 { true } else { false } })
+
+        if let snapshot = events.compactMap({
+            if case let .contextSnapshot(context) = $0 { context } else { nil }
+        }).last {
+            // 回归：catch 分支曾引用 do 块外的初始参数，把已提交的用户消息回滚掉。
+            #expect(snapshot.messages.count == 1)
+            #expect(snapshot.messages.first?.roleLabel == "user")
+        } else {
+            Issue.record("Missing context snapshot")
+        }
+    }
 }

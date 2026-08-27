@@ -83,6 +83,19 @@ struct FailingTool: AgentTool {
     }
 }
 
+struct ThrowingLLMProvider: LLMProvider {
+    func stream(
+        model: ModelConfig,
+        systemPrompt: String,
+        messages: [AgentMessage],
+        tools: [ToolDefinition]
+    ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: AgentError.llmFailed("boom"))
+        }
+    }
+}
+
 enum AgentLoopTestSupport {
     static let defaultModel = ModelConfig(provider: "mock", modelID: "mock-1")
 
