@@ -105,4 +105,105 @@ struct AgentSessionShutdownTests {
             return false
         })
     }
+
+    @Test("re-prompt clears pending approval and the cancelled run's tool never executes")
+    func rePromptClearsPendingApproval() async throws {
+        // 回归：prompt() 之前只取消 runTask，不清理审批门——旧 run 挂起在
+        // 审批上，用户之后点"允许"会让已取消的 run 复活并真正执行工具。
+        let counter = ToolExecutionCounter()
+        let approvalArrived = StreamGate()
+
+        let llm = MockLLMProviderBox(scripts: [
+            [
+                .toolCall(ToolCallContent(id: "call_1", name: "count", arguments: .object([:]))),
+                .completed(stopReason: .toolUse, usage: UsageStats()),
+            ],
+            [
+                .textDelta("done"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ],
+        ])
+
+        let config = AgentLoopConfig(
+            model: AgentLoopTestSupport.defaultModel,
+            llm: llm,
+            tools: [CountingTool(counter: counter)],
+            toolPolicy: ToolPolicyRules(requireApprovalFor: ["count"])
+        )
+        let session = AgentSession(
+            context: AgentContext(systemPrompt: "test"),
+            config: config
+        )
+
+        // 监听事件流：第一个 run 的审批请求出现时放行测试主线。
+        let eventStream = await session.events()
+        let collector = Task {
+            for await event in eventStream {
+                if case .toolApprovalRequired = event {
+                    await approvalArrived.markStarted()
+                }
+            }
+        }
+
+        await session.prompt(.user("run count"))
+        await approvalArrived.wait()
+
+        // 旧 run 正挂起在审批门。直接发新 prompt（用户不等审批继续提问）。
+        await session.prompt(.user("again"))
+
+        // 新 prompt 之后，旧审批请求必须已被清理：再响应它应当是 no-op。
+        await session.respondToToolApproval(requestID: "call_1", approved: true)
+        #expect(await counter.count == 0)
+
+        // 等第二个 run 完成。
+        let finished = await waitUntilTrue {
+            await session.context.messages.contains { message in
+                if case let .assistant(assistant) = message { return assistant.text == "done" }
+                return false
+            }
+        }
+        #expect(finished)
+        #expect(await counter.count == 0)
+
+        collector.cancel()
+        await session.shutdown()
+    }
+}
+
+private actor ToolExecutionCounter {
+    private(set) var count = 0
+    func increment() { count += 1 }
+}
+
+private struct CountingTool: AgentTool {
+    let counter: ToolExecutionCounter
+    let name = "count"
+    let definition = ToolDefinition(
+        name: "count",
+        description: "Counts executions",
+        parameters: .object([:])
+    )
+
+    func execute(
+        id: String,
+        arguments: JSONValue,
+        context: ToolContext,
+        onUpdate: (@Sendable (ToolProgress) -> Void)?
+    ) async throws -> ToolResult {
+        await counter.increment()
+        return ToolResult(content: "ok")
+    }
+}
+
+/// 轮询直到条件成立或超时（用于等待异步 run 收尾）。
+private func waitUntilTrue(
+    timeout: Duration = .seconds(2),
+    _ check: @escaping () async -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await check() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return await check()
 }

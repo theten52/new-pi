@@ -71,6 +71,10 @@ public actor AgentSession {
             """
         )
         runTask = Task {
+            // 先清掉上一个 run 可能仍在挂起的审批：审批 wait 不响应任务取消，
+            // 若不清理，用户之后点"允许"会让已取消的旧 run 复活并真正执行工具。
+            // 在新 runTask 内、事件循环开始前执行，保证不会误清本次 run 的请求。
+            await approvalGate.cancelAll()
             let steeringProvider: (@Sendable () async -> AgentMessage?)? = { [weak self] in
                 guard let self else { return nil }
                 return await self.dequeueSteering()

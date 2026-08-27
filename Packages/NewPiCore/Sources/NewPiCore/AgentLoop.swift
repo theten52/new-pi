@@ -342,6 +342,9 @@ public struct AgentLoop: Sendable {
                 }
             }
 
+            // 审批等待期间任务可能已被取消：执行有副作用的工具前最后检查一次。
+            try Task.checkCancellation()
+
             continuation.yield(.toolExecutionStart(id: call.id, name: call.name, arguments: call.arguments))
 
             if let beforeToolCall = config.beforeToolCall {
