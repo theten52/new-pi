@@ -5,6 +5,7 @@ import SwiftUI
 struct NewPiSettingsView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @StateObject private var mcpBridge = MCPPluginManagerBridge()
+    @StateObject private var approvalBridge = ApprovalPolicySettingsBridge()
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
 
@@ -55,6 +56,16 @@ struct NewPiSettingsView: View {
                 LabeledContent("MCP") {
                     Text("~/.new-pi/agent/mcp.json")
                         .font(.caption.monospaced())
+                }
+            }
+
+            Section("危险评估") {
+                Toggle("LLM 补充评估（消耗 token）", isOn: $approvalBridge.llmSupplementEnabled)
+                Text("LLM 评估失败时降级为工具基线等级，绝不降为低风险。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("重置为默认规则") {
+                    approvalBridge.resetToDefaults()
                 }
             }
 

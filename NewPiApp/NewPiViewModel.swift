@@ -558,7 +558,7 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    func approvePendingTool() {
+    func approvePendingTool(scope: ApprovalScope = .once) {
         guard let request = pendingToolApproval, let session else {
             NewPiLogger.error(category: "app", message: "Approve tapped with no pending request")
             return
@@ -566,11 +566,11 @@ final class NewPiViewModel: ObservableObject {
         NewPiLogger.info(
             category: "app",
             message: "User approved tool",
-            details: "requestID=\(request.id) tool=\(request.toolName)"
+            details: "requestID=\(request.id) tool=\(request.toolName) scope=\(scope.rawValue)"
         )
         pendingToolApproval = nil
         Task {
-            await session.respondToToolApproval(requestID: request.id, approved: true)
+            await session.respondToToolApproval(requestID: request.id, approved: true, scope: scope)
         }
     }
 
