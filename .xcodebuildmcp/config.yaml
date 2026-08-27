@@ -1,0 +1,20 @@
+# XcodeBuildMCP project config — version-controlled, repo-scoped.
+# See https://xcodebuildmcp.com/docs/configuration
+schemaVersion: 1
+
+# Tool groups exposed to the agent via MCP. NewPi is a macOS app, so we enable
+# the macOS workflow (build / run / test / launch) plus discovery & coverage.
+# simulator is intentionally left off (iOS-only); enable it if you also build iOS.
+enabledWorkflows:
+  - macos
+  - project-discovery
+  - coverage
+
+# Pinned once so the agent doesn't re-ask on every call.
+sessionDefaults:
+  projectPath: "./NewPi.xcodeproj"
+  scheme: "NewPi"
+  configuration: "Debug"
+
+# No Sentry telemetry for this project.
+sentryDisabled: true
