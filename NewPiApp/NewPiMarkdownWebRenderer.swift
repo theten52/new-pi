@@ -4,13 +4,6 @@ import NewPiCore
 import SwiftUI
 import WebKit
 
-/// 所有 Markdown WebView 共享的进程池：避免每条消息各占一个 WebKit 内容进程
-/// （内存/句柄随消息数线性增长的根因之一）。
-@MainActor
-enum NewPiMarkdownProcessPool {
-    static let shared = WKProcessPool()
-}
-
 /// 每条消息渲染完成后的高度缓存。冷重建（切换回未保活会话）时首帧直接用缓存高度，
 /// 避免 0 → 真实高度的渐进测高闪烁，也减少一次布局回跳。
 /// 使用 NSCache：内存吃紧时自动淘汰，避免只增不减的内存泄漏；key 用哈希而非完整 markdown。
@@ -224,8 +217,6 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "height")
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
-        // 共享进程池：多条消息/多个会话复用同一 WebKit 内容进程，避免每消息一个进程。
-        configuration.processPool = NewPiMarkdownProcessPool.shared
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator

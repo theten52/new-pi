@@ -40,7 +40,10 @@ struct NewPiSessionPanel: View {
     @State private var suppressAutoPinDuringStreaming = false
     @State private var isNearBottom = true
 
+    /// 消息列表底部保留的留白（锚点到底部的距离）。
     private let messageBottomGap: CGFloat = 16
+    /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
+    /// 否则用户在中间浏览时流式内容不打断。
     private let nearBottomThreshold: CGFloat = 100
 
     private var isActive: Bool { viewModel.isActiveRuntime(runtime) }
@@ -154,6 +157,9 @@ struct NewPiSessionPanel: View {
                         schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: runtime.isStreaming) { wasStreaming, isStreaming in
+                        // 只在活跃面板执行滚动逻辑：后台保话面板流式结束时不能把
+                        // 隐藏面板拽到底（违背"原位恢复"）。
+                        guard isActive else { return }
                         if isStreaming, !wasStreaming {
                             suppressAutoPinDuringStreaming = false
                         }

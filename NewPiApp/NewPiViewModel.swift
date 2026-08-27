@@ -289,7 +289,8 @@ final class NewPiViewModel: ObservableObject {
     private func evictIdleRuntimesIfNeeded() {
         while runtimes.count > Self.maxCachedRuntimes {
             guard let victim = runtimes.values
-                .filter({ $0 !== activeRuntime })
+                // 不淘汰仍在流式、或有待处理工具审批的会话，避免中断后台输出。
+                .filter({ $0 !== activeRuntime && !$0.isStreaming && $0.pendingToolApproval == nil })
                 .min(by: { $0.lastUsedAt < $1.lastUsedAt })
             else { return }
             NewPiLogger.info(
