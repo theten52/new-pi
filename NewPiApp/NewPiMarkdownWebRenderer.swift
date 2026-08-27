@@ -186,7 +186,11 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                     markdown: markdown,
                     rendererScriptURL: rendererScriptURL
                 )
-                height = 44
+                // 禁止在视图更新周期内写 @Binding（makeNSView 里直接赋值会触发
+                // SwiftUI “Modifying state during view update” 运行时警告），延后到下一轮 runloop 再置初值。
+                DispatchQueue.main.async { [weak self] in
+                    self?.height = 44
+                }
                 isPageLoaded = false
                 lastRenderedMarkdown = nil
                 webView.loadHTMLString(html, baseURL: rendererScriptURL.deletingLastPathComponent())
@@ -331,7 +335,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+            decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
         ) {
             if navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil {
                 decisionHandler(.cancel)

@@ -124,7 +124,7 @@ private struct LogTextView: NSViewRepresentable {
     }
 
     private func update(textView: NSTextView) {
-        let current = textView.string ?? ""
+        let current = textView.string
         if current != text {
             textView.string = text
         }
