@@ -237,9 +237,23 @@ public struct AgentLoop: Sendable {
             )
 
             let requiresApproval = config.toolPolicy.requiresApproval(toolName: call.name)
+            let fingerprint = ToolApprovalFingerprint.make(arguments: call.arguments)
+
+            // 危险评估（缓存优先）。
+            let dangerEvaluator = config.dangerEvaluator ?? DangerEvaluator()
+            let assessment = await dangerEvaluator.evaluate(
+                toolName: call.name,
+                arguments: call.arguments,
+                cache: config.dangerCache
+            )
+
             let alreadyApproved: Bool
             if requiresApproval, let tracker = config.toolApprovalTracker {
-                alreadyApproved = await tracker.isApproved(call.name)
+                alreadyApproved = await tracker.isAuthorized(
+                    toolName: call.name,
+                    fingerprint: fingerprint,
+                    dangerLevel: assessment.level
+                )
             } else {
                 alreadyApproved = false
             }
@@ -249,7 +263,10 @@ public struct AgentLoop: Sendable {
                     id: call.id,
                     toolName: call.name,
                     arguments: call.arguments,
-                    summary: ToolApprovalSummary.make(toolName: call.name, arguments: call.arguments)
+                    summary: ToolApprovalSummary.make(toolName: call.name, arguments: call.arguments),
+                    dangerLevel: assessment.level,
+                    dangerReason: assessment.reason,
+                    parametersFingerprint: fingerprint
                 )
                 continuation.yield(.toolApprovalRequired(request))
 
@@ -260,6 +277,8 @@ public struct AgentLoop: Sendable {
                     requestID=\(request.id)
                     tool=\(request.toolName)
                     summary=\(request.summary)
+                    dangerLevel=\(assessment.level.rawValue)
+                    dangerReason=\(assessment.reason ?? "none")
                     """
                 )
 
@@ -280,13 +299,13 @@ public struct AgentLoop: Sendable {
                     )
                 }
 
-                let approved = await requestToolApproval(request)
+                let decision = await requestToolApproval(request)
                 NewPiLogger.info(
                     category: "tool-approval",
-                    message: approved ? "Tool approved" : "Tool denied",
-                    details: "requestID=\(request.id) tool=\(request.toolName)"
+                    message: decision.approved ? "Tool approved" : "Tool denied",
+                    details: "requestID=\(request.id) tool=\(request.toolName) scope=\(decision.scope)"
                 )
-                if !approved {
+                if !decision.approved {
                     let reason = "Tool execution denied by policy"
                     let result = ToolResult(content: reason, isError: true)
                     continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
@@ -295,6 +314,15 @@ public struct AgentLoop: Sendable {
                         toolName: call.name,
                         content: reason,
                         isError: true
+                    )
+                }
+                // 记录授权（high 级别不写入永久/会话记录，仅放行本次）。
+                if let tracker = config.toolApprovalTracker {
+                    await tracker.record(
+                        scope: decision.scope,
+                        toolName: call.name,
+                        fingerprint: fingerprint,
+                        dangerLevel: assessment.level
                     )
                 }
             }

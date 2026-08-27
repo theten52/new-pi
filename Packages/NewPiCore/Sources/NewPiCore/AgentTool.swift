@@ -49,11 +49,15 @@ public struct AgentLoopConfig: Sendable {
     public var compaction: CompactionConfig
     public var maxTurns: Int
     public var beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)?
-    public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)?
+    public var requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)?
     /// Session-scoped tracker of tools already approved by the user.
     /// When a tool is present in the tracker, no approval is required for
     /// subsequent calls to the same tool within the same session.
     public var toolApprovalTracker: ToolApprovalTracker?
+    /// 危险评估器：本地规则为主 + LLM 可选补充 + 缓存。
+    public var dangerEvaluator: DangerEvaluator?
+    /// 危险评估结果缓存（跨调用复用）。
+    public var dangerCache: DangerAssessmentCache?
 
     public init(
         model: ModelConfig,
@@ -64,8 +68,10 @@ public struct AgentLoopConfig: Sendable {
         compaction: CompactionConfig = CompactionConfig(),
         maxTurns: Int = AgentLoopConfig.defaultMaxTurns,
         beforeToolCall: (@Sendable (String, JSONValue) async -> BeforeToolCallDecision)? = nil,
-        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> Bool)? = nil,
-        toolApprovalTracker: ToolApprovalTracker? = nil
+        requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)? = nil,
+        toolApprovalTracker: ToolApprovalTracker? = nil,
+        dangerEvaluator: DangerEvaluator? = nil,
+        dangerCache: DangerAssessmentCache? = nil
     ) {
         self.model = model
         self.llm = llm
@@ -77,6 +83,8 @@ public struct AgentLoopConfig: Sendable {
         self.beforeToolCall = beforeToolCall
         self.requestToolApproval = requestToolApproval
         self.toolApprovalTracker = toolApprovalTracker
+        self.dangerEvaluator = dangerEvaluator
+        self.dangerCache = dangerCache
     }
 }
 

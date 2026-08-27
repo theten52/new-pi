@@ -5,12 +5,26 @@ public struct ToolApprovalRequest: Sendable, Equatable, Identifiable {
     public var toolName: String
     public var arguments: JSONValue
     public var summary: String
+    public var dangerLevel: ToolDangerLevel
+    public var dangerReason: String?
+    public var parametersFingerprint: String
 
-    public init(id: String, toolName: String, arguments: JSONValue, summary: String) {
+    public init(
+        id: String,
+        toolName: String,
+        arguments: JSONValue,
+        summary: String,
+        dangerLevel: ToolDangerLevel = .medium,
+        dangerReason: String? = nil,
+        parametersFingerprint: String? = nil
+    ) {
         self.id = id
         self.toolName = toolName
         self.arguments = arguments
         self.summary = summary
+        self.dangerLevel = dangerLevel
+        self.dangerReason = dangerReason
+        self.parametersFingerprint = parametersFingerprint ?? ToolApprovalFingerprint.make(arguments: arguments)
     }
 }
 
@@ -75,43 +89,101 @@ public enum ToolApprovalSummary {
     }
 }
 
-/// Tracks tools that have been approved for the lifetime of a session,
-/// so repeated calls to the same tool do not require re-approval.
+/// Tracks tool approvals across scopes:
+/// - `session`: 本对话一直允许（session 生命周期）
+/// - `forever`: 跨 Session / APP 重启一直允许（持久化到 ApprovalsStore）
+/// 危险等级为 high 的调用不会被写入任何永久记录（只放行本次）。
 public actor ToolApprovalTracker {
-    private var approvedToolNames: Set<String> = []
+    private var sessionRecords: [String: ApprovalRecord] = [:]
+    private let persistentStore: PersistentApprovalStore
 
-    public init() {}
-
-    public func markApproved(_ toolName: String) {
-        NewPiLogger.info(
-            category: "tool-approval",
-            message: "Tool marked approved for session",
-            details: "tool=\(toolName)"
-        )
-        approvedToolNames.insert(toolName)
+    public init(persistentStore: PersistentApprovalStore = PersistentApprovalStore()) {
+        self.persistentStore = persistentStore
     }
 
-    public func isApproved(_ toolName: String) -> Bool {
-        approvedToolNames.contains(toolName)
+    /// 判定是否被已有授权覆盖（含 session / forever）。
+    /// 高危调用永远返回 false，即必须重新提示。
+    public func isAuthorized(toolName: String, fingerprint: String, dangerLevel: ToolDangerLevel) -> Bool {
+        if dangerLevel == .high {
+            return false
+        }
+        if let record = sessionRecords[toolName],
+           record.matches(toolName: toolName, fingerprint: fingerprint) {
+            return true
+        }
+        return persistentStore.isForeverApproved(toolName: toolName, fingerprint: fingerprint)
+    }
+
+    /// 记录一次授权。scope 决定写入哪一层。
+    /// - 若为 `once`，仅返回（不写入任何记录，只放行本次）。
+    /// - 若危险等级为 high，也不写入任何记录（强制下次继续提示）。
+    public func record(
+        scope: ApprovalScope,
+        toolName: String,
+        fingerprint: String,
+        dangerLevel: ToolDangerLevel
+    ) {
+        guard scope != .once else { return }
+        guard dangerLevel != .high else { return }
+
+        let record = ApprovalRecord(
+            toolName: toolName,
+            parametersFingerprint: fingerprint,
+            scope: scope
+        )
+        switch scope {
+        case .once:
+            return
+        case .session:
+            sessionRecords[toolName] = record
+            NewPiLogger.info(
+                category: "tool-approval",
+                message: "Tool approved for session",
+                details: "tool=\(toolName) fingerprint=\(fingerprint)"
+            )
+        case .forever:
+            sessionRecords[toolName] = record
+            persistentStore.saveForever(record)
+            NewPiLogger.info(
+                category: "tool-approval",
+                message: "Tool approved forever",
+                details: "tool=\(toolName) fingerprint=\(fingerprint)"
+            )
+        }
     }
 
     public func reset() {
-        approvedToolNames.removeAll()
+        sessionRecords.removeAll()
     }
 }
 
 /// Waits for UI or test harness to approve/deny a tool call.
+/// 审批响应结果：包含工具名、指纹、危险等级，供上层写入授权记录。
+public struct ApprovalResponse: Sendable, Equatable {
+    public var toolName: String
+    public var fingerprint: String
+    public var dangerLevel: ToolDangerLevel
+    public var decision: ApprovalDecision
+
+    public init(toolName: String, fingerprint: String, dangerLevel: ToolDangerLevel, decision: ApprovalDecision) {
+        self.toolName = toolName
+        self.fingerprint = fingerprint
+        self.dangerLevel = dangerLevel
+        self.decision = decision
+    }
+}
+
 public actor ToolApprovalGate {
     private struct PendingRequest {
-        let toolName: String
-        let continuation: CheckedContinuation<Bool, Never>
+        let request: ToolApprovalRequest
+        let continuation: CheckedContinuation<ApprovalDecision, Never>
     }
 
     private var waiters: [String: PendingRequest] = [:]
 
     public init() {}
 
-    public func wait(for request: ToolApprovalRequest) async -> Bool {
+    public func wait(for request: ToolApprovalRequest) async -> ApprovalDecision {
         NewPiLogger.debug(
             category: "tool-approval",
             message: "Approval gate waiting",
@@ -119,14 +191,14 @@ public actor ToolApprovalGate {
         )
         return await withCheckedContinuation { continuation in
             waiters[request.id] = PendingRequest(
-                toolName: request.toolName,
+                request: request,
                 continuation: continuation
             )
         }
     }
 
     @discardableResult
-    public func respond(requestID: String, approved: Bool) -> String? {
+    public func respond(requestID: String, decision: ApprovalDecision) -> ApprovalResponse? {
         guard let pending = waiters.removeValue(forKey: requestID) else {
             NewPiLogger.error(
                 category: "tool-approval",
@@ -138,10 +210,15 @@ public actor ToolApprovalGate {
         NewPiLogger.info(
             category: "tool-approval",
             message: "Approval gate response",
-            details: "requestID=\(requestID) approved=\(approved) tool=\(pending.toolName) pendingWaiters=\(waiters.keys.sorted())"
+            details: "requestID=\(requestID) approved=\(decision.approved) scope=\(decision.scope) tool=\(pending.request.toolName) pendingWaiters=\(waiters.keys.sorted())"
         )
-        pending.continuation.resume(returning: approved)
-        return pending.toolName
+        pending.continuation.resume(returning: decision)
+        return ApprovalResponse(
+            toolName: pending.request.toolName,
+            fingerprint: pending.request.parametersFingerprint,
+            dangerLevel: pending.request.dangerLevel,
+            decision: decision
+        )
     }
 
     public func cancelAll() {
@@ -151,7 +228,7 @@ public actor ToolApprovalGate {
             details: "count=\(waiters.count)"
         )
         for (_, pending) in waiters {
-            pending.continuation.resume(returning: false)
+            pending.continuation.resume(returning: .deny)
         }
         waiters.removeAll()
     }

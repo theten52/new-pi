@@ -23,6 +23,13 @@ public actor AgentSession {
             await approvalGate.wait(for: request)
         }
         configured.toolApprovalTracker = approvalTracker
+        let approvalPolicy = ApprovalPolicyStore().load()
+        configured.dangerEvaluator = DangerEvaluator(
+            policy: approvalPolicy,
+            llmSupplementEnabled: config.dangerEvaluator?.llmSupplementEnabled ?? approvalPolicy.llmSupplementEnabled,
+            llmAssessor: config.dangerEvaluator?.llmAssessor
+        )
+        configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
         self.config = configured
     }
 
@@ -86,17 +93,26 @@ public actor AgentSession {
         steeringQueue.append(.user(text))
     }
 
-    public func respondToToolApproval(requestID: String, approved: Bool) async {
-        let toolName = await approvalGate.respond(requestID: requestID, approved: approved)
+    public func respondToToolApproval(
+        requestID: String,
+        approved: Bool,
+        scope: ApprovalScope = .once
+    ) async {
+        let decision = ApprovalDecision(approved: approved, scope: scope)
+        let response = await approvalGate.respond(requestID: requestID, decision: decision)
         NewPiLogger.info(
             category: "agent-session",
             message: "Tool approval response forwarded",
-            details: "requestID=\(requestID) approved=\(approved) tool=\(toolName ?? "unknown")"
+            details: "requestID=\(requestID) approved=\(approved) scope=\(scope) tool=\(response?.toolName ?? "unknown")"
         )
-        if approved, let toolName {
-            // Mark the tool as approved for the remainder of this session,
-            // so subsequent calls to the same tool skip the approval prompt.
-            await approvalTracker.markApproved(toolName)
+        if let response, response.decision.approved {
+            // 记录授权（high 级别不写入 session/forever，仅放行本次）。
+            await approvalTracker.record(
+                scope: response.decision.scope,
+                toolName: response.toolName,
+                fingerprint: response.fingerprint,
+                dangerLevel: response.dangerLevel
+            )
         }
     }
 
@@ -116,6 +132,13 @@ public actor AgentSession {
             await approvalGate.wait(for: request)
         }
         configured.toolApprovalTracker = approvalTracker
+        let approvalPolicy = ApprovalPolicyStore().load()
+        configured.dangerEvaluator = DangerEvaluator(
+            policy: approvalPolicy,
+            llmSupplementEnabled: config.dangerEvaluator?.llmSupplementEnabled ?? approvalPolicy.llmSupplementEnabled,
+            llmAssessor: config.dangerEvaluator?.llmAssessor
+        )
+        configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
         self.config = configured
         NewPiLogger.info(
             category: "agent-session",
@@ -244,11 +267,17 @@ public enum AgentSessionFactory {
             model: model,
             additionalTools: additionalTools
         )
+        let approvalPolicy = ApprovalPolicyStore().load()
         let config = AgentLoopConfig(
             model: model,
             llm: llm,
             tools: tools,
-            toolPolicy: toolPolicy
+            toolPolicy: toolPolicy,
+            dangerEvaluator: DangerEvaluator(
+                policy: approvalPolicy,
+                llmSupplementEnabled: approvalPolicy.llmSupplementEnabled
+            ),
+            dangerCache: DangerAssessmentCache()
         )
         let context = AgentContext(
             systemPrompt: SystemPromptComposer.compose(for: workingDirectory).text,
