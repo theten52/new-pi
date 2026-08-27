@@ -33,10 +33,12 @@ public enum MCPTransportError: LocalizedError, Sendable, Equatable {
 actor MCPStdioTransport: MCPTransporting {
     private var process: Process?
     private var stdinHandle: FileHandle?
+    private var stdoutHandle: FileHandle?
+    private var stderrHandle: FileHandle?
     private var readTask: Task<Void, Never>?
     private var buffer = Data()
     private var pendingFrames: [Data] = []
-    private var waiters: [CheckedContinuation<Data, Error>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Data, Error>)] = []
 
     func start(command: String, arguments: [String], environment: [String: String]) async throws {
         await close()
@@ -85,30 +87,28 @@ actor MCPStdioTransport: MCPTransporting {
             return frame
         }
 
-        return try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation { continuation in
-                    Task {
-                        await self.enqueueWaiter(continuation)
-                    }
-                }
+        // 用 waiter id 实现真正的超时：超时任务从队列中移除该 waiter 并
+        // resume throwing，不依赖 task group 的 cancelAll（它无法穿透
+        // CheckedContinuation，会让 receiveResponse 永久挂起且 waiter 泄漏）。
+        let id = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                self.enqueueWaiter(id: id, continuation: continuation)
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                throw MCPTransportError.timedOut
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                self.timeoutWaiter(id: id)
             }
-
-            guard let result = try await group.next() else {
-                throw MCPTransportError.receiveFailed("No MCP response")
-            }
-            group.cancelAll()
-            return result
         }
     }
 
     func close() async {
         readTask?.cancel()
         readTask = nil
+        stdoutHandle?.readabilityHandler = nil
+        stdoutHandle = nil
+        stderrHandle?.readabilityHandler = nil
+        stderrHandle = nil
         stdinHandle?.closeFile()
         stdinHandle = nil
 
@@ -126,31 +126,44 @@ actor MCPStdioTransport: MCPTransporting {
         buffer.removeAll()
         pendingFrames.removeAll()
         for waiter in waiters {
-            waiter.resume(throwing: MCPTransportError.notStarted)
+            waiter.continuation.resume(throwing: MCPTransportError.notStarted)
         }
         waiters.removeAll()
     }
 
-    private func enqueueWaiter(_ continuation: CheckedContinuation<Data, Error>) {
+    private func enqueueWaiter(id: UUID, continuation: CheckedContinuation<Data, Error>) {
         if let frame = pendingFrames.first {
             pendingFrames.removeFirst()
             continuation.resume(returning: frame)
             return
         }
-        waiters.append(continuation)
+        waiters.append((id: id, continuation: continuation))
+    }
+
+    private func timeoutWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: MCPTransportError.timedOut)
     }
 
     private func startReadLoop(stdout: FileHandle) {
+        stdoutHandle = stdout
+        // readabilityHandler 在系统队列上回调，避免在 actor 上同步阻塞读
+        // （availableData 是阻塞调用，曾导致 actor 被占死、握手即死锁）。
+        // 数据经 AsyncStream 保序地送回 actor。
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        stdout.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                // EOF：进程退出或管道关闭
+                handle.readabilityHandler = nil
+                continuation.finish()
+                return
+            }
+            continuation.yield(chunk)
+        }
         readTask = Task {
-            while !Task.isCancelled {
-                let chunk = stdout.availableData
-                if chunk.isEmpty {
-                    if process?.isRunning == false {
-                        break
-                    }
-                    try? await Task.sleep(nanoseconds: 10_000_000)
-                    continue
-                }
+            for await chunk in stream {
                 appendChunk(chunk)
             }
             markProcessEnded()
@@ -158,22 +171,18 @@ actor MCPStdioTransport: MCPTransporting {
     }
 
     private func startStderrLoop(stderr: FileHandle) {
-        Task {
-            while !Task.isCancelled {
-                let chunk = stderr.availableData
-                if chunk.isEmpty {
-                    if process?.isRunning == false {
-                        break
-                    }
-                    try? await Task.sleep(nanoseconds: 10_000_000)
-                    continue
-                }
-                let text = String(data: chunk, encoding: .utf8) ?? ""
-                for line in text.components(separatedBy: .newlines) {
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { continue }
-                    NewPiLogger.info(category: "mcp", message: "MCP stderr", details: trimmed)
-                }
+        stderrHandle = stderr
+        stderr.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            let text = String(data: chunk, encoding: .utf8) ?? ""
+            for line in text.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                NewPiLogger.info(category: "mcp", message: "MCP stderr", details: trimmed)
             }
         }
     }
@@ -195,7 +204,7 @@ actor MCPStdioTransport: MCPTransporting {
     private func deliver(_ frame: Data) {
         if let waiter = waiters.first {
             waiters.removeFirst()
-            waiter.resume(returning: frame)
+            waiter.continuation.resume(returning: frame)
         } else {
             pendingFrames.append(frame)
         }
@@ -204,7 +213,7 @@ actor MCPStdioTransport: MCPTransporting {
     private func markProcessEnded() {
         let exitCode = process?.terminationStatus ?? -1
         for waiter in waiters {
-            waiter.resume(throwing: MCPTransportError.processExited(code: exitCode))
+            waiter.continuation.resume(throwing: MCPTransportError.processExited(code: exitCode))
         }
         waiters.removeAll()
     }

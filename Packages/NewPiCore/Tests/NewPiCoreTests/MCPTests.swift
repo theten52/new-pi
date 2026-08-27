@@ -131,3 +131,34 @@ struct MCPConfigParserTests {
         #expect(servers["demo"]?.args == ["hello"])
     }
 }
+
+@Suite("MCPStdioTransport")
+struct MCPStdioTransportTests {
+    @Test("real process round-trip via cat echo")
+    func catEchoRoundTrip() async throws {
+        let transport = MCPStdioTransport()
+        try await transport.start(command: "/bin/cat", arguments: [], environment: [:])
+
+        let payload = Data("{\"jsonrpc\":\"2.0\",\"id\":1}".utf8)
+        try await transport.send(frame: MCPJSONRPC.encodeFrame(payload: payload))
+
+        // 回归：读循环曾在 actor 上同步阻塞（availableData），握手即死锁。
+        let response = try await transport.receiveResponse(timeout: 5)
+        #expect(response == payload)
+
+        await transport.close()
+    }
+
+    @Test("receiveResponse times out when server never responds")
+    func receiveTimeout() async throws {
+        let transport = MCPStdioTransport()
+        try await transport.start(command: "/bin/sleep", arguments: ["30"], environment: [:])
+
+        // 回归：超时路径曾永久挂起（task group 等不到被挂起的 waiter）。
+        await #expect(throws: MCPTransportError.timedOut) {
+            _ = try await transport.receiveResponse(timeout: 0.2)
+        }
+
+        await transport.close()
+    }
+}
