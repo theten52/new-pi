@@ -15,6 +15,11 @@ struct NewPiUserMessageRail: View {
     private let defaultLineWidth: CGFloat = 14
     private let lineHeight: CGFloat = 2
     private let lineSpacing: CGFloat = 10
+    /// 每个标记槽位的固定高度（原 max(14, lineHeight*scale*3) 在 scale≤2.1 时恒为 14）。
+    /// lineCenterY 依赖它统一坐标，否则悬停高亮会偏离指针。
+    private let lineSlotHeight: CGFloat = 14
+    /// railBody 的纵向 padding，与 lineCenterY 保持同一坐标系（mouseY 含该 padding）。
+    private let railVerticalPadding: CGFloat = 10
     private let maxWidthBoost: CGFloat = 1.1
     private let magnificationSigma: CGFloat = 18
     private let previewMaxWidth: CGFloat = 280
@@ -64,7 +69,7 @@ struct NewPiUserMessageRail: View {
             }
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 10)
+        .padding(.vertical, railVerticalPadding)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(isHovering ? 0.06 : 0.03))
@@ -91,7 +96,7 @@ struct NewPiUserMessageRail: View {
         return Capsule(style: .continuous)
             .fill(isSelected ? Color.accentColor : Color.secondary.opacity(0.45))
             .frame(width: defaultLineWidth * scale, height: lineHeight)
-            .frame(width: 28, height: max(14, lineHeight * scale * 3))
+            .frame(width: 28, height: lineSlotHeight)
             .contentShape(Rectangle())
             .onTapGesture {
                 onSelect(marker.id)
@@ -111,7 +116,7 @@ struct NewPiUserMessageRail: View {
     }
 
     private func lineCenterY(for index: Int) -> CGFloat {
-        CGFloat(index) * (lineHeight + lineSpacing) + lineHeight / 2
+        railVerticalPadding + CGFloat(index) * (lineSlotHeight + lineSpacing) + lineSlotHeight / 2
     }
 
     private func dockScale(centerY: CGFloat) -> CGFloat {
