@@ -603,7 +603,6 @@ final class NewPiViewModel: ObservableObject {
             }
             existing.lastUsedAt = Date()
             activeRuntime = existing
-            reflectActive()
             await setActiveProviderState(profile)
             return
         }
@@ -701,7 +700,6 @@ final class NewPiViewModel: ObservableObject {
             runtime.lastUsedAt = Date()
             activeRuntime = runtime
             activeSessionID = payload.header.id
-            reflectActive()
 
             await setActiveProviderState(profile)
 
