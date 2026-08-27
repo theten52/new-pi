@@ -8,15 +8,23 @@ struct NewPiChatView: View {
     @ObservedObject var viewModel: NewPiViewModel
 
     var body: some View {
-        ZStack {
-            ForEach(viewModel.keptAliveRuntimes, id: \.sessionID) { runtime in
-                NewPiSessionPanel(runtime: runtime, viewModel: viewModel)
-                    .opacity(viewModel.isActiveRuntime(runtime) ? 1 : 0)
-                    .allowsHitTesting(viewModel.isActiveRuntime(runtime))
-                    .zIndex(viewModel.isActiveRuntime(runtime) ? 1 : 0)
+        Group {
+            if viewModel.keptAliveRuntimes.isEmpty {
+                // 未开项目 / 无任何会话时，保留"Open a project / Start a session"引导。
+                NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ZStack {
+                    ForEach(viewModel.keptAliveRuntimes, id: \.sessionID) { runtime in
+                        NewPiSessionPanel(runtime: runtime, viewModel: viewModel)
+                            .opacity(viewModel.isActiveRuntime(runtime) ? 1 : 0)
+                            .allowsHitTesting(viewModel.isActiveRuntime(runtime))
+                            .zIndex(viewModel.isActiveRuntime(runtime) ? 1 : 0)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(viewModel.chatNavigationTitle)
     }
 }

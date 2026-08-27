@@ -240,6 +240,8 @@ final class NewPiViewModel: ObservableObject {
         // 切换到不同项目：先停掉并清理上个项目的后台 sessions（避免其继续运行/泄漏）。
         if newURL != projectURL {
             await stopAllLiveSessions()
+            // 跨项目时高度缓存里的内容不再适用，清空避免残留。
+            MarkdownRenderingCache.shared.clear()
         }
         projectURL = newURL
         NewPiLastProjectStore.save(url)

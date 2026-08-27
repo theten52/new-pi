@@ -13,22 +13,32 @@ enum NewPiMarkdownProcessPool {
 
 /// 每条消息渲染完成后的高度缓存。冷重建（切换回未保活会话）时首帧直接用缓存高度，
 /// 避免 0 → 真实高度的渐进测高闪烁，也减少一次布局回跳。
+/// 使用 NSCache：内存吃紧时自动淘汰，避免只增不减的内存泄漏；key 用哈希而非完整 markdown。
 @MainActor
 final class MarkdownRenderingCache {
     static let shared = MarkdownRenderingCache()
-    private var heights: [String: CGFloat] = [:]
-    private init() {}
+    private let cache = NSCache<NSString, NSNumber>()
 
-    private func key(_ markdown: String, _ flush: Bool) -> String {
-        flush ? "flush|\(markdown)" : "stream|\(markdown)"
+    private init() {
+        cache.countLimit = 512
     }
 
     func height(for markdown: String, flush: Bool) -> CGFloat? {
-        heights[key(markdown, flush)]
+        guard let number = cache.object(forKey: key(markdown, flush) as NSString) else { return nil }
+        return CGFloat(number.doubleValue)
     }
 
     func setHeight(_ height: CGFloat, for markdown: String, flush: Bool) {
-        heights[key(markdown, flush)] = height
+        cache.setObject(NSNumber(value: height), forKey: key(markdown, flush) as NSString)
+    }
+
+    /// 项目切换等场景下清空缓存，避免跨项目高度残留。
+    func clear() {
+        cache.removeAllObjects()
+    }
+
+    private func key(_ markdown: String, _ flush: Bool) -> String {
+        "\(flush ? "f" : "s")|\(String(markdown.hashValue))"
     }
 }
 
