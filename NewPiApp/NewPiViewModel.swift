@@ -44,16 +44,18 @@ struct NewPiProviderListItem: Identifiable, Equatable {
 /// 持续更新它自己的转录与状态，从而做到会话隔离、互不阻塞。只有正在显示的那个
 /// runtime 会被映射到 ViewModel 的 @Published 属性上。
 @MainActor
-final class SessionRuntime {
+final class SessionRuntime: ObservableObject {
     let session: AgentSession
     let fileURL: URL
     let sessionID: UUID
-    var transcript: [NewPiTranscriptItem] = []
-    var isStreaming = false
-    var agentActivity: NewPiAgentActivity = .idle
-    var pendingToolApproval: ToolApprovalRequest?
-    var branchPointCount = 0
-    var isForkedBranch = false
+    /// 以下字段设为 @Published：每个会话的面板视图独立观察自己的 runtime，
+    /// 后台会话的事件循环持续更新它，切回时视图无需重建即可显示最新状态。
+    @Published var transcript: [NewPiTranscriptItem] = []
+    @Published var isStreaming = false
+    @Published var agentActivity: NewPiAgentActivity = .idle
+    @Published var pendingToolApproval: ToolApprovalRequest?
+    @Published var branchPointCount = 0
+    @Published var isForkedBranch = false
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
@@ -268,9 +270,19 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// runtime 缓存上限（不含当前活跃）：超出后按最久未使用淘汰。
-    /// 此前 runtimes 只增不减，旧 runtime（含完整 transcript、事件循环）
-    /// 常驻内存直到切换项目。
-    private static let maxCachedRuntimes = 8
+    /// 会话面板视图需要保活，内存随保活数增长；上限 5，配合共享进程池控制开销。
+    /// 被淘汰的会话切回时走冷重建（配合高度缓存）+ 快照兜底。
+    private static let maxCachedRuntimes = 5
+
+    /// 当前保活的所有会话 runtime（含活跃），按最近使用排序。供聊天面板保活渲染。
+    var keptAliveRuntimes: [SessionRuntime] {
+        Array(runtimes.values).sorted { $0.lastUsedAt > $1.lastUsedAt }
+    }
+
+    /// 判断某个 runtime 是否为当前活跃会话（用于面板的显示/交互翻转）。
+    func isActiveRuntime(_ runtime: SessionRuntime) -> Bool {
+        runtime === activeRuntime
+    }
 
     private func evictIdleRuntimesIfNeeded() {
         while runtimes.count > Self.maxCachedRuntimes {

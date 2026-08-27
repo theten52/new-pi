@@ -9,7 +9,14 @@ struct NewPiMarkdownText: View {
     var flushRendering: Bool
 
     @State private var webRendererFailed = false
-    @State private var webHeight: CGFloat = 44
+    @State private var webHeight: CGFloat
+
+    init(content: String, flushRendering: Bool) {
+        self.content = content
+        self.flushRendering = flushRendering
+        // 冷重建时首帧直接用缓存高度，避免 0→真实高度的渐进闪烁。
+        _webHeight = State(initialValue: MarkdownRenderingCache.shared.height(for: content, flush: true) ?? 44)
+    }
 
     var body: some View {
         Group {

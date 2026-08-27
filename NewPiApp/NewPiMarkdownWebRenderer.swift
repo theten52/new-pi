@@ -4,6 +4,34 @@ import NewPiCore
 import SwiftUI
 import WebKit
 
+/// 所有 Markdown WebView 共享的进程池：避免每条消息各占一个 WebKit 内容进程
+/// （内存/句柄随消息数线性增长的根因之一）。
+@MainActor
+enum NewPiMarkdownProcessPool {
+    static let shared = WKProcessPool()
+}
+
+/// 每条消息渲染完成后的高度缓存。冷重建（切换回未保活会话）时首帧直接用缓存高度，
+/// 避免 0 → 真实高度的渐进测高闪烁，也减少一次布局回跳。
+@MainActor
+final class MarkdownRenderingCache {
+    static let shared = MarkdownRenderingCache()
+    private var heights: [String: CGFloat] = [:]
+    private init() {}
+
+    private func key(_ markdown: String, _ flush: Bool) -> String {
+        flush ? "flush|\(markdown)" : "stream|\(markdown)"
+    }
+
+    func height(for markdown: String, flush: Bool) -> CGFloat? {
+        heights[key(markdown, flush)]
+    }
+
+    func setHeight(_ height: CGFloat, for markdown: String, flush: Bool) {
+        heights[key(markdown, flush)] = height
+    }
+}
+
 enum NewPiMarkdownWebDocument {
     enum DocumentError: Error {
         case invalidJSONString
@@ -172,6 +200,8 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "height")
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
+        // 共享进程池：多条消息/多个会话复用同一 WebKit 内容进程，避免每消息一个进程。
+        configuration.processPool = NewPiMarkdownProcessPool.shared
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -442,6 +472,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             if isFlushRendering {
                 if abs(reportedHeight - height) >= streamingHeightEpsilon {
                     height = reportedHeight
+                }
+                // 最终渲染的高度写入缓存，供冷重建首帧直接用，避免 0→真实高度的闪烁。
+                if let markdown = lastRenderedMarkdown ?? pendingMarkdown {
+                    MarkdownRenderingCache.shared.setHeight(reportedHeight, for: markdown, flush: true)
                 }
                 return
             }

@@ -1,22 +1,44 @@
 import AppKit
 import SwiftUI
 
+/// 保活容器：把每个缓存会话的面板视图（含彼此内部的 WKWebView）常驻挂载，
+/// 切换会话时仅翻转活跃面板的显示/交互，而不销毁重建 —— 这样 DOM、测高、滚动位置
+/// 全部免费保留，做到"切换即显示、原位恢复"。被淘汰的会话在 beginSession 冷重建。
 struct NewPiChatView: View {
     @ObservedObject var viewModel: NewPiViewModel
+
+    var body: some View {
+        ZStack {
+            ForEach(viewModel.keptAliveRuntimes, id: \.sessionID) { runtime in
+                NewPiSessionPanel(runtime: runtime, viewModel: viewModel)
+                    .opacity(viewModel.isActiveRuntime(runtime) ? 1 : 0)
+                    .allowsHitTesting(viewModel.isActiveRuntime(runtime))
+                    .zIndex(viewModel.isActiveRuntime(runtime) ? 1 : 0)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle(viewModel.chatNavigationTitle)
+    }
+}
+
+/// 单个会话的聊天面板：从它自己的 runtime 观察转录/流式状态。
+/// 非活跃面板保持挂载（opacity 0），WebView 不销毁；活跃面板完整交互。
+struct NewPiSessionPanel: View {
+    @ObservedObject var runtime: SessionRuntime
+    @ObservedObject var viewModel: NewPiViewModel
+
     @State private var input = ""
     @State private var composerHeight: CGFloat = 120
-    /// After the user jumps via the message rail, skip pin-to-bottom until the next agent turn.
     @State private var suppressAutoPinDuringStreaming = false
-    /// 视口是否贴近底部（底部锚点在滚动坐标系中的位置推算），流式时只在贴底才自动钉底。
     @State private var isNearBottom = true
 
-    /// Gap between the last bubble bottom and the status bar top.
     private let messageBottomGap: CGFloat = 16
-    /// 距底多少 pt 内视为贴底（超过则释放自动钉底并显示“Jump to latest”）
     private let nearBottomThreshold: CGFloat = 100
 
+    private var isActive: Bool { viewModel.isActiveRuntime(runtime) }
+
     private var userMessageMarkers: [UserMessageMarker] {
-        viewModel.transcript
+        runtime.transcript
             .filter { $0.title == "You" }
             .map { UserMessageMarker(id: $0.id, preview: $0.body) }
     }
@@ -33,7 +55,7 @@ struct NewPiChatView: View {
                                 Spacer(minLength: 0)
 
                                 LazyVStack(alignment: .leading, spacing: 12) {
-                                    if viewModel.transcript.isEmpty {
+                                    if runtime.transcript.isEmpty {
                                         if viewModel.isSwitchingSession {
                                             ProgressView("Loading session…")
                                                 .frame(maxWidth: .infinity, minHeight: 120)
@@ -42,12 +64,12 @@ struct NewPiChatView: View {
                                         }
                                     }
 
-                                    ForEach(viewModel.transcript) { item in
+                                    ForEach(runtime.transcript) { item in
                                         NewPiTranscriptRow(
                                             item: item,
-                                            isStreaming: viewModel.isStreaming,
-                                            isActiveStreamingItem: viewModel.isStreaming
-                                                && item.id == viewModel.transcript.last?.id
+                                            isStreaming: runtime.isStreaming,
+                                            isActiveStreamingItem: runtime.isStreaming
+                                                && item.id == runtime.transcript.last?.id
                                                 && (item.title == "NewPi" || item.title == "Summary")
                                         ) { index in
                                             Task { await viewModel.forkFromMessage(index: index) }
@@ -85,7 +107,7 @@ struct NewPiChatView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .scrollBounceBehavior(.basedOnSize)
                         .transaction { transaction in
-                            if viewModel.isStreaming {
+                            if runtime.isStreaming {
                                 transaction.disablesAnimations = true
                             }
                         }
@@ -100,7 +122,7 @@ struct NewPiChatView: View {
                         .padding(.trailing, 10)
                     }
                     .overlay(alignment: .bottom) {
-                        if viewModel.isStreaming && !isNearBottom {
+                        if runtime.isStreaming && !isNearBottom {
                             Button {
                                 suppressAutoPinDuringStreaming = false
                                 pinScrollToBottom(using: proxy)
@@ -123,7 +145,7 @@ struct NewPiChatView: View {
                     .onAppear {
                         schedulePinScrollToBottom(using: proxy)
                     }
-                    .onChange(of: viewModel.isStreaming) { wasStreaming, isStreaming in
+                    .onChange(of: runtime.isStreaming) { wasStreaming, isStreaming in
                         if isStreaming, !wasStreaming {
                             suppressAutoPinDuringStreaming = false
                         }
@@ -131,12 +153,12 @@ struct NewPiChatView: View {
                             schedulePinScrollToBottom(using: proxy)
                         }
                     }
-                    .onChange(of: viewModel.transcript.last?.id) { _, _ in
-                        guard viewModel.isStreaming else { return }
+                    .onChange(of: runtime.transcript.last?.id) { _, _ in
+                        guard isActive, runtime.isStreaming else { return }
                         schedulePinScrollToBottom(using: proxy)
                     }
-                    .onChange(of: viewModel.transcript.last?.body) { _, _ in
-                        guard viewModel.isStreaming else { return }
+                    .onChange(of: runtime.transcript.last?.body) { _, _ in
+                        guard isActive, runtime.isStreaming else { return }
                         schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: composerHeight) { _, _ in
@@ -164,7 +186,6 @@ struct NewPiChatView: View {
             scheduleComposerHeightUpdate(height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle(viewModel.chatNavigationTitle)
     }
 
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
@@ -175,8 +196,7 @@ struct NewPiChatView: View {
     }
 
     private var shouldAutoPinToBottom: Bool {
-        // 流式时只在贴底（且未被消息轨道跳转抑制）才钉底；非流式保持原行为
-        if viewModel.isStreaming {
+        if runtime.isStreaming {
             return !suppressAutoPinDuringStreaming && isNearBottom
         }
         return true
@@ -217,13 +237,13 @@ struct NewPiChatView: View {
                 TextField("Message NewPi…", text: $input, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1 ... 6)
-                    .disabled(viewModel.isStreaming)
+                    .disabled(runtime.isStreaming)
 
                 Button("Stop") {
                     viewModel.abort()
                 }
-                .opacity(viewModel.isStreaming ? 1 : 0)
-                .disabled(!viewModel.isStreaming)
+                .opacity(runtime.isStreaming ? 1 : 0)
+                .disabled(!runtime.isStreaming)
                 .frame(minWidth: 52)
 
                 Button("Send") {
@@ -232,12 +252,12 @@ struct NewPiChatView: View {
                     viewModel.send(text)
                 }
                 .keyboardShortcut(.return, modifiers: [])
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isStreaming)
+                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || runtime.isStreaming)
             }
             .padding()
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .animation(nil, value: viewModel.isStreaming)
+        .animation(nil, value: runtime.isStreaming)
     }
 }
 
