@@ -20,6 +20,9 @@ final class TranscriptHeightMap: ObservableObject {
         var height: CGFloat
         /// 是否已实测（实例化后回报）。实测值优先于一切估算。
         var measured: Bool
+        /// 文本类行的行高缓存 key/宽度（实测后持久化，跨启动精确；md 行走 WebView 管线自带缓存，不用此通道）。
+        var cacheKey: String?
+        var cacheWidth: CGFloat?
     }
 
     @Published private(set) var rows: [Row] = []
@@ -62,20 +65,24 @@ final class TranscriptHeightMap: ObservableObject {
             if let old = oldByID[item.id], old.measured {
                 return old
             }
-            return Row(id: item.id, height: estimate(item: item, plainWidth: plainWidth, bubbleWidth: bubbleWidth), measured: false)
+            return estimateRow(item: item, plainWidth: plainWidth, bubbleWidth: bubbleWidth)
         }
         recomputePrefixSums()
     }
 
     // MARK: - 实测回报
 
-    /// 行实例化后回报实测高度：就地更新（已实测的行允许跟随内容变化，如流式/工具展开）。
+    /// 行实例化后回报实测高度：就地更新（已实测的行允许跟随内容变化，如流式/工具展开）；
+    /// 文本类行的行高同时持久化（跨启动精确，二次 rail 点击永远命中真实值）。
     func updateMeasured(id: UUID, height: CGFloat) {
         guard height > 1, let index = rows.firstIndex(where: { $0.id == id }) else { return }
         guard abs(rows[index].height - height) > 0.5 else { return }
         rows[index].height = height
         rows[index].measured = true
         recomputePrefixSums()
+        if let key = rows[index].cacheKey, let width = rows[index].cacheWidth {
+            MarkdownRenderingCache.shared.setHeight(height, width: width, for: key, updateActiveWidth: false)
+        }
     }
 
     // MARK: - 定位与窗口
@@ -129,21 +136,26 @@ final class TranscriptHeightMap: ObservableObject {
         prefixSums = sums
     }
 
-    private func estimate(item: NewPiTranscriptItem, plainWidth: CGFloat, bubbleWidth: CGFloat) -> CGFloat {
+    private func estimateRow(item: NewPiTranscriptItem, plainWidth: CGFloat, bubbleWidth: CGFloat) -> Row {
         if item.isToolTranscript {
-            return Self.toolRowCollapsedHeight
+            return Row(id: item.id, height: Self.toolRowCollapsedHeight, measured: false)
         }
         if item.title == "NewPi" || item.title == "Summary" {
             let contentHeight = MarkdownRenderingCache.shared.height(for: item.body) ?? 44
-            return Self.headerHeight + Self.headerBodyGap + contentHeight
+            return Row(id: item.id, height: Self.headerHeight + Self.headerBodyGap + contentHeight, measured: false)
         }
-        if item.title == "You" {
-            let textHeight = Self.measureTextHeight(item.body, maxWidth: bubbleWidth)
-            return Self.bubbleVerticalPadding + Self.headerHeight + Self.headerBodyGap + textHeight
+        // 文本类行：先查行高缓存（实测持久化），未命中再用字体×宽度纯函数估算。
+        let isBubble = item.title == "You"
+        let key = "rowh|\(item.title)|\(item.body)"
+        let width = isBubble ? bubbleWidth : plainWidth
+        if let cached = MarkdownRenderingCache.shared.height(for: key, width: width) {
+            return Row(id: item.id, height: cached, measured: true, cacheKey: key, cacheWidth: width)
         }
-        // Error / 其他纯文本行
-        let textHeight = Self.measureTextHeight(item.body, maxWidth: plainWidth)
-        return Self.headerHeight + Self.headerBodyGap + textHeight
+        let textHeight = Self.measureTextHeight(item.body, maxWidth: width)
+        let total = isBubble
+            ? Self.bubbleVerticalPadding + Self.headerHeight + Self.headerBodyGap + textHeight
+            : Self.headerHeight + Self.headerBodyGap + textHeight
+        return Row(id: item.id, height: total, measured: false, cacheKey: key, cacheWidth: width)
     }
 
     /// 文本在给定宽度下的换行高度（与 SwiftUI Text(.body) 排版近似，

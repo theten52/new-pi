@@ -77,9 +77,10 @@ final class MarkdownRenderingCache: ObservableObject {
         return CGFloat(entry.height)
     }
 
-    func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String) {
+    func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String, updateActiveWidth: Bool = true) {
         guard height > 0, width > 0 else { return }
-        currentWidth = width
+        // 文本行等次级写入者不翻动活动宽度桶：桶选择基线只属于真实 md 渲染宽度。
+        if updateActiveWidth { currentWidth = width }
         let widthKey = Self.widthKey(width)
         let hash = key(for: markdown)
         // 就地更新而不是整体替换：保留已捕获的渲染产物（html/engine）字段。

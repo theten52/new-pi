@@ -50,6 +50,14 @@ struct NewPiSessionPanel: View {
     @State private var scrollOffset: CGFloat = 0
     /// resize 防抖重预热任务。
     @State private var resizePreheatTask: Task<Void, Never>?
+    /// rail 着陆后的有界跟进校正：预热仍在填充几何时，目标 y 会漂移；
+    /// 缓存版本变化时重算一次（3s 窗口、用户接管滚动即放弃、数据稳定即止）。
+    private struct RailTarget: Equatable {
+        let id: UUID
+        var lastY: CGFloat
+        let deadline: Date
+    }
+    @State private var pendingRailTarget: RailTarget?
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -157,6 +165,8 @@ struct NewPiSessionPanel: View {
                                 -proxy.frame(in: .named(NewPiChatScrollSupport.coordinateSpaceName)).minY
                             } action: { newOffset in
                                 scrollOffset = newOffset
+                                // 持续记录滚动位置：切换/淘汰/重启后原位恢复。
+                                ScrollPositionStore.shared.set(runtime.sessionID, offset: newOffset)
                             }
                         }
                         .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
@@ -177,14 +187,21 @@ struct NewPiSessionPanel: View {
                             onSelect: { messageID in
                                 suppressAutoPinDuringStreaming = true
                                 // 高度表算术定位：点击时按最新缓存重建表，前缀和算出目标行
-                                // 内容 y，scrollTo(point:) 一次到位。不实例化目标行、
-                                // 不等异步实测、无收敛窗口。
+                                // 内容 y，scrollTo(point:) 动画滚动到位。目标 y 是固定的
+                                //（布局与表同源），动画只是插值过程，不影响精度。
                                 heightMap.rebuild(
                                     items: runtime.transcript,
                                     contentWidth: geometry.size.width - 32
                                 )
                                 if let y = heightMap.offset(of: messageID) {
-                                    jumpPosition.scrollTo(point: CGPoint(x: 0, y: max(0, y)))
+                                    let target = max(0, y)
+                                    pendingRailTarget = RailTarget(
+                                        id: messageID, lastY: target,
+                                        deadline: Date().addingTimeInterval(3)
+                                    )
+                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                        jumpPosition.scrollTo(point: CGPoint(x: 0, y: target))
+                                    }
                                 }
                             }
                         )
@@ -225,7 +242,15 @@ struct NewPiSessionPanel: View {
                     }
                     .onAppear {
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
-                        schedulePinScrollToBottom(using: proxy)
+                        // 原位恢复优先：有保存的滚动位置则恢复，否则钉底（新会话）。
+                        if let saved = ScrollPositionStore.shared.offset(for: runtime.sessionID),
+                           !runtime.transcript.isEmpty {
+                            DispatchQueue.main.async {
+                                jumpPosition.scrollTo(point: CGPoint(x: 0, y: max(0, saved)))
+                            }
+                        } else {
+                            schedulePinScrollToBottom(using: proxy)
+                        }
                     }
                     // 高度表重建：transcript 结构变化 / 宽度变化 / 缓存被预热或实测填充时。
                     .onChange(of: runtime.transcript.map(\.id)) { _, _ in
@@ -244,6 +269,7 @@ struct NewPiSessionPanel: View {
                     }
                     .onReceive(MarkdownRenderingCache.shared.$version) { _ in
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
+                        applyPendingRailCorrection()
                     }
                     .onChange(of: runtime.isStreaming) { wasStreaming, isStreaming in
                         // 只在活跃面板执行滚动逻辑：后台保话面板流式结束时不能把
@@ -304,6 +330,34 @@ struct NewPiSessionPanel: View {
     /// 按最新缓存/布局常量重建高度表（rail 定位与窗口占位的共同数据源）。
     private func rebuildHeightMap(contentWidth: CGFloat) {
         heightMap.rebuild(items: runtime.transcript, contentWidth: contentWidth)
+    }
+
+    /// rail 着陆后的有界跟进校正：预热/实测仍在改动几何时目标 y 会漂移（第一次点击不准、
+    /// 第二次准的根因）。仅在用户未接管滚动（当前偏移 ≈ 上次应用值）时跟进一次；
+    /// 数据稳定（Δ<2pt）或超时即停止。与旧收敛机制的区别：它追的是「数据稳定」，
+    /// 而不是「目标行的异步实测」。
+    private func applyPendingRailCorrection() {
+        guard let pending = pendingRailTarget else { return }
+        guard Date() < pending.deadline else {
+            pendingRailTarget = nil
+            return
+        }
+        guard let y = heightMap.offset(of: pending.id) else { return }
+        let target = max(0, y)
+        if abs(target - pending.lastY) <= 2 {
+            pendingRailTarget = nil // 数据已稳定
+            return
+        }
+        guard abs(scrollOffset - pending.lastY) < 50 else {
+            pendingRailTarget = nil // 用户已接管滚动，不打断
+            return
+        }
+        pendingRailTarget = RailTarget(id: pending.id, lastY: target, deadline: pending.deadline)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            jumpPosition.scrollTo(point: CGPoint(x: 0, y: target))
+        }
     }
 
     private var shouldAutoPinToBottom: Bool {
