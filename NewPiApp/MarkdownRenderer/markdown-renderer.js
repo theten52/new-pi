@@ -38,15 +38,20 @@
 
   markdown.disable("image");
 
-  const heightChangeThreshold = 20;
+  const heightChangeThreshold = 4;
   let lastPostedHeight = 0;
   let pendingHeightFrame = null;
   let resizeObserver = null;
-  let activeStreamingRender = false;
 
   function postHeight(height) {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.height) {
-      window.webkit.messageHandlers.height.postMessage(height);
+      // 高度是宽度的函数：宽度随高度一起上报，Swift 侧按宽度判定缓存条目有效。
+      // 窗口 resize 使宽度变化时整体失效缓存，因此必须带上 width，否则 height(for:)
+      // 永远 currentWidth <= 0、缓存整条失效（曾导致冷重建首帧防闪烁/rail 定位全变死代码）。
+      window.webkit.messageHandlers.height.postMessage({
+        height: height,
+        width: Math.ceil(document.documentElement.clientWidth)
+      });
     }
   }
 
@@ -68,13 +73,18 @@
       height = Math.max(height, Math.ceil(caret.offsetTop + caret.offsetHeight));
     }
 
-    const streaming = activeStreamingRender;
-    if (!force && !streaming && Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
+    // 高度与上次完全相同（含 force 上报）则去重，避免 Swift 侧重复更新缓存。
+    if (height === lastPostedHeight) {
+      return;
+    }
+    if (!force && Math.abs(height - lastPostedHeight) < heightChangeThreshold) {
       return;
     }
 
     lastPostedHeight = height;
-    root.style.minHeight = height + "px";
+    // 不把测量值钉回 root.style.minHeight：那会把自身钉的高度算进下次测量，
+    // 窗口拉宽后高度永远降不下来（自锁）；root 高度由内容自然决定，光标淡出
+    // 后的高度收缩由上方 absolute 光标的范围上报兜住。
     postHeight(height);
   }
 
@@ -169,8 +179,10 @@
       return source + "\n" + tailFenceMarker;
     }
 
-    // 先剥掉已闭合的行内代码段，避免把代码内容里的标记（如 2 ** 3）当成加粗
-    const withoutCodeSpans = source.replace(/`[^`\n]*`/g, "");
+    // 先剥掉已闭合的行内代码段，避免把代码内容里的标记（如 2 ** 3）当成加粗。
+    // 同时识别双/多反引号代码段（``code``）：只认单反引号会把代码里的反引号
+    // 误判成加粗/删除线标记而给尾块补上多余闭合符。
+    const withoutCodeSpans = source.replace(/`+[^`\n]*`+/g, "");
 
     const backtickCount = (withoutCodeSpans.match(/`/g) || []).length;
     if (backtickCount % 2 === 1) {
@@ -309,7 +321,7 @@
     root.appendChild(caret);
   }
 
-  function finishStreamingCaret(root, caretTop) {
+  function finishStreamingCaret(root, caretTop, caretLeft) {
     if (caretRemovalTimer !== null) {
       window.clearTimeout(caretRemovalTimer);
       caretRemovalTimer = null;
@@ -322,7 +334,8 @@
     if (caretTop !== null) {
       caret.style.position = "absolute";
       caret.style.top = caretTop + "px";
-      caret.style.left = "0";
+      // 水平位置同样取流式光标原处，避免完成瞬间光标横向跳到行首。
+      caret.style.left = (caretLeft ?? 0) + "px";
     }
     root.appendChild(caret);
     caretRemovalTimer = window.setTimeout(function () {
@@ -340,7 +353,6 @@
   }
 
   function renderStreaming(root, markdownSource) {
-    activeStreamingRender = true;
     hasStreamed = true;
     removeStreamingCaret();
 
@@ -390,7 +402,6 @@
 
     ensureStreamingCaret(root);
     scheduleHeightPost(true);
-    activeStreamingRender = false;
   }
 
   window.renderMarkdown = function (markdownSource, options) {
@@ -414,9 +425,11 @@
       root.style.minHeight = preservedHeight + "px";
     }
 
-    // 先记下流式光标的位置，终态光标绝对定位回原处（见 finishStreamingCaret）
+    // 先记下流式光标的位置，终态光标绝对定位回原处（见 finishStreamingCaret）——
+    // offsetTop 只管纵向、offsetLeft 管横向，避免完成瞬间光标横向跳到行首。
     const existingCaret = document.getElementById(caretID);
     const caretTop = existingCaret ? existingCaret.offsetTop : null;
+    const caretLeft = existingCaret ? existingCaret.offsetLeft : null;
 
     removeStreamingCaret();
     renderedBlocks = [];
@@ -424,7 +437,7 @@
     enhanceCodeBlocks(root);
     bindLinks(root);
     // 静止终态：仅在经历过流式的消息上停留一颗静态 ✦，随即淡出
-    finishStreamingCaret(root, caretTop);
+    finishStreamingCaret(root, caretTop, caretLeft);
 
     root.style.minHeight = "";
     lastPostedHeight = 0;

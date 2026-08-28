@@ -40,9 +40,11 @@ final class MarkdownRenderingCache {
     }
 
     func height(for markdown: String) -> CGFloat? {
-        guard currentWidth > 0, var entry = entries[key(for: markdown)] else { return nil }
+        guard currentWidth > 0 else { return nil }
+        let key = key(for: markdown)
+        guard var entry = entries[key] else { return nil }
         entry.lastAccess = Date()
-        entries[key(for: markdown)] = entry
+        entries[key] = entry
         return CGFloat(entry.height)
     }
 
@@ -368,6 +370,11 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private var isFlushRendering = true
         private var isRenderingJavaScript = false
         private var rerenderAfterFlight = false
+        /// 渲染代号：每次 loadInitial（含内容进程终止后的重建）递增，使所有在途的
+        /// evaluateJavaScript 回调失效。WebKit 内容进程被杀后，在途调用可能以「错误回调」
+        /// 收场——若据此重置 isRenderingJavaScript 并 reportFailure 会一次性锁存、恢复白做。
+        /// epoch 不匹配的直接忽略回调，无论 WebKit 以何种方式收尾都正确。
+        private var renderEpoch = 0
         private var lastRenderTime = Date.distantPast
         private var hasReportedFailure = false
         /// 内容进程终止后只允许自动重建一次，反复崩溃则退回原生渲染。
@@ -397,6 +404,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             // 不会再触发，必须重置在途状态，否则后续渲染会被永久卡住。
             throttleWorkItem?.cancel()
             throttleWorkItem = nil
+            renderEpoch += 1
             isRenderingJavaScript = false
             rerenderAfterFlight = false
             do {
@@ -413,7 +421,9 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                     if self.height <= 0 { self.height = 44 }
                 }
                 isPageLoaded = false
-                lastRenderedMarkdown = nil
+                // 页面内的内联引导 script 已完成初次渲染，这里记本次 markdown 而非 nil，
+                // didFinish 才不会对相同内容再强制 evaluateJavaScript 一次（重复二次渲染）。
+                lastRenderedMarkdown = markdown
                 lastRenderWasFlush = flush
                 webView.loadHTMLString(html, baseURL: rendererScriptURL.deletingLastPathComponent())
                 armLoadWatchdog(for: webView)
@@ -510,8 +520,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         private func renderViaJavaScript(markdown: String, in webView: WKWebView) {
             isRenderingJavaScript = true
-            // 本地捕获渲染模式：JS 在途期间新的 scheduleUpdate 可能翻转 isFlushRendering，
-            // 完成回调里要记录的是本次实际渲染所用的模式。
+            // 本地捕获渲染代号与模式：JS 在途期间新的 scheduleUpdate 可能翻转 isFlushRendering，
+            // 完成回调里记录的是本次实际渲染所用的模式；epoch 用于识别 loadInitial 重建后
+            // 已过期的在途回调（内容进程恢复场景）。
+            let epoch = renderEpoch
             let flush = isFlushRendering
             do {
                 let script = try NewPiMarkdownWebDocument.renderJavaScript(
@@ -520,6 +532,10 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                 )
                 webView.evaluateJavaScript(script) { [weak self] _, error in
                     guard let self else { return }
+                    // loadInitial 重建（含内容进程终止恢复）已使本次在途调用过期：epoch 不匹配
+                    // 直接忽略，不重置 isRenderingJavaScript（loadInitial 已重置）、也不 reportFailure，
+                    // 否则一次错误回调就会把恢复路径白做、退款回原生文本。
+                    guard self.renderEpoch == epoch else { return }
                     self.isRenderingJavaScript = false
                     if let error {
                         self.reportFailure(reason: "evaluateJavaScript failed: \(error.localizedDescription)")
@@ -638,7 +654,11 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             isPageLoaded = true
             NewPiMarkdownWebRendererView.configureEmbeddedScrollViews(in: webView)
 
-            if let markdown = pendingMarkdown, markdown != lastRenderedMarkdown {
+            // 文本相同但渲染模式翻转（如流式在页面加载完成前结束、flush 更新被 isPageLoaded
+            // 挡掉丢弃）也必须渲染：否则最终高亮/终态光标/ResizeObserver 永不发生——当初
+            // lastRenderWasFlush 修的就是这类 bug。判断与 renderPending 保持一致。
+            if let markdown = pendingMarkdown,
+               markdown != lastRenderedMarkdown || isFlushRendering != lastRenderWasFlush {
                 renderViaJavaScript(markdown: markdown, in: webView)
             }
         }

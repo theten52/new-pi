@@ -230,9 +230,9 @@ scrollViewportHeight = geometry.size.height - composerHeight
 2. WebView 行高异步实测：滚动动画按"半成品高度"算落点，动画结束后上方行陆续撑高把目标往下推
 3. 一次性滚动，无收敛机制
 
-**修复（2026-08-28）**：
+**修复（2026-08-28，当前实现已演进为 ScrollPosition 单一写者）**：
 
-- **收敛校正**：目标行用行内 `GeometryReader.onChange(of: minY, initial: true)` 直接回调写回面板状态（**不用** `PreferenceKey`——LazyVStack 惰性容器内的 preference 不向父级传播，`onPreferenceChange` 收不到）；`guard isActive` 隔离后台面板，连续 2 次达标提前结束，`jumpCorrectionCountLimit=6` + `jumpCorrectionWindow=1.8s` 双保险防振荡，偏差 >2pt 时无动画重滚贴顶
+- **收敛校正**：目标行用行内 `GeometryReader.onChange(of: minY, initial: true)` 直接回调写回 `ChatScrollCoordinator`（**不用** `PreferenceKey`——LazyVStack 惰性容器内的 preference 不向父级传播，`onPreferenceChange` 收不到）；`guard isActive` 隔离后台面板。定位窗口用**固定 1.5s deadline**（`beginJump` 设置，目标行首帧上报时重置——LazyVStack 远距离行实例化可能晚于点击数秒），超时即停止后续校正；**无计数上限、无"提前收敛"**，偏差 <0.5pt 去重后经 `ScrollPosition.scrollTo(point:)` 一次精确贴顶（实现见 `NewPiChatScrollCoordinator.swift`）
 - **高度缓存足够准**：`MarkdownRenderingCache` 按"内容 SHA256 + 实测宽度"缓存行高并持久化到 `~/.new-pi/agent/markdown-height-cache.json`，冷重建首帧即正确高度，LazyVStack 的估算误差大幅缩小。注意 `String.hashValue` 每次启动都会变，**不能**用作持久化 key
 
 **教训**：`scrollTo` 在长列表 + 异步测高场景必须配收敛校正；高度缓存的 key 要内容哈希 + 宽度。

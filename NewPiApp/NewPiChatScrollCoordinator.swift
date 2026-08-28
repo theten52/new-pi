@@ -5,7 +5,7 @@ import os
 ///
 /// 设计原则（docs/dev-notes/chat-scroll-layout.md §3.3 教训的修订版）：
 /// 每个滚动职责只有一个写者——流式钉底走 ScrollViewProxy.scrollTo（已验证可靠）；
-/// 精确定位（rail 跳转 / 会话恢复）走本组件，最终经由面板注入的
+/// 精确定位（rail 跳转）走本组件，最终经由面板注入的
 /// `ScrollPosition.scrollTo(point:)` 执行（macOS 15 官方精确滚动 API）。
 ///
 /// 为什么不用 NSScrollView.setContentOffset / 清空 scrollPosition 绑定：
@@ -20,11 +20,14 @@ import os
 /// 3. `onApplyExact(minY)` 一次滚到位；此后仅当上方测高变化使内容 y 漂移时
 ///    onChange 再次上报并重滚，静止即自然停（deadline 兜底）。
 @MainActor
-final class ChatScrollCoordinator {
+final class ChatScrollCoordinator: ObservableObject {
     /// 目标行最近上报的内容坐标 y（key: 消息 id；仅目标行进入，防无界增长）。
     private var rowContentTops: [UUID: CGFloat] = [:]
     /// 当前定位目标（nil = 无进行中的定位）。
-    private var targetID: UUID?
+    /// @Published 供 SwiftUI 观察：isTarget 参与行 background 的条件渲染（NewPiSessionPanel），
+    /// targetID 变化必须触发该视图重算，否则连续两次点同一 rail marker、几何未变时精确贴顶
+    /// 静默失效（Coordinator 内部状态变化不触发 SwiftUI 重绘）。
+    @Published var targetID: UUID?
     /// 定位窗口 deadline；超过即放弃后续校正。首帧上报时重置——目标行实例化
     /// 可能比点击晚数秒（LazyVStack 远距离行），固定从点击起算会错过窗口。
     private var deadline = Date.distantPast
@@ -97,16 +100,7 @@ final class ChatScrollCoordinator {
         #endif
     }
 
-    // MARK: - 收尾 / 查询
-
-    /// 窗口超时或新跳转覆盖时收尾。
-    func end() {
-        targetID = nil
-        lastAppliedY = nil
-    }
-
-    /// 是否有进行中的定位。
-    var isLocating: Bool { targetID != nil }
+    // MARK: - 查询
 
     /// 该行是否是当前定位目标（供行 background 决定是否挂 GeometryReader）。
     func isTarget(_ id: UUID) -> Bool { id == targetID }

@@ -172,3 +172,14 @@ body {
   margin: 0;
   border-radius: 0;
 }
+
+/* 尊重系统「减弱动态效果」偏好：关闭流光/脉冲动画与过渡，光标由 JS 计时移除 */
+@media (prefers-reduced-motion: reduce) {
+  .streaming-caret,
+  .streaming-caret.is-final {
+    animation: none;
+  }
+  .code-block-copy {
+    transition: none;
+  }
+}

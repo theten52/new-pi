@@ -44,10 +44,10 @@ struct NewPiSessionPanel: View {
     @State private var composerHeight: CGFloat = 120
     @State private var suppressAutoPinDuringStreaming = false
     @State private var isNearBottom = true
-    /// rail 跳转 / 会话恢复共用的滚动定位协调器：单一写者原则——精确定位只有
+    /// rail 跳转的滚动定位协调器：单一写者原则——精确定位只有
     /// Coordinator（经 ScrollPosition.scrollTo(point:)），流式钉底只有 scrollTo，
     /// 互不重叠（chat-scroll-layout.md §3.3"多机制打架"教训的修订版设计）。
-    @State private var scrollCoordinator = ChatScrollCoordinator()
+    @StateObject private var scrollCoordinator = ChatScrollCoordinator()
     /// rail 跳转的精确滚动执行者（macOS 15 API）：先 scrollTo(id:) 实例化目标行
     /// （scrollTo 对 LazyVStack 未实例化行失效的唯一替代），再 scrollTo(point:) 按内容
     /// 坐标一次滚到精确位置。平台单一权威写法，无 SwiftUI 绑定回写打架。
@@ -274,7 +274,10 @@ struct NewPiSessionPanel: View {
         if runtime.isStreaming {
             return !suppressAutoPinDuringStreaming && isNearBottom
         }
-        return true
+        // 非流式也仅当用户已贴近底部时才自动钉底：流式中曾上翻阅读（suppress=true）后，
+        // 若仅因在某处打字、行高变化就强制拽回底部会打断阅读。要改回"打字即回底"的产品
+        // 意图则把此处改 return true 即可。
+        return isNearBottom
     }
 
     private func scheduleComposerHeightUpdate(_ height: CGFloat) {

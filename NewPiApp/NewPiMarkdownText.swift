@@ -15,7 +15,11 @@ struct NewPiMarkdownText: View {
         self.content = content
         self.flushRendering = flushRendering
         // 冷重建时首帧直接用缓存高度（内容哈希 + 当前宽度命中），避免 0→真实高度的渐进闪烁。
-        _webHeight = State(initialValue: MarkdownRenderingCache.shared.height(for: content) ?? 44)
+        // 流式内容每次都在变、必 miss 缓存，跳过 SHA256 避免热路径（~40ms 一次）全量哈希；
+        // 流式结束翻转 flushRendering 后重新走缓存命中。
+        _webHeight = State(initialValue: flushRendering
+            ? (MarkdownRenderingCache.shared.height(for: content) ?? 44)
+            : 44)
     }
 
     var body: some View {
@@ -106,9 +110,9 @@ struct NewPiMarkdownText: View {
 
             let lineEnd = normalized[index...].firstIndex(of: "\n") ?? normalized.endIndex
             let line = String(normalized[index..<lineEnd])
-            if line.isEmpty {
-                segments.append(.newline)
-            } else {
+            // 空行不单独产一个 .newline：下方统一 append 一个换行即可，
+            // 否则 "a\n\nb"（两段之间一个空行）会被输出成三个换行。
+            if !line.isEmpty {
                 segments.append(.block(line))
             }
 
@@ -134,8 +138,10 @@ struct NewPiMarkdownText: View {
         }
 
         while searchStart < source.endIndex {
-            if source[searchStart...].hasPrefix("\n```") {
-                var closeEnd = source.index(searchStart, offsetBy: 4)
+            // searchStart 指向行首（"```" 开头），匹配 3 字符围栏后 offsetBy 3，
+            // 再吞掉其后的换行，返回闭合行之后的索引（含闭合行及其换行的块）。
+            if source[searchStart...].hasPrefix("```") {
+                var closeEnd = source.index(searchStart, offsetBy: 3)
                 if closeEnd < source.endIndex, source[closeEnd] == "\n" {
                     closeEnd = source.index(after: closeEnd)
                 }
@@ -235,6 +241,10 @@ struct NewPiTranscriptRow: View {
             }
         }
         .opacity(isHovering || isActiveStreamingItem ? 1 : 0)
+        // opacity(0) 的按钮仍需禁用命中测试与无障碍读取，否则隐藏按钮可被点击/被 VoiceOver 聚焦
+        //（与 NewPiChatView 中 opacity+allowsHitTesting 成对使用的约定对齐）。
+        .allowsHitTesting(isHovering || isActiveStreamingItem)
+        .accessibilityHidden(!(isHovering || isActiveStreamingItem))
     }
 
     @ViewBuilder
