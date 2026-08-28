@@ -64,6 +64,15 @@ private struct SessionRow: View {
     let summary: SessionSummary
     let isActive: Bool
 
+    /// 有效显示名：label 为空串时视为未命名（回落显示创建时间）。
+    private var displayLabel: String? {
+        guard let label = summary.label,
+              !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return label
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if isActive {
@@ -73,13 +82,13 @@ private struct SessionRow: View {
                     .padding(.top, 1)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(summary.label ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
+                Text(displayLabel ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.subheadline)
                     .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                     .fontWeight(isActive ? .semibold : .regular)
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    if summary.label != nil {
+                    if displayLabel != nil {
                         Text(summary.createdAt.formatted(date: .abbreviated, time: .shortened))
                         Text("·")
                     }
@@ -103,6 +112,8 @@ struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
     @State private var showLogs = false
     @State private var showsAllSessions = false
+    @State private var renameTarget: SessionSummary?
+    @State private var renameText = ""
 
     private let recentSessionLimit = 5
 
@@ -150,6 +161,10 @@ struct NewPiRootView: View {
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
+                                Button("Rename Session") {
+                                    renameTarget = summary
+                                    renameText = summary.label ?? ""
+                                }
                                 Button("Archive Session") {
                                     Task { await viewModel.archiveSession(summary) }
                                 }
@@ -240,6 +255,24 @@ struct NewPiRootView: View {
         }
         .sheet(isPresented: $showLogs) {
             NewPiLogsView(store: NewPiLogStore.shared)
+        }
+        .alert("Rename Session", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("Name", text: $renameText)
+            Button("Save") {
+                if let target = renameTarget {
+                    let newLabel = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Task { await viewModel.renameSession(target, to: newLabel) }
+                }
+                renameTarget = nil
+            }
+            Button("Cancel", role: .cancel) {
+                renameTarget = nil
+            }
+        } message: {
+            Text("Enter a new name for this session. Leave empty to reset to the default name.")
         }
         .sheet(item: $viewModel.pendingToolApproval) { request in
             NewPiToolApprovalSheet(viewModel: viewModel, request: request)
