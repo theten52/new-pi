@@ -78,7 +78,30 @@ struct NewPiSessionPanel: View {
             .map { UserMessageMarker(id: $0.id, preview: $0.body) }
     }
 
+    /// 每条消息所属"轮对话"的气泡色映射（BACKLOG-BUBBLE-BG）。
+    /// 一个 user 消息开启新轮（以其 id 为锚点派生颜色），后续连续的非 user 消息
+    /// （NewPi/Summary/Tool）归入当前轮同色；遇到下一个 user 消息换色。
+    private func turnTints(for transcript: [NewPiTranscriptItem]) -> [UUID: Color] {
+        var result: [UUID: Color] = [:]
+        var currentAnchor: UUID?
+        for item in transcript {
+            if item.title == "You" {
+                currentAnchor = item.id
+            }
+            if let anchor = currentAnchor {
+                result[item.id] = Color.bubbleTint(for: anchor)
+            } else {
+                // 首个 user 消息之前（理论上不会发生）：回退旧 accent 观感。
+                result[item.id] = Color.accentColor.opacity(0.16)
+            }
+        }
+        return result
+    }
+
     var body: some View {
+        // 按"轮对话"上色：一个 user 消息开启新轮，后续连续的非 user 消息归入该轮，
+        // 同轮内输入/输出气泡同色、跨轮异色（BACKLOG-BUBBLE-BG）。
+        let turnTints = turnTints(for: runtime.transcript)
         GeometryReader { geometry in
             let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
             // 可见窗口：派生值。scrollOffset/视口/高度表任一变化即重算，永远与当前几何一致。
@@ -117,6 +140,7 @@ struct NewPiSessionPanel: View {
                                         ForEach(visibleItems) { item in
                                             NewPiTranscriptRow(
                                                 item: item,
+                                                bubbleTint: turnTints[item.id] ?? Color.accentColor.opacity(0.16),
                                                 isStreaming: runtime.isStreaming,
                                                 isActiveStreamingItem: runtime.isStreaming
                                                     && !runtime.streamingBubbleComplete
