@@ -64,6 +64,8 @@ private struct SessionRow: View {
     let summary: SessionSummary
     let isActive: Bool
 
+    @State private var isHovering = false
+
     /// 有效显示名：label 为空串时视为未命名（回落显示创建时间）。
     private var displayLabel: String? {
         guard let label = summary.label,
@@ -101,10 +103,22 @@ private struct SessionRow: View {
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
-        )
+        .background {
+            // 高亮优先级：活跃会话 accent 色 > 悬浮毛玻璃（BACKLOG-SESSION-HOVER-GLASS）
+            if isActive {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.15))
+            } else if isHovering {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.13))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+                    )
+            }
+        }
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 }
 
