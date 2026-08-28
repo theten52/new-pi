@@ -45,9 +45,11 @@ struct NewPiSessionPanel: View {
     /// 精确滚动执行者（macOS 15 API）：scrollTo(point:) 按内容坐标直接滚动。
     @State private var jumpPosition = ScrollPosition()
     /// 当前滚动偏移（内容坐标），由内容的 onGeometryChange 驱动。
+    /// 可见窗口是它的派生值（body 内直接计算），不再用事件链维护——
+    /// 「揭示后白屏、滚动才恢复」正是事件链时序错位导致的窗口过期。
     @State private var scrollOffset: CGFloat = 0
-    /// 当前实例化的行窗口（含上下各 1 屏过扫）。
-    @State private var visibleRange: Range<Int> = 0..<0
+    /// resize 防抖重预热任务。
+    @State private var resizePreheatTask: Task<Void, Never>?
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -65,6 +67,8 @@ struct NewPiSessionPanel: View {
     var body: some View {
         GeometryReader { geometry in
             let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
+            // 可见窗口：派生值。scrollOffset/视口/高度表任一变化即重算，永远与当前几何一致。
+            let visibleRange = heightMap.window(scrollOffset: scrollOffset, viewportHeight: scrollViewportHeight)
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .trailing) {
@@ -153,7 +157,6 @@ struct NewPiSessionPanel: View {
                                 -proxy.frame(in: .named(NewPiChatScrollSupport.coordinateSpaceName)).minY
                             } action: { newOffset in
                                 scrollOffset = newOffset
-                                updateVisibleWindow()
                             }
                         }
                         .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
@@ -221,23 +224,23 @@ struct NewPiSessionPanel: View {
                         }
                     }
                     .onAppear {
-                        scrollViewportHeightCurrent = scrollViewportHeight
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
-                        updateVisibleWindow()
                         schedulePinScrollToBottom(using: proxy)
-                    }
-                    .onChange(of: scrollViewportHeight) { _, newValue in
-                        scrollViewportHeightCurrent = newValue
-                        updateVisibleWindow()
                     }
                     // 高度表重建：transcript 结构变化 / 宽度变化 / 缓存被预热或实测填充时。
                     .onChange(of: runtime.transcript.map(\.id)) { _, _ in
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
-                        updateVisibleWindow()
                     }
                     .onChange(of: geometry.size.width) { _, _ in
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
-                        updateVisibleWindow()
+                        // resize 防抖重预热：宽度桶切换后，不可见区域的 md 行在新宽度下
+                        // 没有实测高度（rail 会退化为估算）。resize 结束 500ms 后重跑预热补齐。
+                        resizePreheatTask?.cancel()
+                        resizePreheatTask = Task {
+                            try? await Task.sleep(for: .milliseconds(500))
+                            guard !Task.isCancelled else { return }
+                            MarkdownHeightPreheater.shared.preheat(items: runtime.transcript)
+                        }
                     }
                     .onReceive(MarkdownRenderingCache.shared.$version) { _ in
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
@@ -291,9 +294,6 @@ struct NewPiSessionPanel: View {
         .environment(\.panelIsActive, isActive)
     }
 
-    /// 最近一次布局的滚动视口高（供非 body 上下文的窗口计算使用）。
-    @State private var scrollViewportHeightCurrent: CGFloat = 0
-
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
         guard shouldAutoPinToBottom else { return }
         DispatchQueue.main.async {
@@ -304,13 +304,6 @@ struct NewPiSessionPanel: View {
     /// 按最新缓存/布局常量重建高度表（rail 定位与窗口占位的共同数据源）。
     private func rebuildHeightMap(contentWidth: CGFloat) {
         heightMap.rebuild(items: runtime.transcript, contentWidth: contentWidth)
-    }
-
-    /// 按当前滚动偏移重算实例化窗口（上下各 1 屏过扫）；仅窗口变化时写入状态。
-    private func updateVisibleWindow() {
-        let next = heightMap.window(scrollOffset: scrollOffset, viewportHeight: scrollViewportHeightCurrent)
-        guard next != visibleRange else { return }
-        visibleRange = next
     }
 
     private var shouldAutoPinToBottom: Bool {

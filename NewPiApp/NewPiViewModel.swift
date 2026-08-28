@@ -87,7 +87,9 @@ final class SessionRuntime: ObservableObject {
         initialRenderReady = false
         initialRenderGateTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 1_200_000_000)
+                // 窗口化 + 产物重放后，占位高度已精确、揭示不再伴随布局跳动；
+                // 超时压到 0.6s：超时即揭示，结构先行、内容陆续填入（浏览器式渐进呈现）。
+                try await Task.sleep(nanoseconds: 600_000_000)
             } catch {
                 return // 取消：不再强制揭示，避免旧 task 提前揭示新 gate（K3 review minor）
             }
