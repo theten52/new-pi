@@ -406,6 +406,14 @@
     hasStreamed = true;
     removeStreamingCaret();
 
+    // 防御：重放页（renderedBlocks 为空但 root 已有产物内容）若意外收到流式更新，
+    // 先清空再全量增量，否则块会 append 到重放内容之后造成重复。
+    if (renderedBlocks.length === 0 && root.firstChild) {
+      while (root.firstChild) {
+        root.removeChild(root.firstChild);
+      }
+    }
+
     const split = splitBlocks(markdownSource);
     const blocks = split.blocks;
     const blockCount = blocks.length;
