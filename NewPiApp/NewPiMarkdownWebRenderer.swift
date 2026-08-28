@@ -18,6 +18,10 @@ final class MarkdownRenderingCache {
     private struct Entry: Codable {
         var height: Double
         var lastAccess: Date
+        /// 最终渲染产物（innerHTML）。存在即表示该消息可重放，不再需要解析渲染。
+        var html: String?
+        /// 捕获产物时的渲染引擎指纹（MarkdownRenderer 资源哈希）；不匹配则产物作废。
+        var engine: String?
     }
 
     /// 磁盘格式 v2：外层 key 为内容宽度的量化字符串（String(Int(width))，JS 上报 ceil 已是整数），
@@ -53,7 +57,7 @@ final class MarkdownRenderingCache {
         guard currentWidth > 0 else { return nil }
         let key = key(for: markdown)
         let widthKey = Self.widthKey(currentWidth)
-        guard var entry = buckets[widthKey]?[key] else { return nil }
+        guard var entry = buckets[widthKey]?[key], entry.height > 0 else { return nil }
         entry.lastAccess = Date()
         buckets[widthKey]?[key] = entry
         return CGFloat(entry.height)
@@ -63,7 +67,44 @@ final class MarkdownRenderingCache {
         guard height > 0, width > 0 else { return }
         currentWidth = width
         let widthKey = Self.widthKey(width)
-        buckets[widthKey, default: [:]][key(for: markdown)] = Entry(height: Double(height), lastAccess: Date())
+        let hash = key(for: markdown)
+        // 就地更新而不是整体替换：保留已捕获的渲染产物（html/engine）字段。
+        if var entry = buckets[widthKey, default: [:]][hash] {
+            entry.height = Double(height)
+            entry.lastAccess = Date()
+            buckets[widthKey]?[hash] = entry
+        } else {
+            buckets[widthKey, default: [:]][hash] = Entry(height: Double(height), lastAccess: Date())
+        }
+        evictIfNeeded()
+        scheduleSave()
+    }
+
+    /// 命中即返回可重放的最终渲染产物（HTML）。要求当前宽度桶内有该内容、
+    /// 且产物捕获时的引擎指纹与当前一致（渲染器/样式变更后旧产物整体作废）。
+    func renderedHTML(for markdown: String, engine: String) -> String? {
+        guard currentWidth > 0 else { return nil }
+        let hash = key(for: markdown)
+        let widthKey = Self.widthKey(currentWidth)
+        guard var entry = buckets[widthKey]?[hash],
+              let html = entry.html,
+              entry.engine == engine else { return nil }
+        entry.lastAccess = Date()
+        buckets[widthKey]?[hash] = entry
+        return html
+    }
+
+    /// 写入最终渲染产物。高度仍由高度上报通道写入，这里只补 html/engine。
+    func setRenderedHTML(_ html: String, width: CGFloat, engine: String, for markdown: String) {
+        guard !html.isEmpty, width > 0 else { return }
+        currentWidth = width
+        let widthKey = Self.widthKey(width)
+        let hash = key(for: markdown)
+        var entry = buckets[widthKey, default: [:]][hash] ?? Entry(height: 0, lastAccess: Date())
+        entry.html = html
+        entry.engine = engine
+        entry.lastAccess = Date()
+        buckets[widthKey]?[hash] = entry
         evictIfNeeded()
         scheduleSave()
     }
@@ -232,6 +273,73 @@ enum NewPiMarkdownWebDocument {
         """
     }
 
+    /// 渲染引擎指纹：MarkdownRenderer 目录资源（js/css）内容哈希。
+    /// 渲染器或样式任何变化都会改变指纹，使已存渲染产物整体失效
+    /// （回落正常渲染并重新捕获），无需手工维护版本号。
+    @MainActor
+    static func engineFingerprint(rendererScriptURL: URL) -> String {
+        if let cached = cachedEngineFingerprint { return cached }
+        let directory = rendererScriptURL.deletingLastPathComponent()
+        let fileManager = FileManager.default
+        let names = (try? fileManager.contentsOfDirectory(atPath: directory.path))?.sorted() ?? []
+        var hash = SHA256()
+        for name in names {
+            let fileURL = directory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: fileURL) else { continue }
+            hash.update(data: Data(name.utf8))
+            hash.update(data: data)
+        }
+        let digest = hash.finalize()
+        let fingerprint = digest.map { String(format: "%02x", $0) }.joined()
+        cachedEngineFingerprint = fingerprint
+        return fingerprint
+    }
+
+    @MainActor private static var cachedEngineFingerprint: String?
+
+    /// 重放文档：与 documentHTML 相同的 CSP 与样式表，但 article 预填最终渲染产物，
+    /// 不内联 markdown 源码、不走解析/增量/光标管线，仅重绑交互并上报高度。
+    /// 产物是 markdown-it(html:false) 的转义输出；CSP 无 unsafe-inline，
+    /// 产物中即便混入内联脚本或事件属性也不会执行。
+    static func replayDocumentHTML(renderedHTML: String, rendererScriptURL: URL) -> String {
+        let rendererDirectoryURL = rendererScriptURL.deletingLastPathComponent()
+        let markdownItURL = rendererDirectoryURL.appendingPathComponent("markdown-it.min.js")
+        let highlightURL = rendererDirectoryURL.appendingPathComponent("highlight.min.js")
+        let githubMarkdownCSSURL = rendererDirectoryURL.appendingPathComponent("github-markdown-light.css")
+        let highlightCSSURL = rendererDirectoryURL.appendingPathComponent("highlight-github.min.css")
+        let appCSSURL = rendererDirectoryURL.appendingPathComponent("markdown-renderer.css")
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self' file:; script-src 'self' file: 'nonce-\(scriptNonce)'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(githubMarkdownCSSURL.absoluteString))">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(highlightCSSURL.absoluteString))">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(appCSSURL.absoluteString))">
+        </head>
+        <body>
+          <article id="markdown-root" class="markdown-body">\(renderedHTML)</article>
+          <script nonce="\(scriptNonce)">
+            window.onerror = function (message, source, line, column) {
+              if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.rendererError) {
+                window.webkit.messageHandlers.rendererError.postMessage(
+                  String(message) + " @ " + String(source) + ":" + String(line) + ":" + String(column)
+                );
+              }
+            };
+          </script>
+          <script src="\(htmlAttributeEscaped(markdownItURL.absoluteString))"></script>
+          <script src="\(htmlAttributeEscaped(highlightURL.absoluteString))"></script>
+          <script src="\(htmlAttributeEscaped(rendererScriptURL.absoluteString))"></script>
+          <script nonce="\(scriptNonce)">window.replayRendered();</script>
+        </body>
+        </html>
+        """
+    }
+
     static func renderJavaScript(for markdown: String, streaming: Bool = false) throws -> String {
         let expression = try jsonParseExpression(for: markdown)
         if streaming {
@@ -348,6 +456,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "height")
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
+        configuration.userContentController.add(context.coordinator, name: "renderedSnapshot")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -392,6 +501,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "height")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "renderedSnapshot")
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
     }
@@ -477,11 +587,22 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             isRenderingJavaScript = false
             rerenderAfterFlight = false
             do {
-                let html = try NewPiMarkdownWebDocument.documentHTML(
-                    markdown: markdown,
-                    rendererScriptURL: rendererScriptURL,
-                    streaming: !flush
-                )
+                // 产物重放：非流式行且产物缓存命中（同宽度桶 + 同引擎指纹）时，
+                // 直接加载预填最终 HTML 的重放文档——不跑解析/增量/光标管线。
+                let engine = NewPiMarkdownWebDocument.engineFingerprint(rendererScriptURL: rendererScriptURL)
+                let html: String
+                if flush, let renderedHTML = MarkdownRenderingCache.shared.renderedHTML(for: markdown, engine: engine) {
+                    html = NewPiMarkdownWebDocument.replayDocumentHTML(
+                        renderedHTML: renderedHTML,
+                        rendererScriptURL: rendererScriptURL
+                    )
+                } else {
+                    html = try NewPiMarkdownWebDocument.documentHTML(
+                        markdown: markdown,
+                        rendererScriptURL: rendererScriptURL,
+                        streaming: !flush
+                    )
+                }
                 // 不要无条件把高度重置为 44：NewPiMarkdownText 已用缓存高度初始化 webHeight，
                 // 这里若覆盖会架空高度缓存，使 LazyVStack 用 44 估算、滚动定位失真。
                 // 仅当无有效初值（<=0）时才兜底为 44。
@@ -638,6 +759,20 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
+                return
+            }
+
+            // 最终渲染产物回传（仅 flush 渲染路径会发）：写入产物缓存，此后该消息重放展示。
+            // 高度仍由 height 通道独立写入，这里只补 html/engine。
+            if message.name == "renderedSnapshot" {
+                guard let payload = message.body as? [String: Any],
+                      let html = payload["html"] as? String, !html.isEmpty else { return }
+                let width = Self.numericValue(payload["width"])
+                guard width > 0,
+                      let markdown = lastRenderedMarkdown ?? pendingMarkdown,
+                      let rendererScriptURL else { return }
+                let engine = NewPiMarkdownWebDocument.engineFingerprint(rendererScriptURL: rendererScriptURL)
+                MarkdownRenderingCache.shared.setRenderedHTML(html, width: width, engine: engine, for: markdown)
                 return
             }
 

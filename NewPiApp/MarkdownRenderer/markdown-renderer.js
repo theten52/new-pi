@@ -113,6 +113,24 @@
     }
   }
 
+  // 复制按钮点击：file:// 源下 navigator.clipboard 不可靠，走原生 NSPasteboard。
+  // enhanceCodeBlocks（新建外框）与 rebindInteractivity（产物重放）共用。
+  function attachCopyHandler(button, pre) {
+    const code = pre.querySelector("code");
+    button.addEventListener("click", function () {
+      const text = code ? code.textContent : pre.textContent;
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText) {
+        window.webkit.messageHandlers.copyText.postMessage(text || "");
+      }
+      button.textContent = "✓";
+      button.classList.add("copied");
+      window.setTimeout(function () {
+        button.textContent = "Copy";
+        button.classList.remove("copied");
+      }, 1000);
+    });
+  }
+
   function bindLinks(root) {
     root.querySelectorAll("a").forEach(function (link) {
       link.setAttribute("rel", "nofollow noopener noreferrer");
@@ -121,6 +139,49 @@
       });
     });
   }
+
+  // ===== 产物重放（render-once, replay-forever） =====
+
+  // 最终渲染产物回传：克隆后剥掉流式/终态光标，只存内容本体。
+  // Swift 侧按（内容哈希 + 宽度桶 + 引擎指纹）持久化，之后该消息永远重放、不再解析。
+  function postRenderedSnapshot(root) {
+    if (!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.renderedSnapshot)) {
+      return;
+    }
+    const clone = root.cloneNode(true);
+    const caret = clone.querySelector("#" + caretID);
+    if (caret && caret.parentNode) {
+      caret.parentNode.removeChild(caret);
+    }
+    window.webkit.messageHandlers.renderedSnapshot.postMessage({
+      html: clone.innerHTML,
+      width: Math.ceil(document.documentElement.clientWidth)
+    });
+  }
+
+  // 重放模式：产物 HTML 已内联在 #markdown-root 中。innerHTML 重放不保留事件监听，
+  // 需重绑复制按钮与链接拦截；再挂高度观测并强制上报一次（幂等写缓存）。
+  function rebindInteractivity(root) {
+    root.querySelectorAll(".code-block-container").forEach(function (container) {
+      const pre = container.querySelector("pre");
+      const button = container.querySelector(".code-block-copy");
+      if (pre && button) {
+        attachCopyHandler(button, pre);
+      }
+    });
+    bindLinks(root);
+  }
+
+  window.replayRendered = function () {
+    const root = document.getElementById("markdown-root");
+    if (!root) {
+      return;
+    }
+    rebindInteractivity(root);
+    lastPostedHeight = 0;
+    observeRootHeight(root);
+    scheduleHeightPost(true);
+  };
 
   // ===== 块级增量渲染 =====
   // renderedBlocks 与 root 的块节点一一对应（流式末尾的光标节点除外）。
@@ -244,18 +305,7 @@
       button.type = "button";
       button.className = "code-block-copy";
       button.textContent = "Copy";
-      button.addEventListener("click", function () {
-        const text = code ? code.textContent : pre.textContent;
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText) {
-          window.webkit.messageHandlers.copyText.postMessage(text || "");
-        }
-        button.textContent = "✓";
-        button.classList.add("copied");
-        window.setTimeout(function () {
-          button.textContent = "Copy";
-          button.classList.remove("copied");
-        }, 1000);
-      });
+      attachCopyHandler(button, pre);
 
       header.appendChild(label);
       header.appendChild(button);
@@ -438,6 +488,9 @@
     bindLinks(root);
     // 静止终态：仅在经历过流式的消息上停留一颗静态 ✦，随即淡出
     finishStreamingCaret(root, caretTop, caretLeft);
+
+    // 产物重放：把最终渲染结果回传 Swift 持久化（克隆内剥光标），后续展示直接重放。
+    postRenderedSnapshot(root);
 
     root.style.minHeight = "";
     lastPostedHeight = 0;
