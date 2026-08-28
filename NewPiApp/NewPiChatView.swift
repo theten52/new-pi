@@ -1,10 +1,5 @@
 import AppKit
 import SwiftUI
-import os
-
-/// rail 跳转诊断日志：用 os.Logger（进 unified log），Hermes 才能用 `log stream`
-/// 自己抓取，而不依赖用户回传 stdout（GUI App 从 Finder 启动时 stdout 不落地）。
-private let railJumpLog = os.Logger(subsystem: "com.newpi.app", category: "railjump")
 
 /// 保活容器：把每个缓存会话的面板视图（含彼此内部的 WKWebView）常驻挂载，
 /// 切换会话时仅翻转活跃面板的显示/交互，而不销毁重建 —— 这样 DOM、测高、滚动位置
@@ -44,18 +39,12 @@ struct NewPiSessionPanel: View {
     @State private var composerHeight: CGFloat = 120
     @State private var suppressAutoPinDuringStreaming = false
     @State private var isNearBottom = true
-    /// rail 跳转的滚动定位协调器：单一写者原则——精确定位只有
-    /// Coordinator（经 ScrollPosition.scrollTo(point:)），流式钉底只有 scrollTo，
-    /// 互不重叠（chat-scroll-layout.md §3.3"多机制打架"教训的修订版设计）。
-    @StateObject private var scrollCoordinator = ChatScrollCoordinator()
-    /// rail 跳转的精确滚动执行者（macOS 15 API）：先 scrollTo(id:) 实例化目标行
-    /// （scrollTo 对 LazyVStack 未实例化行失效的唯一替代），再 scrollTo(point:) 按内容
-    /// 坐标一次滚到精确位置。平台单一权威写法，无 SwiftUI 绑定回写打架。
+    /// rail 跳转的高度表：点击 = 前缀和算目标行内容 y → scrollTo(point:) 一次到位。
+    /// 替代旧收敛机制（目标行异步实例化 + 实测上报 + deadline 校正，三轮未收敛）。
+    @State private var heightMap = TranscriptHeightMap()
+    /// 精确滚动执行者（macOS 15 API）：scrollTo(point:) 按内容坐标直接滚动，
+    /// 不依赖目标行实例化（scrollTo(id:) 对 LazyVStack 未实例化行的缺陷由此绕开）。
     @State private var jumpPosition = ScrollPosition()
-    /// 内容 VStack 的命名坐标系：行在其中上报的 minY = 行的绝对内容 y
-    /// （不随滚动变化），即精确贴顶所需滚动点。挂在内容上而非 ScrollView 上——
-    /// 挂 ScrollView 上是视口相对坐标，量纲错误（2026-08-28 实测教训）。
-    private let contentSpaceName = "new-pi-chat-content"
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -103,35 +92,13 @@ struct NewPiSessionPanel: View {
                                             Task { await viewModel.forkFromMessage(index: index) }
                                         }
                                         .id(item.id)
-                                        .onAppear {
-                                            #if DEBUG
-                                            if scrollCoordinator.isTarget(item.id) {
-                                                let idString = item.id.uuidString
-                                                railJumpLog.debug("rail-jump row-appeared target=\(idString, privacy: .public)")
-                                            }
-                                            #endif
+                                        // 行实例化后回报实测高度到高度表（只更新数据，不触发滚动）；
+                                        // 下一次 rail 点击 rebuild 时自然吸收这些更准的值。
+                                        .onGeometryChange(for: CGFloat.self) { proxy in
+                                            proxy.size.height
+                                        } action: { height in
+                                            heightMap.updateMeasured(id: item.id, height: height)
                                         }
-                                        .background(
-                                            Group {
-                                                // 目标行在内容坐标系上报绝对内容 y（= 精确贴顶滚动点）。
-                                                // 不能用 PreferenceKey：LazyVStack 惰性容器内的 preference
-                                                // 不向父级传播，改用 GeometryReader.onChange 直调 Coordinator。
-                                                if scrollCoordinator.isTarget(item.id) {
-                                                    GeometryReader { rowGeometry in
-                                                        Color.clear
-                                                            .onChange(
-                                                                of: rowGeometry.frame(
-                                                                    in: .named(contentSpaceName)
-                                                                ).minY,
-                                                                initial: true
-                                                            ) { _, minY in
-                                                                guard isActive else { return }
-                                                                scrollCoordinator.reportRowTop(minY, for: item.id)
-                                                            }
-                                                    }
-                                                }
-                                            }
-                                        )
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -155,7 +122,6 @@ struct NewPiSessionPanel: View {
                                         }
                                     )
                             }
-                            .coordinateSpace(name: contentSpaceName)
                             .padding()
                             .frame(
                                 maxWidth: .infinity,
@@ -166,8 +132,8 @@ struct NewPiSessionPanel: View {
                         .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .scrollBounceBehavior(.basedOnSize)
-                        // rail 跳转 / 会话恢复用 ScrollPosition（macOS 15）：先 scrollTo(id:)
-                        // 实例化 LazyVStack 未加载行，再 scrollTo(point:) 按内容坐标精确贴顶。
+                        // rail 跳转 / 会话恢复用 ScrollPosition（macOS 15）：scrollTo(point:)
+                        // 按内容坐标精确滚动，不依赖目标行实例化。
                         // 不用 id 绑定形式（绑定会持续回写 anchor 落点，与精确定位打架）。
                         .scrollPosition($jumpPosition)
                         .transaction { transaction in
@@ -180,12 +146,16 @@ struct NewPiSessionPanel: View {
                             markers: userMessageMarkers,
                             onSelect: { messageID in
                                 suppressAutoPinDuringStreaming = true
-                                // 定位三步：①beginJump 记目标开窗；②scrollTo(id:) 实例化目标行
-                                //（SwiftUI 滚到附近）；③行在内容坐标系上报绝对 y 后，
-                                // Coordinator 经 onApplyExact → scrollTo(point:) 一次精确贴顶。
-                                // 上方惰性行陆续实例化/测高使 y 漂移时 onChange 会再上报再校正。
-                                scrollCoordinator.beginJump(to: messageID)
-                                jumpPosition.scrollTo(id: messageID)
+                                // 高度表算术定位：点击时按最新缓存重建表，前缀和算出目标行
+                                // 内容 y，scrollTo(point:) 一次到位。不实例化目标行、
+                                // 不等异步实测、无收敛窗口。
+                                heightMap.rebuild(
+                                    items: runtime.transcript,
+                                    contentWidth: geometry.size.width - 32
+                                )
+                                if let y = heightMap.offset(of: messageID) {
+                                    jumpPosition.scrollTo(point: CGPoint(x: 0, y: max(0, y)))
+                                }
                             }
                         )
                         .padding(.trailing, 10)
@@ -224,7 +194,6 @@ struct NewPiSessionPanel: View {
                         }
                     }
                     .onAppear {
-                        bindScrollCoordinator()
                         schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: runtime.isStreaming) { wasStreaming, isStreaming in
@@ -297,14 +266,6 @@ struct NewPiSessionPanel: View {
         DispatchQueue.main.async {
             guard abs(composerHeight - height) > 0.5 else { return }
             composerHeight = height
-        }
-    }
-
-    /// Coordinator 接线：精确滚动经 ScrollPosition.scrollTo(point:) 执行
-    /// （平台单一权威写法；实测 NSScrollView/绑定清空都会与 SwiftUI 回写打架）。
-    private func bindScrollCoordinator() {
-        scrollCoordinator.onApplyExact = { [self] y in
-            jumpPosition.scrollTo(point: CGPoint(x: 0, y: y))
         }
     }
 

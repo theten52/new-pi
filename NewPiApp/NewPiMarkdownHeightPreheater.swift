@@ -26,7 +26,9 @@ final class MarkdownHeightPreheater {
     private var task: Task<Void, Never>?
     /// 预加热代号：每次 preheat 递增，旧 task 收尾时校验，避免误清新一代 preheat 的引用（K3 review major）。
     private var generation = 0
-    private let maxProbes = 40
+    /// 全量预热：几十条/会话的规模下全覆盖（曾是尾部 8 条/40 探针上限——
+    /// 长会话中段行无缓存，是「滚动条越滚越短」的直接根因）。看门狗仍保护单行。
+    private let maxProbes = 120
     private let rowWatchdogSeconds: TimeInterval = 3
 
     private init() {}
@@ -41,8 +43,9 @@ final class MarkdownHeightPreheater {
         // 无宽度基线（全新安装未测得宽度）时没有可对齐的桶，跳过（退化为现状，不更糟）。
         guard widthSnapshot > 0 else { return }
 
-        // 只扫尾部 200 条：远处行用户未必滚到、且 preheat 有 maxProbes 上限，避免全量主线程 SHA256（K3 review minor）。
-        let misses = items.suffix(200).reversed().filter { item in
+        // 全量扫 cache-miss 行（尾部优先——用户总是从底部开始浏览）。
+        // 几十条/会话的规模 + maxProbes 上限兜底；逐行 SHA256 成本可忽略。
+        let misses = items.reversed().filter { item in
             (item.title == "NewPi" || item.title == "Summary")
                 && MarkdownRenderingCache.shared.height(for: item.body) == nil
         }
@@ -107,8 +110,10 @@ final class MarkdownHeightPreheater {
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
-        let handler = ProbeHeightHandler(markdown: markdown, width: width)
+        let handler = ProbeHeightHandler(markdown: markdown, width: width, rendererScriptURL: rendererScriptURL)
         configuration.userContentController.add(handler, name: "height")
+        // 探针同时捕获渲染产物（html 与高度一起写缓存）——首次揭示即重放。
+        configuration.userContentController.add(handler, name: "renderedSnapshot")
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: width, height: 5), configuration: configuration)
         window.contentView = webView
 
@@ -139,28 +144,51 @@ final class MarkdownHeightPreheater {
             }
         }
 
+        // 高度已到；产物消息（renderedSnapshot）与高度异步并行到达，拆探针前
+        // 给最多 400ms 宽限等产物落缓存，此后该行首次揭示即可走重放。
+        var snapshotWait: TimeInterval = 0
+        while !handler.snapshotDelivered, snapshotWait < 0.4, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(50))
+            snapshotWait += 0.05
+        }
+
         webView.stopLoading()
         configuration.userContentController.removeScriptMessageHandler(forName: "height")
+        configuration.userContentController.removeScriptMessageHandler(forName: "renderedSnapshot")
         window.contentView = nil
         window.orderOut(nil)
         return ok
     }
 }
 
-/// 探针的 height 消息 handler：收到首个有效高度即写缓存（宽度钉死为传入的 activeWidth 快照）。
+/// 探针的消息 handler：收到首个有效高度即写缓存（宽度钉死为传入的 activeWidth 快照）；
+/// renderedSnapshot 通道顺带把最终渲染产物写缓存。
 @MainActor
 private final class ProbeHeightHandler: NSObject, WKScriptMessageHandler {
     /// 首次有效高度后回调一次，供 probe 的 continuation 恢复。
     var onHeight: (() -> Void)?
+    /// 产物是否已落缓存（供 probe 拆探针前宽限等待）。
+    private(set) var snapshotDelivered = false
     private let markdown: String
     private let width: CGFloat
+    private let rendererScriptURL: URL
 
-    init(markdown: String, width: CGFloat) {
+    init(markdown: String, width: CGFloat, rendererScriptURL: URL) {
         self.markdown = markdown
         self.width = width
+        self.rendererScriptURL = rendererScriptURL
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "renderedSnapshot" {
+            guard let body = message.body as? [String: Any],
+                  let html = body["html"] as? String, !html.isEmpty else { return }
+            let engine = NewPiMarkdownWebDocument.engineFingerprint(rendererScriptURL: rendererScriptURL)
+            // 宽度同样钉死快照值，不用探针自报的 clientWidth（与高度写缓存同约束）。
+            MarkdownRenderingCache.shared.setRenderedHTML(html, width: width, engine: engine, for: markdown)
+            snapshotDelivered = true
+            return
+        }
         guard message.name == "height",
               let body = message.body as? [String: Any],
               let height = (body["height"] as? NSNumber)?.doubleValue,

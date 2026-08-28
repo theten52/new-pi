@@ -10,8 +10,8 @@
 		AA0000010000000000000001 /* NewPiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000010000000000000001 /* NewPiApp.swift */; };
 		AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000110000000000000001 /* NewPiLastProjectStore.swift */; };
 		AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000100000000000000001 /* NewPiChatScrollHelper.swift */; };
-		AA0000170000000000000001 /* NewPiChatScrollCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000170000000000000001 /* NewPiChatScrollCoordinator.swift */; };
 		AA0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */; };
+		AA0000190000000000000001 /* NewPiTranscriptHeightMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */; };
 		AA0000140000000000000001 /* NewPiChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000140000000000000001 /* NewPiChatView.swift */; };
 		AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000150000000000000001 /* NewPiUserMessageRail.swift */; };
 		AA0000020000000000000001 /* NewPiViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000020000000000000001 /* NewPiViewModel.swift */; };
@@ -35,8 +35,8 @@
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
-		BB0000170000000000000001 /* NewPiChatScrollCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollCoordinator.swift; sourceTree = "<group>"; };
 		BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownHeightPreheater.swift; sourceTree = "<group>"; };
+		BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiTranscriptHeightMap.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
 		BB0000150000000000000001 /* NewPiUserMessageRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiUserMessageRail.swift; sourceTree = "<group>"; };
 		BB0000020000000000000001 /* NewPiViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiViewModel.swift; sourceTree = "<group>"; };
@@ -85,8 +85,8 @@
 				BB0000140000000000000001 /* NewPiChatView.swift */,
 				BB0000150000000000000001 /* NewPiUserMessageRail.swift */,
 				BB0000100000000000000001 /* NewPiChatScrollHelper.swift */,
-				BB0000170000000000000001 /* NewPiChatScrollCoordinator.swift */,
 				BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */,
+				BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */,
 				BB0000110000000000000001 /* NewPiLastProjectStore.swift */,
 				BB0000020000000000000001 /* NewPiViewModel.swift */,
 				BB0000030000000000000001 /* NewPiSettingsView.swift */,
@@ -197,8 +197,8 @@
 				AA0000140000000000000001 /* NewPiChatView.swift in Sources */,
 				AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */,
 				AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */,
-				AA0000170000000000000001 /* NewPiChatScrollCoordinator.swift in Sources */,
 				AA0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift in Sources */,
+				AA0000190000000000000001 /* NewPiTranscriptHeightMap.swift in Sources */,
 				AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */,
 				AA0000020000000000000001 /* NewPiViewModel.swift in Sources */,
 				AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */,
