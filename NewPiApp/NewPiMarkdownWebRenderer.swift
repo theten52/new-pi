@@ -12,8 +12,12 @@ import WebKit
 /// - 高度是宽度的函数：条目记录实测时的内容宽度，宽度变化即整体失效并重新填充
 /// - LRU 上限 512 条；debounce 持久化到 ~/.new-pi/agent/markdown-height-cache.json
 @MainActor
-final class MarkdownRenderingCache {
+final class MarkdownRenderingCache: ObservableObject {
     static let shared = MarkdownRenderingCache()
+
+    /// 缓存内容版本号：预热/实测写入时递增，供高度表等订阅方重建
+    /// （预热在后台陆续填充缓存，没有通知的话占位高度永远停留在估算值）。
+    @Published private(set) var version = 0
 
     private struct Entry: Codable {
         var height: Double
@@ -63,6 +67,16 @@ final class MarkdownRenderingCache {
         return CGFloat(entry.height)
     }
 
+    /// 指定宽度桶的高度查询（供高度表按行类型各自的宽度口径查询，不受 currentWidth 影响）。
+    func height(for markdown: String, width: CGFloat) -> CGFloat? {
+        let key = key(for: markdown)
+        let widthKey = Self.widthKey(width)
+        guard var entry = buckets[widthKey]?[key], entry.height > 0 else { return nil }
+        entry.lastAccess = Date()
+        buckets[widthKey]?[key] = entry
+        return CGFloat(entry.height)
+    }
+
     func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String) {
         guard height > 0, width > 0 else { return }
         currentWidth = width
@@ -78,6 +92,7 @@ final class MarkdownRenderingCache {
         }
         evictIfNeeded()
         scheduleSave()
+        version += 1
     }
 
     /// 命中即返回可重放的最终渲染产物（HTML）。要求当前宽度桶内有该内容、
@@ -107,6 +122,7 @@ final class MarkdownRenderingCache {
         buckets[widthKey]?[hash] = entry
         evictIfNeeded()
         scheduleSave()
+        version += 1
     }
 
     /// 项目切换等场景下清空缓存，避免跨项目高度残留。
@@ -115,6 +131,7 @@ final class MarkdownRenderingCache {
     func clear() {
         buckets.removeAll()
         scheduleSave()
+        version += 1
     }
 
     private func key(for markdown: String) -> String {

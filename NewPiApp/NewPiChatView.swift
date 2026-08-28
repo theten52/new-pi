@@ -39,12 +39,15 @@ struct NewPiSessionPanel: View {
     @State private var composerHeight: CGFloat = 120
     @State private var suppressAutoPinDuringStreaming = false
     @State private var isNearBottom = true
-    /// rail 跳转的高度表：点击 = 前缀和算目标行内容 y → scrollTo(point:) 一次到位。
-    /// 替代旧收敛机制（目标行异步实例化 + 实测上报 + deadline 校正，三轮未收敛）。
-    @State private var heightMap = TranscriptHeightMap()
-    /// 精确滚动执行者（macOS 15 API）：scrollTo(point:) 按内容坐标直接滚动，
-    /// 不依赖目标行实例化（scrollTo(id:) 对 LazyVStack 未实例化行的缺陷由此绕开）。
+    /// rail 跳转 + 手动窗口化共用的高度表：可见区外的行用表内精确高度占位，
+    /// SwiftUI 不再对未实例化行做任何估算（LazyVStack 估算是 rail 与滚动条问题的根）。
+    @StateObject private var heightMap = TranscriptHeightMap()
+    /// 精确滚动执行者（macOS 15 API）：scrollTo(point:) 按内容坐标直接滚动。
     @State private var jumpPosition = ScrollPosition()
+    /// 当前滚动偏移（内容坐标），由内容的 onGeometryChange 驱动。
+    @State private var scrollOffset: CGFloat = 0
+    /// 当前实例化的行窗口（含上下各 1 屏过扫）。
+    @State private var visibleRange: Range<Int> = 0..<0
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -62,7 +65,6 @@ struct NewPiSessionPanel: View {
     var body: some View {
         GeometryReader { geometry in
             let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
-
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .trailing) {
@@ -70,7 +72,10 @@ struct NewPiSessionPanel: View {
                             VStack(spacing: 0) {
                                 Spacer(minLength: 0)
 
-                                LazyVStack(alignment: .leading, spacing: 12) {
+                                // 手动窗口化：可见区外的行用高度表精确占位，
+                                // SwiftUI 不做任何估算（LazyVStack 内部估算是 rail 漂移
+                                // 与滚动条变短的共同根因）。行进入窗口才挂 WKWebView。
+                                VStack(alignment: .leading, spacing: TranscriptHeightMap.rowSpacing) {
                                     if runtime.transcript.isEmpty {
                                         if viewModel.isSwitchingSession {
                                             ProgressView("Loading session…")
@@ -78,32 +83,46 @@ struct NewPiSessionPanel: View {
                                         } else {
                                             NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
                                         }
-                                    }
+                                    } else {
+                                        let topPlaceholder = visibleRange.isEmpty
+                                            ? 0
+                                            : heightMap.placeholderHeight(before: visibleRange.lowerBound)
+                                        let bottomPlaceholder = visibleRange.isEmpty
+                                            ? heightMap.totalRowsHeight
+                                            : heightMap.placeholderHeight(after: visibleRange.upperBound - 1)
 
-                                    ForEach(runtime.transcript) { item in
-                                        NewPiTranscriptRow(
-                                            item: item,
-                                            isStreaming: runtime.isStreaming,
-                                            isActiveStreamingItem: runtime.isStreaming
-                                                && item.id == runtime.transcript.last?.id
-                                                && (item.title == "NewPi" || item.title == "Summary"),
-                                            onInitialRendered: { runtime.markInitialRowRendered(item.id) }
-                                        ) { index in
-                                            Task { await viewModel.forkFromMessage(index: index) }
+                                        if topPlaceholder > 0 {
+                                            Color.clear.frame(height: topPlaceholder)
                                         }
-                                        .id(item.id)
-                                        // 行实例化后回报实测高度到高度表（只更新数据，不触发滚动）；
-                                        // 下一次 rail 点击 rebuild 时自然吸收这些更准的值。
-                                        .onGeometryChange(for: CGFloat.self) { proxy in
-                                            proxy.size.height
-                                        } action: { height in
-                                            heightMap.updateMeasured(id: item.id, height: height)
+
+                                        ForEach(Array(visibleRange), id: \.self) { index in
+                                            let item = runtime.transcript[index]
+                                            NewPiTranscriptRow(
+                                                item: item,
+                                                isStreaming: runtime.isStreaming,
+                                                isActiveStreamingItem: runtime.isStreaming
+                                                    && item.id == runtime.transcript.last?.id
+                                                    && (item.title == "NewPi" || item.title == "Summary"),
+                                                onInitialRendered: { runtime.markInitialRowRendered(item.id) }
+                                            ) { forkIndex in
+                                                Task { await viewModel.forkFromMessage(index: forkIndex) }
+                                            }
+                                            .id(item.id)
+                                            // 实例化行回报实测高度回高度表（只更新数据，不触发滚动），
+                                            // 占位高度随之精确化。
+                                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                                proxy.size.height
+                                            } action: { height in
+                                                heightMap.updateMeasured(id: item.id, height: height)
+                                            }
+                                        }
+
+                                        if bottomPlaceholder > 0 {
+                                            Color.clear.frame(height: bottomPlaceholder)
                                         }
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                // 标记该 LazyVStack 的行为 scrollPosition 的可定位目标。
-                                .scrollTargetLayout()
 
                                 Color.clear
                                     .frame(height: messageBottomGap)
@@ -128,6 +147,14 @@ struct NewPiSessionPanel: View {
                                 minHeight: scrollViewportHeight,
                                 alignment: .bottom
                             )
+                            // 滚动偏移跟踪：内容在滚动坐标系中的 minY 取负即当前 offset。
+                            // 驱动手动窗口化（可见区外的行由高度表精确占位）。
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                -proxy.frame(in: .named(NewPiChatScrollSupport.coordinateSpaceName)).minY
+                            } action: { newOffset in
+                                scrollOffset = newOffset
+                                updateVisibleWindow()
+                            }
                         }
                         .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -194,7 +221,26 @@ struct NewPiSessionPanel: View {
                         }
                     }
                     .onAppear {
+                        scrollViewportHeightCurrent = scrollViewportHeight
+                        rebuildHeightMap(contentWidth: geometry.size.width - 32)
+                        updateVisibleWindow()
                         schedulePinScrollToBottom(using: proxy)
+                    }
+                    .onChange(of: scrollViewportHeight) { _, newValue in
+                        scrollViewportHeightCurrent = newValue
+                        updateVisibleWindow()
+                    }
+                    // 高度表重建：transcript 结构变化 / 宽度变化 / 缓存被预热或实测填充时。
+                    .onChange(of: runtime.transcript.map(\.id)) { _, _ in
+                        rebuildHeightMap(contentWidth: geometry.size.width - 32)
+                        updateVisibleWindow()
+                    }
+                    .onChange(of: geometry.size.width) { _, _ in
+                        rebuildHeightMap(contentWidth: geometry.size.width - 32)
+                        updateVisibleWindow()
+                    }
+                    .onReceive(MarkdownRenderingCache.shared.$version) { _ in
+                        rebuildHeightMap(contentWidth: geometry.size.width - 32)
                     }
                     .onChange(of: runtime.isStreaming) { wasStreaming, isStreaming in
                         // 只在活跃面板执行滚动逻辑：后台保话面板流式结束时不能把
@@ -245,11 +291,26 @@ struct NewPiSessionPanel: View {
         .environment(\.panelIsActive, isActive)
     }
 
+    /// 最近一次布局的滚动视口高（供非 body 上下文的窗口计算使用）。
+    @State private var scrollViewportHeightCurrent: CGFloat = 0
+
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
         guard shouldAutoPinToBottom else { return }
         DispatchQueue.main.async {
             pinScrollToBottom(using: proxy)
         }
+    }
+
+    /// 按最新缓存/布局常量重建高度表（rail 定位与窗口占位的共同数据源）。
+    private func rebuildHeightMap(contentWidth: CGFloat) {
+        heightMap.rebuild(items: runtime.transcript, contentWidth: contentWidth)
+    }
+
+    /// 按当前滚动偏移重算实例化窗口（上下各 1 屏过扫）；仅窗口变化时写入状态。
+    private func updateVisibleWindow() {
+        let next = heightMap.window(scrollOffset: scrollOffset, viewportHeight: scrollViewportHeightCurrent)
+        guard next != visibleRange else { return }
+        visibleRange = next
     }
 
     private var shouldAutoPinToBottom: Bool {

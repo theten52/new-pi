@@ -1,35 +1,35 @@
 import AppKit
 import Foundation
 
-/// rail 跳转定位的高度表：每行高度都有**确定性来源**，点击 rail = 前缀和算出目标行
-/// 内容 y → `scrollTo(point:)` 一次到位。
+/// 转录高度表：会话面板的**布局数据源**（手动窗口化）兼 rail 定位表。
 ///
-/// 替代已删除的 ChatScrollCoordinator 收敛机制（依赖目标行异步实例化 + 异步实测，
-/// 三轮未收敛；见 docs/dev-notes/rail-jump-fix-status.md 与 chat-scroll-layout.md §3.11）。
+/// 设计依据（rail 三轮未收敛的最终根因）：LazyVStack 对未实例化行用内部估算占位，
+/// 任何"算好 y 再跳"的方案都不可能精确——所以把布局几何整体收归本表：
+/// 可见区外的行一律用表内精确高度画 Color.clear 占位，SwiftUI 不再做任何估算。
 ///
-/// 高度来源（按行类型）：
-/// - Markdown 行（NewPi/Summary）：`MarkdownRenderingCache`（预热全量化后基本全覆盖）；
-///   缓存高度是 WebView 内容高，行总高 = 行头 + 间距 + 内容高。
-/// - You 气泡 / 纯文本行：字体 × 宽度纯函数计算（布局常量与 NewPiTranscriptRow 对齐）。
-/// - 工具行：折叠态固定高（展开态由行实例化后实测回报修正）。
-/// - 未知：fallback 估算。
+/// 高度来源：
+/// - Markdown 行（NewPi/Summary）：`MarkdownRenderingCache` 实测缓存（预热全量化后全覆盖）；
+/// - You 气泡 / 纯文本行：字体 × 宽度纯函数估算（误差 ±2–4pt，实例化实测回报后修正）；
+/// - 工具行：折叠态固定高（展开后由实测回报修正）。
 ///
-/// 行实例化后通过 `updateMeasured` 回报实测高度，**只更新表**（数据自校正），
-/// 不再触发二次滚动——下一次点击自然用更准的数据。
+/// 行实例化后通过 `updateMeasured` 回报实测高度：更新表 + 前缀和，占位随之精确化。
 @MainActor
-final class TranscriptHeightMap {
-    struct Row {
+final class TranscriptHeightMap: ObservableObject {
+    struct Row: Equatable {
         let id: UUID
         var height: CGFloat
         /// 是否已实测（实例化后回报）。实测值优先于一切估算。
         var measured: Bool
     }
 
-    private(set) var rows: [Row] = []
+    @Published private(set) var rows: [Row] = []
+    /// prefixSums[i] = 第 i 行之前所有行的 (height + rowSpacing) 总和，
+    /// 即第 i 行顶部在行堆栈内的 y（行堆栈从 0 起，不含内容 padding）。count = rows.count + 1。
+    @Published private(set) var prefixSums: [CGFloat] = [0]
 
     // MARK: - 布局常量（与 NewPiChatView / NewPiTranscriptRow 实际布局对齐）
 
-    /// LazyVStack 行间距。
+    /// 行间距（行堆栈 VStack spacing）。
     static let rowSpacing: CGFloat = 12
     /// 内容 VStack 顶部 padding（.padding() 全边 16）。
     static let contentTopPadding: CGFloat = 16
@@ -41,6 +41,8 @@ final class TranscriptHeightMap {
     private static let bubbleVerticalPadding: CGFloat = 24
     /// You 气泡正文最大宽度：气泡 maxWidth 640 - 水平 padding 24。
     private static let bubbleMaxTextWidth: CGFloat = 616
+    /// You 气泡左侧 Spacer 最小宽度。
+    private static let bubbleLeadingSpacer: CGFloat = 72
     /// 助手/文本行最大正文宽度（assistantContent maxWidth 760）。
     private static let plainMaxTextWidth: CGFloat = 760
     /// 工具行折叠态高度（headerRow 一行 + 垂直 padding 20 + 圆角边框）。
@@ -50,38 +52,82 @@ final class TranscriptHeightMap {
 
     // MARK: - 构建
 
-    /// 按当前 transcript 全量重建（点击 rail 时调用，永远用最新缓存数据）。
-    /// md 行高度直接读缓存——预热全量化后基本全部命中。
+    /// 按当前 transcript 全量重建（rail 点击 / transcript 变化 / 宽度变化 / 缓存版本变化时调用）。
+    /// 已实测的行保留实测值（重建只刷新估算行的来源数据）。
     func rebuild(items: [NewPiTranscriptItem], contentWidth: CGFloat) {
         let plainWidth = min(Self.plainMaxTextWidth, max(80, contentWidth))
-        let bubbleWidth = min(Self.bubbleMaxTextWidth, max(80, contentWidth - 72))
+        let bubbleWidth = min(Self.bubbleMaxTextWidth, max(80, contentWidth - Self.bubbleLeadingSpacer - 24))
+        let oldByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         rows = items.map { item in
-            Row(id: item.id, height: estimate(item: item, plainWidth: plainWidth, bubbleWidth: bubbleWidth), measured: false)
+            if let old = oldByID[item.id], old.measured {
+                return old
+            }
+            return Row(id: item.id, height: estimate(item: item, plainWidth: plainWidth, bubbleWidth: bubbleWidth), measured: false)
         }
+        recomputePrefixSums()
     }
 
     // MARK: - 实测回报
 
-    /// 行实例化后回报实测高度，就地更新（不触发任何滚动）。
+    /// 行实例化后回报实测高度：就地更新（已实测的行允许跟随内容变化，如流式/工具展开）。
     func updateMeasured(id: UUID, height: CGFloat) {
         guard height > 1, let index = rows.firstIndex(where: { $0.id == id }) else { return }
+        guard abs(rows[index].height - height) > 0.5 else { return }
         rows[index].height = height
         rows[index].measured = true
+        recomputePrefixSums()
     }
 
-    // MARK: - 定位
+    // MARK: - 定位与窗口
 
-    /// 目标行顶部在内容坐标系中的 y（= scrollTo(point:) 目标）。
+    /// 目标行顶部在滚动内容坐标系中的 y（= scrollTo(point:) 目标）。
     func offset(of id: UUID) -> CGFloat? {
-        var y = Self.contentTopPadding
-        for row in rows {
-            if row.id == id { return y }
-            y += row.height + Self.rowSpacing
-        }
-        return nil
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
+        return Self.contentTopPadding + prefixSums[index]
     }
 
-    // MARK: - 行高估算
+    /// 所有行的总占用高度（含行间距，不含内容 padding）。
+    var totalRowsHeight: CGFloat {
+        guard !rows.isEmpty else { return 0 }
+        return prefixSums[rows.count] - Self.rowSpacing
+    }
+
+    /// 第 lo 行之前的占位高度（含其间距；lo = 0 时无需占位）。
+    func placeholderHeight(before lo: Int) -> CGFloat {
+        lo > 0 ? max(0, prefixSums[lo] - Self.rowSpacing) : 0
+    }
+
+    /// 第 hi 行之后的占位高度（含其间距；hi 是最后一行时无需占位）。
+    func placeholderHeight(after hi: Int) -> CGFloat {
+        let n = rows.count
+        guard hi < n - 1 else { return 0 }
+        return max(0, (prefixSums[n] - prefixSums[hi + 1]) - Self.rowSpacing)
+    }
+
+    /// 可见窗口（上下各 1 屏过扫）：返回应实例化的行索引范围。
+    func window(scrollOffset: CGFloat, viewportHeight: CGFloat) -> Range<Int> {
+        guard !rows.isEmpty, viewportHeight > 0 else { return 0..<0 }
+        // 行堆栈坐标系：滚出 16pt 内容 padding。
+        let top = scrollOffset - Self.contentTopPadding - viewportHeight
+        let bottom = scrollOffset - Self.contentTopPadding + viewportHeight * 2
+        var lo = 0
+        var hi = rows.count - 1
+        // prefixSums[i+1] 是第 i 行底部；找第一个底部 > top 的行。
+        while lo < rows.count - 1, prefixSums[lo + 1] <= top { lo += 1 }
+        // 找最后一个顶部 < bottom 的行。
+        while hi > 0, prefixSums[hi] >= bottom { hi -= 1 }
+        return lo..<(hi + 1)
+    }
+
+    // MARK: - 内部
+
+    private func recomputePrefixSums() {
+        var sums = [CGFloat](repeating: 0, count: rows.count + 1)
+        for (index, row) in rows.enumerated() {
+            sums[index + 1] = sums[index] + row.height + Self.rowSpacing
+        }
+        prefixSums = sums
+    }
 
     private func estimate(item: NewPiTranscriptItem, plainWidth: CGFloat, bubbleWidth: CGFloat) -> CGFloat {
         if item.isToolTranscript {
@@ -100,8 +146,8 @@ final class TranscriptHeightMap {
         return Self.headerHeight + Self.headerBodyGap + textHeight
     }
 
-    /// 文本在给定宽度下的换行高度（与 SwiftUI Text(.body) 的排版的近似，
-    /// 误差由行实例化后的实测回报吸收）。
+    /// 文本在给定宽度下的换行高度（与 SwiftUI Text(.body) 排版近似，
+    /// 残差由行实例化后的实测回报吸收）。
     private static func measureTextHeight(_ text: String, maxWidth: CGFloat) -> CGFloat {
         let attributed = NSAttributedString(string: text, attributes: [.font: bodyFont])
         let rect = attributed.boundingRect(
