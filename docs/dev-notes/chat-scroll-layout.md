@@ -1,5 +1,10 @@
 # NewPi 聊天滚动与布局：Agent 参考手册
 
+> **⚠️ 2026-08-29 重大更新**：LazyVStack 已退役，聊天列表改为**手动窗口化**——可见区外的行用
+> `TranscriptHeightMap` 精确高度的占位视图填充，布局几何与 rail 定位共用同一张表。
+> 本文 §2/§3.10/§3.11 中 LazyVStack 相关描述已过时，以 `docs/rendered-result-replay-plan.md`
+> 与 `NewPiTranscriptHeightMap.swift` 头部注释为准。其余滚动踩坑教训（间距/锚点/单机制等）仍有效。
+
 > **受众**：后续 Agent / 开发者。在 macOS SwiftUI 聊天界面中实现「底对齐、流式不跳、不被状态栏遮挡」之前，请先读本文再改代码。
 >
 > **当前基线**：分支 `feat/streaming-markdown-blocks`（2026-08-27，基于 `5354447` 之后的重构）
