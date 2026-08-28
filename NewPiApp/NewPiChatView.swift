@@ -97,7 +97,8 @@ struct NewPiSessionPanel: View {
                                             isStreaming: runtime.isStreaming,
                                             isActiveStreamingItem: runtime.isStreaming
                                                 && item.id == runtime.transcript.last?.id
-                                                && (item.title == "NewPi" || item.title == "Summary")
+                                                && (item.title == "NewPi" || item.title == "Summary"),
+                                            onInitialRendered: { runtime.markInitialRowRendered(item.id) }
                                         ) { index in
                                             Task { await viewModel.forkFromMessage(index: index) }
                                         }
@@ -208,6 +209,18 @@ struct NewPiSessionPanel: View {
                             .buttonStyle(.plain)
                             .padding(.bottom, 12)
                             .transition(.opacity)
+                        }
+                    }
+                    // 冷加载就绪门控：等尾部 markdown 行上报首次高度（或超时）后才揭示，
+                    // 隐藏「先用户气泡、agent 气泡逐行蹦出」的中间态。opacity 与 allowsHitTesting
+                    // 成对使用（项目约定），等待期禁用命中测试，避免用户滚动作用于透明内容破坏钉底。
+                    .opacity(runtime.initialRenderReady ? 1 : 0)
+                    .allowsHitTesting(runtime.initialRenderReady)
+                    .animation(.easeIn(duration: 0.15), value: runtime.initialRenderReady)
+                    .overlay {
+                        if !runtime.initialRenderReady {
+                            ProgressView("Loading session…")
+                                .controlSize(.large)
                         }
                     }
                     .onAppear {

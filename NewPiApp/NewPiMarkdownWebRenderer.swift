@@ -20,16 +20,26 @@ final class MarkdownRenderingCache {
         var lastAccess: Date
     }
 
-    /// 磁盘格式：宽度全局只有一份（同列宽下的高度才有效），宽度变则全表失效。
+    /// 磁盘格式 v2：外层 key 为内容宽度的量化字符串（String(Int(width))，JS 上报 ceil 已是整数），
+    /// 内层 key 为内容 SHA256。宽度变只切换桶、不整表失效（窗口 resize 来回不丢缓存）。
     private struct DiskFormat: Codable {
+        var buckets: [String: [String: Entry]]
+    }
+
+    /// 磁盘格式 v1（单宽度全局一张表），用于旧文件一次性迁移。
+    private struct LegacyDiskFormat: Codable {
         var width: Double
         var entries: [String: Entry]
     }
 
-    private var entries: [String: Entry] = [:]
-    /// 当前生效的内容宽度（来自最近一次实测）；命中判定要求条目是在同宽度下测得的。
+    /// 内存桶：widthKey -> [sha256 -> Entry]
+    private var buckets: [String: [String: Entry]] = [:]
+    /// 当前生效的内容宽度（来自最近一次实测）；命中判定选这个宽度的桶。
     private var currentWidth: CGFloat = 0
-    private let maxEntries = 512
+    /// 最近一次实测生效的内容宽度（只读），供离屏预测高探针对齐"同一宽度桶"。
+    var activeWidth: CGFloat { currentWidth }
+    /// 全局条目上限（跨桶拍平 LRU，GLM review 意见6）。
+    private let maxEntries = 2048
     private var saveWorkItem: DispatchWorkItem?
     private let fileURL: URL
 
@@ -42,27 +52,27 @@ final class MarkdownRenderingCache {
     func height(for markdown: String) -> CGFloat? {
         guard currentWidth > 0 else { return nil }
         let key = key(for: markdown)
-        guard var entry = entries[key] else { return nil }
+        let widthKey = Self.widthKey(currentWidth)
+        guard var entry = buckets[widthKey]?[key] else { return nil }
         entry.lastAccess = Date()
-        entries[key] = entry
+        buckets[widthKey]?[key] = entry
         return CGFloat(entry.height)
     }
 
     func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String) {
         guard height > 0, width > 0 else { return }
-        if currentWidth > 0, abs(width - currentWidth) > 1 {
-            // 宽度变了（窗口 resize）：旧宽度下测得的高度全部失效
-            entries.removeAll()
-        }
         currentWidth = width
-        entries[key(for: markdown)] = Entry(height: Double(height), lastAccess: Date())
+        let widthKey = Self.widthKey(width)
+        buckets[widthKey, default: [:]][key(for: markdown)] = Entry(height: Double(height), lastAccess: Date())
         evictIfNeeded()
         scheduleSave()
     }
 
     /// 项目切换等场景下清空缓存，避免跨项目高度残留。
+    /// 刻意保留 currentWidth：同 app 窗口的内容宽度跨项目不变，activeWidth 基线继续有效；
+    /// 桶已清空则 height(for:) 必 miss，行为正确（K3 review minor）。
     func clear() {
-        entries.removeAll()
+        buckets.removeAll()
         scheduleSave()
     }
 
@@ -70,20 +80,64 @@ final class MarkdownRenderingCache {
         SHA256.hash(data: Data(markdown.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// 宽度量化到整数（JS 上报 Math.ceil(clientWidth) 已是整数），作为桶 key，
+    /// 避免 Double 直接序列化与 1pt 容差不齐（GLM review 意见6）。
+    private static func widthKey(_ width: CGFloat) -> String {
+        "w\(Int(width))"
+    }
+
+    /// 从桶集里挑出「最近被访问条目」所属的宽度，作为冷启动时的当前宽度，提升命中率。
+    private func mostRecentlyUsedWidth() -> CGFloat {
+        var latest = Date.distantPast
+        var width: CGFloat = 0
+        for (widthKeyValue, map) in buckets {
+            guard let value = Double(widthKeyValue.dropFirst()) else { continue }
+            for entry in map.values where entry.lastAccess > latest {
+                latest = entry.lastAccess
+                width = CGFloat(value)
+            }
+        }
+        return width
+    }
+
     private func evictIfNeeded() {
-        guard entries.count > maxEntries else { return }
-        let overflow = entries.count - maxEntries + maxEntries / 5
-        let oldest = entries.sorted { $0.value.lastAccess < $1.value.lastAccess }.prefix(overflow)
-        for (key, _) in oldest {
-            entries.removeValue(forKey: key)
+        let total = buckets.values.reduce(0) { $0 + $1.count }
+        guard total > maxEntries else { return }
+        // 跨桶拍平收集后按 lastAccess 全局排序，淘汰最旧的一批（回到桶里删除）。
+        var all: [(widthKey: String, hash: String, entry: Entry)] = []
+        for (wk, map) in buckets {
+            for (hash, entry) in map {
+                all.append((wk, hash, entry))
+            }
+        }
+        let overflow = total - maxEntries + maxEntries / 5
+        let oldest = all.sorted { $0.entry.lastAccess < $1.entry.lastAccess }.prefix(overflow)
+        for victim in oldest {
+            buckets[victim.widthKey]?.removeValue(forKey: victim.hash)
         }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let disk = try? JSONDecoder().decode(DiskFormat.self, from: data) else { return }
-        entries = disk.entries
-        currentWidth = CGFloat(disk.width)
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        if let disk = try? JSONDecoder().decode(DiskFormat.self, from: data) {
+            buckets = disk.buckets
+            currentWidth = mostRecentlyUsedWidth()
+            return
+        }
+        if let legacy = try? JSONDecoder().decode(LegacyDiskFormat.self, from: data) {
+            // v1（单宽度全局表）→ v2（按宽度分桶）一次性迁移；旧格式被 try? 静默丢弃是排障黑洞
+            // （GLM review 意见6），故加 info 日志并立即重写为新格式。
+            buckets = [Self.widthKey(CGFloat(legacy.width)): legacy.entries]
+            currentWidth = CGFloat(legacy.width)
+            NewPiLogger.info(
+                category: "app",
+                message: "Migrated legacy markdown height cache (v1 → v2)",
+                details: "entries=\(legacy.entries.count) width=\(legacy.width)"
+            )
+            scheduleSave()
+            return
+        }
+        NewPiLogger.info(category: "app", message: "Markdown height cache decode failed, resetting", details: "")
     }
 
     private func scheduleSave() {
@@ -96,7 +150,7 @@ final class MarkdownRenderingCache {
     }
 
     private func saveNow() {
-        let disk = DiskFormat(width: Double(currentWidth), entries: entries)
+        let disk = DiskFormat(buckets: buckets)
         guard let data = try? JSONEncoder().encode(disk) else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
@@ -275,9 +329,15 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
     @Binding var height: CGFloat
     var flushRendering: Bool
     let onRenderingFailed: () -> Void
+    /// 首次 flush 高度到达后回调一次（= 本行初始渲染完成），供冷加载就绪门控用。
+    var onInitialRendered: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(height: $height, onRenderingFailed: onRenderingFailed)
+        Coordinator(
+            height: $height,
+            onRenderingFailed: onRenderingFailed,
+            onInitialRendered: onInitialRendered
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -358,6 +418,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         @Binding private var height: CGFloat
         private let onRenderingFailed: () -> Void
+        private let onInitialRendered: (() -> Void)?
         private var isPageLoaded = false
         private var pendingMarkdown: String?
         private var lastRenderedMarkdown: String?
@@ -386,14 +447,21 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         private weak var scrollForwardingWebView: WKWebView?
         /// 当前 WebView 是否已启用滚轮转发（随面板活跃状态同步）。
         var isScrollForwardingEnabled = false
+        /// 本 Coordinator 生命周期内是否已发出过「初始渲染完成」信号（每次 loadInitial 重置）。
+        private var hasSignaledInitialRender = false
 
         /// Minimum interval between streaming renders (throttle, not debounce).
         private let throttleInterval: TimeInterval = 0.05
         private let streamingHeightEpsilon: CGFloat = 4
 
-        init(height: Binding<CGFloat>, onRenderingFailed: @escaping () -> Void) {
+        init(
+            height: Binding<CGFloat>,
+            onRenderingFailed: @escaping () -> Void,
+            onInitialRendered: (() -> Void)? = nil
+        ) {
             _height = height
             self.onRenderingFailed = onRenderingFailed
+            self.onInitialRendered = onInitialRendered
         }
 
         func loadInitial(markdown: String, rendererScriptURL: URL, flush: Bool, in webView: WKWebView) {
@@ -405,6 +473,7 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
             throttleWorkItem?.cancel()
             throttleWorkItem = nil
             renderEpoch += 1
+            hasSignaledInitialRender = false
             isRenderingJavaScript = false
             rerenderAfterFlight = false
             do {
@@ -596,6 +665,14 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
 
         private func scheduleHeightUpdate(_ reportedHeight: CGFloat, width reportedWidth: CGFloat) {
             if isFlushRendering {
+                // 首个 flush 高度 = 本 Coordinator 生命周期内「初始渲染完成」信号（GLM review 意见5：
+                // 流式行结束的 flush 重渲染也走此处，语义为「生命周期内第一次 flush 高度」而非仅初始）。
+                // JS 侧 flush 渲染必发第一次 height 上报（markdown-renderer.js lastPostedHeight=0 后 force
+                // 上报）。仅供冷加载就绪门控读，只读不写缓存。活跃会话 pending 恒空，多余信号幂等无害。
+                if !hasSignaledInitialRender {
+                    hasSignaledInitialRender = true
+                    onInitialRendered?()
+                }
                 if abs(reportedHeight - height) >= streamingHeightEpsilon {
                     height = reportedHeight
                 }

@@ -7,13 +7,16 @@ import SwiftUI
 struct NewPiMarkdownText: View {
     let content: String
     var flushRendering: Bool
+    /// 初始渲染完成后回调一次（透传给 Web 渲染器的 onInitialRendered）。
+    var onInitialRendered: (() -> Void)? = nil
 
     @State private var webRendererFailed = false
     @State private var webHeight: CGFloat
 
-    init(content: String, flushRendering: Bool) {
+    init(content: String, flushRendering: Bool, onInitialRendered: (() -> Void)? = nil) {
         self.content = content
         self.flushRendering = flushRendering
+        self.onInitialRendered = onInitialRendered
         // 冷重建时首帧直接用缓存高度（内容哈希 + 当前宽度命中），避免 0→真实高度的渐进闪烁。
         // 流式内容每次都在变、必 miss 缓存，跳过 SHA256 避免热路径（~40ms 一次）全量哈希；
         // 流式结束翻转 flushRendering 后重新走缓存命中。
@@ -33,7 +36,8 @@ struct NewPiMarkdownText: View {
                     flushRendering: flushRendering,
                     onRenderingFailed: {
                         webRendererFailed = true
-                    }
+                    },
+                    onInitialRendered: onInitialRendered
                 )
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .frame(height: webHeight, alignment: .topLeading)
@@ -162,6 +166,8 @@ struct NewPiTranscriptRow: View {
     let item: NewPiTranscriptItem
     var isStreaming = false
     var isActiveStreamingItem = false
+    /// 初始渲染完成后回调一次（透传给 NewPiMarkdownText）。
+    var onInitialRendered: (() -> Void)? = nil
     var onFork: ((Int) -> Void)?
 
     @State private var isHovering = false
@@ -252,7 +258,8 @@ struct NewPiTranscriptRow: View {
         if usesMarkdown {
             NewPiMarkdownText(
                 content: item.body,
-                flushRendering: !isActiveStreamingItem
+                flushRendering: !isActiveStreamingItem,
+                onInitialRendered: onInitialRendered
             )
         } else if item.title == "Error" {
             Text(item.body)
