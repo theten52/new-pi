@@ -10,3 +10,8 @@ DerivedData/
 # Build & packaging artifacts produced by scripts/package.sh
 build/
 dist/
+
+# Agent/editor tooling (local only)
+.understand-anything/
+.vscode/
+.hermes/
