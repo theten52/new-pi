@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+extension Color {
+    /// 由"轮对话"锚点 id 确定性派生柔和浅色气泡背景色（BACKLOG-BUBBLE-BG）。
+    /// 同轮对话内输入/输出气泡同色、跨轮异色、重启后稳定。
+    /// 低饱和 + 高亮 + 低不透明 = 浅色柔和。
+    static func bubbleTint(for anchorID: UUID) -> Color {
+        Color(hue: deterministicHue(for: anchorID), saturation: 0.20, brightness: 0.98, opacity: 0.20)
+    }
+
+    /// FNV-1a 哈希把 UUID 字符串映射到 [0,1) 的色相，确定性（不依赖 Swift 随机 hashValue，
+    /// 后者每次启动都会变）。
+    private static func deterministicHue(for anchorID: UUID) -> Double {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in anchorID.uuidString.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return Double(hash % 360) / 360.0
+    }
+}
+
 /// 流式与完成态统一使用 WKWebView（markdown-it + highlight.js）渲染，
 /// 流式期间由 JS 侧做块级增量更新，避免完成后切换引擎造成的视觉跳动。
 /// bundle 或 WebView 不可用时退回原生 AttributedString（完整解析，无高亮）。
@@ -154,6 +173,9 @@ struct NewPiMarkdownText: View {
 
 struct NewPiTranscriptRow: View {
     let item: NewPiTranscriptItem
+    /// 轮对话级气泡背景色（BACKLOG-BUBBLE-BG）：同轮输入/输出气泡同色、跨轮异色。
+    /// 由面板层按"最近 user 消息"派生后传入；默认保持旧 accent 观感。
+    var bubbleTint: Color = Color.accentColor.opacity(0.16)
     var isStreaming = false
     var isActiveStreamingItem = false
     var onFork: ((Int) -> Void)?
@@ -181,24 +203,27 @@ struct NewPiTranscriptRow: View {
         .onHover { isHovering = $0 }
     }
 
-    /// 用户消息：右对齐 accent 气泡
+    /// 用户消息：右对齐气泡（颜色用会话级 bubbleTint）
     private var userBubble: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
             messageBody
         }
         .padding(12)
-        .background(Color.accentColor.opacity(0.16))
+        .background(bubbleTint)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: 640, alignment: .trailing)
     }
 
-    /// 助手消息：全宽、无气泡卡片
+    /// 助手消息：左对齐气泡卡片（BACKLOG-BUBBLE-BG 加背景，颜色同会话用户气泡）
     private var assistantContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
             messageBody
         }
+        .padding(12)
+        .background(bubbleTint)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: 760, alignment: .leading)
     }
 
