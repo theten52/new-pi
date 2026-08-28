@@ -645,6 +645,22 @@ final class NewPiViewModel: ObservableObject {
         await runtime.session.shutdown()
     }
 
+    func renameSession(_ summary: SessionSummary, to newLabel: String) async {
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try SessionManager.updateLabel(newLabel, for: summary.fileURL)
+            }.value
+            await refreshSessionList()
+            NewPiLogger.info(
+                category: "app",
+                message: "Session renamed",
+                details: "\(summary.fileURL.lastPathComponent) → \(newLabel)"
+            )
+        } catch {
+            appendTranscript(title: "Error", body: error.localizedDescription)
+        }
+    }
+
     func forkFromMessage(index: Int) async {
         guard !isStreaming, let runtime = activeRuntime else { return }
         let session = runtime.session
