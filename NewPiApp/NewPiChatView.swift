@@ -58,6 +58,9 @@ struct NewPiSessionPanel: View {
         let deadline: Date
     }
     @State private var pendingRailTarget: RailTarget?
+    /// 首次布局是否恢复了保存的滚动位置：恢复过则禁止 composer 高度变化触发的
+    /// 自动钉底（它会在恢复 scrollTo 落地后把会话又拽回底部——原位恢复失效的根因）。
+    @State private var restoredSavedPosition = false
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -245,6 +248,7 @@ struct NewPiSessionPanel: View {
                         // 原位恢复优先：有保存的滚动位置则恢复，否则钉底（新会话）。
                         if let saved = ScrollPositionStore.shared.offset(for: runtime.sessionID),
                            !runtime.transcript.isEmpty {
+                            restoredSavedPosition = true
                             DispatchQueue.main.async {
                                 jumpPosition.scrollTo(point: CGPoint(x: 0, y: max(0, saved)))
                             }
@@ -291,6 +295,8 @@ struct NewPiSessionPanel: View {
                         schedulePinScrollToBottom(using: proxy)
                     }
                     .onChange(of: composerHeight) { _, _ in
+                        // 恢复过保存位置的会话：composer 实测落地不得拽回底部。
+                        guard !restoredSavedPosition else { return }
                         schedulePinScrollToBottom(using: proxy)
                     }
                 }
