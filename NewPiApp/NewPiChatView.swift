@@ -1,4 +1,5 @@
 import AppKit
+import NewPiCore
 import SwiftUI
 
 /// 保活容器：把每个缓存会话的面板视图（含彼此内部的 WKWebView）常驻挂载，
@@ -80,6 +81,7 @@ struct NewPiSessionPanel: View {
             let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
             // 可见窗口：派生值。scrollOffset/视口/高度表任一变化即重算，永远与当前几何一致。
             let visibleRange = heightMap.window(scrollOffset: scrollOffset, viewportHeight: scrollViewportHeight)
+            let visibleItems = visibleRange.isEmpty ? [] : Array(runtime.transcript[visibleRange])
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .trailing) {
@@ -110,8 +112,7 @@ struct NewPiSessionPanel: View {
                                             Color.clear.frame(height: topPlaceholder)
                                         }
 
-                                        ForEach(Array(visibleRange), id: \.self) { index in
-                                            let item = runtime.transcript[index]
+                                        ForEach(visibleItems) { item in
                                             NewPiTranscriptRow(
                                                 item: item,
                                                 isStreaming: runtime.isStreaming,
@@ -249,10 +250,10 @@ struct NewPiSessionPanel: View {
                         if let saved = ScrollPositionStore.shared.offset(for: runtime.sessionID),
                            !runtime.transcript.isEmpty {
                             restoredSavedPosition = true
-                            DispatchQueue.main.async {
-                                jumpPosition.scrollTo(point: CGPoint(x: 0, y: max(0, saved)))
-                            }
+                            NewPiLogger.info(category: "app", message: "Scroll restore start", details: "session=\(runtime.sessionID) saved=\(saved)")
+                            restoreScrollPosition(to: saved)
                         } else {
+                            NewPiLogger.info(category: "app", message: "Scroll restore skipped", details: "session=\(runtime.sessionID) transcriptEmpty=\(runtime.transcript.isEmpty)")
                             schedulePinScrollToBottom(using: proxy)
                         }
                     }
@@ -328,9 +329,38 @@ struct NewPiSessionPanel: View {
 
     private func schedulePinScrollToBottom(using proxy: ScrollViewProxy) {
         guard shouldAutoPinToBottom else { return }
+        // 非流式钉底是「恢复被覆盖」类问题的头号嫌疑，逐条记录（流式期间的高频钉底不记）。
+        if !runtime.isStreaming {
+            NewPiLogger.info(category: "app", message: "Non-streaming pin-to-bottom", details: "session=\(runtime.sessionID) restored=\(restoredSavedPosition) offset=\(scrollOffset)")
+        }
         DispatchQueue.main.async {
             pinScrollToBottom(using: proxy)
         }
+    }
+
+    /// 原位恢复：应用保存的滚动位置并验证落地；未生效则有界重试（最多 8 次 × 120ms）。
+    /// 冷启动时内容布局/门控/钉底都在并发进行，单次 scrollTo 可能被时序吞掉或被后续
+    /// 布局覆盖——重试窗口把这些一次性扰动吸收掉。全程日志（View Logs 可见）。
+    private func restoreScrollPosition(to saved: CGFloat) {
+        let target = max(0, saved)
+        var attempt = 0
+        func tryApply() {
+            attempt += 1
+            jumpPosition.scrollTo(point: CGPoint(x: 0, y: target))
+            NewPiLogger.info(category: "app", message: "Scroll restore attempt", details: "session=\(runtime.sessionID) target=\(target) attempt=\(attempt) offset=\(scrollOffset)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                if abs(scrollOffset - target) <= 2 {
+                    NewPiLogger.info(category: "app", message: "Scroll restore settled", details: "session=\(runtime.sessionID) offset=\(scrollOffset) attempts=\(attempt)")
+                    return
+                }
+                if attempt < 8 {
+                    tryApply()
+                } else {
+                    NewPiLogger.info(category: "app", message: "Scroll restore gave up", details: "session=\(runtime.sessionID) target=\(target) finalOffset=\(scrollOffset)")
+                }
+            }
+        }
+        DispatchQueue.main.async(execute: tryApply)
     }
 
     /// 按最新缓存/布局常量重建高度表（rail 定位与窗口占位的共同数据源）。
