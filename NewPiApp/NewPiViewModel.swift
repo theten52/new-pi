@@ -572,12 +572,27 @@ final class NewPiViewModel: ObservableObject {
             try await Task.detached(priority: .userInitiated) {
                 try SessionManager.setArchived(true, for: summary.fileURL)
             }.value
-            if summary.fileURL == currentSessionFileURL {
-                // 归档的是当前会话：结束/停止它并回到「无活跃会话」状态，
-                // 而不是自动新建一个会话（BACKLOG-SESSION-MANUAL-CREATE）。
+            let wasCurrent = summary.fileURL == currentSessionFileURL
+            // 归档的是当前会话：结束后自动切到同项目的下一个会话——
+            // 优先它在列表中的下一条；归档的是末条则回退到最新一条。
+            // （同项目无更多会话时保持空态；暂不支持自动跨项目切换。）
+            var nextSummary: SessionSummary?
+            if wasCurrent {
+                if let index = savedSessions.firstIndex(where: { $0.id == summary.id }) {
+                    let below = savedSessions.index(after: index)
+                    if below < savedSessions.endIndex {
+                        nextSummary = savedSessions[below]
+                    }
+                }
+                if nextSummary == nil {
+                    nextSummary = savedSessions.first(where: { $0.id != summary.id })
+                }
                 await closeActiveSession()
             }
             await refreshSessionList()
+            if let nextSummary {
+                await resumeSession(nextSummary)
+            }
             NewPiLogger.info(
                 category: "app",
                 message: "Session archived",

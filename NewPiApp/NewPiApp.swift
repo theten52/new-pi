@@ -197,6 +197,18 @@ struct NewPiRootView: View {
                     .pickerStyle(.menu)
                     .disabled(viewModel.isStreaming || viewModel.providerListItems.isEmpty)
 
+                    // 快捷入口：把当前会话的 provider 设为全局默认（影响之后新建的会话）。
+                    if let activeID = viewModel.activeProviderID,
+                       !activeID.isEmpty,
+                       activeID != viewModel.providerConfig.defaultProfileID {
+                        Button("Set as Default") {
+                            Task { await viewModel.setDefaultProvider(profileID: activeID) }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+
                     if !viewModel.activeProviderModel.isEmpty {
                         Text(viewModel.activeProviderModel)
                             .font(.caption.monospaced())

@@ -12,11 +12,14 @@ struct NewPiSettingsView: View {
     var body: some View {
         Form {
             Section("Default Provider") {
-                Picker("Active provider", selection: defaultProfileBinding) {
+                Picker("Default for new sessions", selection: defaultProfileBinding) {
                     ForEach(viewModel.providerConfig.profiles) { profile in
                         Text(profile.name).tag(profile.id)
                     }
                 }
+                Text("只影响之后新建的会话；已有会话保持各自选择的 provider（会话内可通过侧边栏 Provider 选择器切换，选择会随会话记住）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Providers") {

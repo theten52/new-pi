@@ -171,6 +171,30 @@ struct NewPiTranscriptRow: View {
     var onFork: ((Int) -> Void)?
 
     @State private var isHovering = false
+    /// hover 退出延迟任务：滞回去抖，根治 Copy/Fork 按钮悬停消失抖动。
+    @State private var hoverExitTask: Task<Void, Never>?
+
+    private var showsActionButtons: Bool {
+        isHovering || isActiveStreamingItem
+    }
+
+    /// hover 滞回：指针从行内容移向右侧 action 按钮的瞬间会产生 exit→enter 抖动
+    ///（按钮 opacity 归 0 → allowsHitTesting(false) → 再触发 exit 的循环）。
+    /// 退出时延迟 180ms 隐藏，期间重新进入（含进入按钮本身）则取消。
+    private func updateHover(_ hovering: Bool) {
+        if hovering {
+            hoverExitTask?.cancel()
+            hoverExitTask = nil
+            isHovering = true
+        } else {
+            hoverExitTask?.cancel()
+            hoverExitTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard !Task.isCancelled else { return }
+                isHovering = false
+            }
+        }
+    }
 
     private var isUser: Bool { item.title == "You" }
 
@@ -190,7 +214,7 @@ struct NewPiTranscriptRow: View {
                 assistantContent
             }
         }
-        .onHover { isHovering = $0 }
+        .onHover(perform: updateHover)
     }
 
     /// 用户消息：右对齐 accent 气泡
@@ -246,11 +270,13 @@ struct NewPiTranscriptRow: View {
                 .disabled(isStreaming)
             }
         }
-        .opacity(isHovering || isActiveStreamingItem ? 1 : 0)
+        // 按钮自身也参与 hover 判定：移上按钮即保持显示，不依赖整行的 hover 回调时序。
+        .onHover(perform: updateHover)
+        .opacity(showsActionButtons ? 1 : 0)
         // opacity(0) 的按钮仍需禁用命中测试与无障碍读取，否则隐藏按钮可被点击/被 VoiceOver 聚焦
         //（与 NewPiChatView 中 opacity+allowsHitTesting 成对使用的约定对齐）。
-        .allowsHitTesting(isHovering || isActiveStreamingItem)
-        .accessibilityHidden(!(isHovering || isActiveStreamingItem))
+        .allowsHitTesting(showsActionButtons)
+        .accessibilityHidden(!showsActionButtons)
     }
 
     @ViewBuilder
