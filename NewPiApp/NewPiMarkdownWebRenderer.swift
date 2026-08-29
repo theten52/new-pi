@@ -10,6 +10,8 @@ import WebKit
 /// 滚动位置估算足够准（rail 跳转定位依赖它）。
 /// - key 为内容的 SHA256（跨启动稳定，可持久化；`hashValue` 每次启动都会变，不能用）
 /// - 高度是宽度的函数：条目记录实测时的内容宽度，宽度变化即整体失效并重新填充
+/// - markdown 渲染高度同时受引擎指纹约束：渲染器 js/css 变更后旧高度一律 miss
+///   （与 renderedHTML 产物查询的引擎校验对齐；文本行估算高度与引擎无关，不校验）
 /// - LRU 上限 512 条；debounce 持久化到 ~/.new-pi/agent/markdown-height-cache.json
 @MainActor
 final class MarkdownRenderingCache: ObservableObject {
@@ -57,17 +59,27 @@ final class MarkdownRenderingCache: ObservableObject {
         load()
     }
 
+    /// 当前渲染引擎指纹（MarkdownRenderer 目录 js/css 内容哈希，带缓存，读取廉价）。
+    /// 供引擎相关高度的读写校验：指纹变化后旧高度一律 miss，重新实测填充。
+    private var currentEngine: String? {
+        guard let url = NewPiMarkdownWebDocument.rendererScriptURL() else { return nil }
+        return NewPiMarkdownWebDocument.engineFingerprint(rendererScriptURL: url)
+    }
+
+    /// markdown 渲染高度查询（引擎相关）：引擎指纹不匹配（含无指纹的遗留条目）一律 miss。
     func height(for markdown: String) -> CGFloat? {
         guard currentWidth > 0 else { return nil }
         let key = key(for: markdown)
         let widthKey = Self.widthKey(currentWidth)
         guard var entry = buckets[widthKey]?[key], entry.height > 0 else { return nil }
+        guard let engine = entry.engine, engine == currentEngine else { return nil }
         entry.lastAccess = Date()
         buckets[widthKey]?[key] = entry
         return CGFloat(entry.height)
     }
 
-    /// 指定宽度桶的高度查询（供高度表按行类型各自的宽度口径查询，不受 currentWidth 影响）。
+    /// 指定宽度桶的高度查询（文本行估算高度用：NSAttributedString 排版结果，与渲染引擎无关，
+    /// 不做引擎校验）。供高度表按行类型各自的宽度口径查询，不受 currentWidth 影响。
     func height(for markdown: String, width: CGFloat) -> CGFloat? {
         let key = key(for: markdown)
         let widthKey = Self.widthKey(width)
@@ -77,19 +89,26 @@ final class MarkdownRenderingCache: ObservableObject {
         return CGFloat(entry.height)
     }
 
-    func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String, updateActiveWidth: Bool = true) {
+    /// - engineDependent: true（默认，markdown 渲染高度）时盖上当前引擎指纹，
+    ///   供 height(for:) 校验；false（文本行估算高度）则不盖戳、不参与引擎失效。
+    func setHeight(_ height: CGFloat, width: CGFloat, for markdown: String, updateActiveWidth: Bool = true, engineDependent: Bool = true) {
         guard height > 0, width > 0 else { return }
         // 文本行等次级写入者不翻动活动宽度桶：桶选择基线只属于真实 md 渲染宽度。
         if updateActiveWidth { currentWidth = width }
         let widthKey = Self.widthKey(width)
         let hash = key(for: markdown)
-        // 就地更新而不是整体替换：保留已捕获的渲染产物（html/engine）字段。
+        // 就地更新而不是整体替换：保留已捕获的渲染产物（html）字段。
         if var entry = buckets[widthKey, default: [:]][hash] {
             entry.height = Double(height)
             entry.lastAccess = Date()
+            if engineDependent { entry.engine = currentEngine }
             buckets[widthKey]?[hash] = entry
         } else {
-            buckets[widthKey, default: [:]][hash] = Entry(height: Double(height), lastAccess: Date())
+            buckets[widthKey, default: [:]][hash] = Entry(
+                height: Double(height),
+                lastAccess: Date(),
+                engine: engineDependent ? currentEngine : nil
+            )
         }
         evictIfNeeded()
         scheduleSave()

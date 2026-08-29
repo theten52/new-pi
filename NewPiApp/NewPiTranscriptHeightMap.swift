@@ -81,7 +81,7 @@ final class TranscriptHeightMap: ObservableObject {
         rows[index].measured = true
         recomputePrefixSums()
         if let key = rows[index].cacheKey, let width = rows[index].cacheWidth {
-            MarkdownRenderingCache.shared.setHeight(height, width: width, for: key, updateActiveWidth: false)
+            MarkdownRenderingCache.shared.setHeight(height, width: width, for: key, updateActiveWidth: false, engineDependent: false)
         }
     }
 
