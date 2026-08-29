@@ -169,8 +169,14 @@ struct NewPiSessionPanel: View {
                                 -proxy.frame(in: .named(NewPiChatScrollSupport.coordinateSpaceName)).minY
                             } action: { newOffset in
                                 scrollOffset = newOffset
-                                // 持续记录滚动位置：切换/淘汰/重启后原位恢复。
-                                ScrollPositionStore.shared.set(runtime.sessionID, offset: newOffset)
+                                // 持续记录滚动位置（锚点行 + 行内偏移，offset 兜底）：原位恢复用。
+                                let anchor = heightMap.anchor(at: newOffset)
+                                ScrollPositionStore.shared.set(
+                                    runtime.sessionID,
+                                    rowID: anchor?.id,
+                                    delta: anchor?.delta ?? 0,
+                                    offset: newOffset
+                                )
                             }
                         }
                         .coordinateSpace(name: NewPiChatScrollSupport.coordinateSpaceName)
@@ -246,12 +252,25 @@ struct NewPiSessionPanel: View {
                     }
                     .onAppear {
                         rebuildHeightMap(contentWidth: geometry.size.width - 32)
-                        // 原位恢复优先：有保存的滚动位置则恢复，否则钉底（新会话）。
-                        if let saved = ScrollPositionStore.shared.offset(for: runtime.sessionID),
+                        // 原位恢复优先：有保存的位置则恢复（锚点行重算，offset 兜底），否则钉底。
+                        if let entry = ScrollPositionStore.shared.entry(for: runtime.sessionID),
                            !runtime.transcript.isEmpty {
                             restoredSavedPosition = true
-                            NewPiLogger.info(category: "app", message: "Scroll restore start", details: "session=\(runtime.sessionID) saved=\(saved)")
-                            restoreScrollPosition(to: saved)
+                            let anchorY = entry.rowID
+                                .flatMap(UUID.init(uuidString:))
+                                .flatMap { heightMap.offset(of: $0) }
+                                .map { $0 + CGFloat(entry.delta) }
+                            let target = max(0, anchorY ?? CGFloat(entry.offset))
+                            NewPiLogger.info(category: "app", message: "Scroll restore start", details: "session=\(runtime.sessionID) target=\(target) anchored=\(anchorY != nil)")
+                            // 锚点恢复同样进有界跟进：恢复时几何可能未长全（预热中），
+                            // 预热补齐后跟进校正会把视口锁定在同一条消息上。
+                            if let rowID = entry.rowID.flatMap(UUID.init(uuidString:)) {
+                                pendingRailTarget = RailTarget(
+                                    id: rowID, lastY: target,
+                                    deadline: Date().addingTimeInterval(3)
+                                )
+                            }
+                            restoreScrollPosition(to: target)
                         } else {
                             NewPiLogger.info(category: "app", message: "Scroll restore skipped", details: "session=\(runtime.sessionID) transcriptEmpty=\(runtime.transcript.isEmpty)")
                             schedulePinScrollToBottom(using: proxy)

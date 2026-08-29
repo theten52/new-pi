@@ -93,6 +93,19 @@ final class TranscriptHeightMap: ObservableObject {
         return Self.contentTopPadding + prefixSums[index]
     }
 
+    /// 给定滚动偏移，返回视口顶部的锚点行（最后一个顶部 ≤ offset 的行）及其行内偏移。
+    /// 供原位恢复保存「锚点 + 偏移」，几何变化后按锚点重算仍指向同一条消息。
+    func anchor(at scrollOffset: CGFloat) -> (id: UUID, delta: CGFloat)? {
+        guard !rows.isEmpty else { return nil }
+        var index = 0
+        for i in rows.indices {
+            let top = Self.contentTopPadding + prefixSums[i]
+            if top <= scrollOffset + 1 { index = i } else { break }
+        }
+        let top = Self.contentTopPadding + prefixSums[index]
+        return (rows[index].id, scrollOffset - top)
+    }
+
     /// 所有行的总占用高度（含行间距，不含内容 padding）。
     var totalRowsHeight: CGFloat {
         guard !rows.isEmpty else { return 0 }

@@ -30,12 +30,23 @@ struct ChatBottomAnchorPreferenceKey: PreferenceKey {
 }
 
 /// 会话滚动位置持久化：切回被淘汰会话 / App 重启后恢复到上次离开的位置。
-/// 高度表使内容几何跨启动确定，因此一个 offset 数值即可精确恢复。
+/// 主键是「锚点行 + 行内偏移」而非绝对 offset——恢复时几何可能尚未长全
+///（预热未完成、cache-miss 行还是估算高度），绝对 offset 会被钳制丢失；
+/// 锚点行在几何变化后重算，始终定位到同一条消息。绝对 offset 仅作兜底。
 @MainActor
 final class ScrollPositionStore {
     static let shared = ScrollPositionStore()
 
-    private var offsets: [String: Double] = [:]
+    struct Entry: Codable {
+        /// 离开时视口顶部的消息行 ID（nil = 旧格式，只有绝对 offset）。
+        var rowID: String?
+        /// 行内偏移：offset 与该行顶部的差值。
+        var delta: Double
+        /// 兜底：绝对滚动 offset。
+        var offset: Double
+    }
+
+    private var entries: [String: Entry] = [:]
     private var saveWorkItem: DispatchWorkItem?
     private let fileURL: URL
 
@@ -45,20 +56,31 @@ final class ScrollPositionStore {
         load()
     }
 
-    func offset(for sessionID: UUID) -> CGFloat? {
-        offsets[sessionID.uuidString].map { CGFloat($0) }
+    func entry(for sessionID: UUID) -> Entry? {
+        entries[sessionID.uuidString]
     }
 
     /// 滚动期间每帧都可能调用：只更新内存表，磁盘写入防抖 2s。
-    func set(_ sessionID: UUID, offset: CGFloat) {
-        offsets[sessionID.uuidString] = Double(offset)
+    func set(_ sessionID: UUID, rowID: UUID?, delta: CGFloat, offset: CGFloat) {
+        entries[sessionID.uuidString] = Entry(
+            rowID: rowID?.uuidString,
+            delta: Double(delta),
+            offset: Double(offset)
+        )
         scheduleSave()
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([String: Double].self, from: data) else { return }
-        offsets = decoded
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        if let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            entries = decoded
+            return
+        }
+        // 兼容旧格式 [sessionID: offset]（一次迁移）。
+        if let legacy = try? JSONDecoder().decode([String: Double].self, from: data) {
+            entries = legacy.mapValues { Entry(rowID: nil, delta: 0, offset: $0) }
+            scheduleSave()
+        }
     }
 
     private func scheduleSave() {
@@ -69,7 +91,7 @@ final class ScrollPositionStore {
     }
 
     private func saveNow() {
-        guard let data = try? JSONEncoder().encode(offsets) else { return }
+        guard let data = try? JSONEncoder().encode(entries) else { return }
         try? FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
