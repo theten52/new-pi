@@ -38,6 +38,8 @@ struct NewPiSessionPanel: View {
 
     @State private var input = ""
     @State private var composerHeight: CGFloat = 120
+    /// composer 输入框的实测内容高度（由 NewPiComposerTextView 回报，1～4 行）。
+    @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     @State private var suppressAutoPinDuringStreaming = false
     @State private var isNearBottom = true
     /// rail 跳转 + 手动窗口化共用的高度表：可见区外的行用表内精确高度占位，
@@ -449,10 +451,27 @@ struct NewPiSessionPanel: View {
             Divider()
 
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message NewPi…", text: $input, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1 ... 6)
-                    .disabled(runtime.isStreaming)
+                // 多行输入框（NSTextView）：真实多行、自动增高，
+                // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
+                NewPiComposerTextView(
+                    text: $input,
+                    isDisabled: runtime.isStreaming,
+                    placeholder: "Message NewPi…",
+                    onSubmit: sendComposerInput,
+                    onHeightChange: { newHeight in
+                        guard abs(composerInputHeight - newHeight) > 0.5 else { return }
+                        composerInputHeight = newHeight
+                    }
+                )
+                .frame(height: composerInputHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
 
                 Button("Stop") {
                     viewModel.abort()
@@ -461,18 +480,180 @@ struct NewPiSessionPanel: View {
                 .disabled(!runtime.isStreaming)
                 .frame(minWidth: 52)
 
-                Button("Send") {
-                    let text = input
-                    input = ""
-                    viewModel.send(text)
-                }
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || runtime.isStreaming)
+                // Return 发送由 composer 自身处理，按钮不再占用 Return 快捷键，
+                // 避免与 NSTextView 的按键处理双重触发。
+                Button("Send", action: sendComposerInput)
+                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || runtime.isStreaming)
             }
             .padding()
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(nil, value: runtime.isStreaming)
+    }
+
+    private func sendComposerInput() {
+        let text = input
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !runtime.isStreaming else { return }
+        input = ""
+        viewModel.send(text)
+    }
+}
+
+// MARK: - Multiline composer (NSTextView)
+
+/// 多行输入框：基于 NSTextView，支持真实多行输入、随内容自动增高（达上限后滚动），
+/// Return 发送 / Shift+Return 换行。替代原先近似单行的 TextField(axis: .vertical)。
+struct NewPiComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    var isDisabled: Bool = false
+    var placeholder: String = "Message NewPi…"
+    var onSubmit: () -> Void = {}
+    /// 内容高度变化回调：外层据此用 .frame(height:) 精确控制高度，
+    /// 不依赖 intrinsicContentSize（NSScrollView hugging 优先级低，会被 VStack 拉伸）。
+    var onHeightChange: (CGFloat) -> Void = { _ in }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NewPiComposerScrollView {
+        let scrollView = NewPiComposerScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let textView = NewPiComposerInnerTextView()
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.placeholder = placeholder
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.textColor = .textColor
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 5, height: 7)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NewPiComposerScrollView, context: Context) {
+        guard let textView = context.coordinator.textView else { return }
+        context.coordinator.parent = self
+        textView.onSubmit = onSubmit
+        textView.placeholder = placeholder
+        textView.isEditable = !isDisabled
+        textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
+        // 发送后外部把 text 清空：同步回 textView（guard 防止打字途中回写打断输入）。
+        if textView.string != text {
+            textView.string = text
+            textView.scrollToEndOfDocument(nil)
+        }
+        scrollView.invalidateIntrinsicContentSize()
+        // 首次布局 / 宽度变化后重报高度。异步避免在 view update 周期内改 @State。
+        let report = onHeightChange
+        DispatchQueue.main.async {
+            let height = scrollView.measuredContentHeight
+            if height > 0 { report(height) }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: NewPiComposerTextView
+        weak var textView: NewPiComposerInnerTextView?
+
+        init(_ parent: NewPiComposerTextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView else { return }
+            parent.text = textView.string
+            // 内容行数变化 → 重新测量高度，驱动 composer 自动增高。
+            if let scrollView = textView.enclosingScrollView as? NewPiComposerScrollView {
+                scrollView.invalidateIntrinsicContentSize()
+                parent.onHeightChange(scrollView.measuredContentHeight)
+            }
+        }
+    }
+}
+
+/// 自适应高度的 ScrollView：高度由内容行数决定，夹在 [单行, 4 行] 之间。
+final class NewPiComposerScrollView: NSScrollView {
+    /// 最多显示 4 行，超出后内部滚动。
+    var maxVisibleLines: CGFloat = 4
+    /// 布局未就绪时的兜底高度（4 行：13pt 字体约 16pt/行 + 内边距 14pt）。
+    static let fallbackHeight: CGFloat = 78
+
+    /// 当前内容应有的高度（默认 4 行，超出 4 行后内部滚动）。
+    var measuredContentHeight: CGFloat {
+        guard let textView = documentView as? NSTextView,
+              let layoutManager = textView.layoutManager,
+              let container = textView.textContainer,
+              container.size.width > 0 else {
+            return Self.fallbackHeight
+        }
+        layoutManager.ensureLayout(for: container)
+        let usedHeight = layoutManager.usedRect(for: container).height
+        let insets = textView.textContainerInset
+        let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = layoutManager.defaultLineHeight(for: font)
+        let fourLines = lineHeight * maxVisibleLines + insets.height * 2
+        let contentHeight = usedHeight + insets.height * 2
+        // 下限=上限=4 行：空输入也保持 4 行高，内容超出后滚动。
+        return ceil(min(max(contentHeight, fourLines), fourLines))
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: measuredContentHeight)
+    }
+}
+
+/// 支持占位提示与 Return 发送（Shift+Return 换行）的 NSTextView。
+final class NewPiComposerInnerTextView: NSTextView {
+    var placeholder: String = "" {
+        didSet { needsDisplay = true }
+    }
+    var onSubmit: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76 // Return / 小键盘 Enter
+        // IME 组词中（如拼音选词确认）不拦截 Return；Shift+Return 换行。
+        if isReturn, !hasMarkedText(), !event.modifierFlags.contains(.shift) {
+            onSubmit?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .foregroundColor: NSColor.placeholderTextColor,
+        ]
+        let inset = textContainerInset
+        let rect = NSRect(
+            x: inset.width + 5,
+            y: inset.height,
+            width: bounds.width - inset.width * 2 - 10,
+            height: bounds.height - inset.height * 2
+        )
+        (placeholder as NSString).draw(in: rect, withAttributes: attributes)
     }
 }
 

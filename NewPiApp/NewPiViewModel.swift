@@ -311,9 +311,30 @@ final class NewPiViewModel: ObservableObject {
         )
         await cleanupEmptySessions()
         await refreshSessionList()
-        await startNewSession()
+        // 不自动创建新会话：改为恢复该项目上次离开时的会话（启动恢复与手动切项目共用）；
+        // 找不到（已删除/归档）则保持无活跃会话，由用户手动选择或新建。
+        await restoreLastSessionIfPossible()
         // 预热 MCP 工具（后台，不阻塞打开流程），让用户首次切换 session 时无需当场等待。
         Task { await self.loadMCPTools() }
+    }
+
+    /// 打开项目后恢复上次离开时的活跃会话。
+    /// 会话文件已删除/归档（不在会话列表中）时不恢复，静默回退到「无活跃会话」。
+    private func restoreLastSessionIfPossible() async {
+        guard let projectURL,
+              let lastSessionURL = NewPiLastSessionStore.load(for: projectURL),
+              FileManager.default.fileExists(atPath: lastSessionURL.path),
+              let summary = savedSessions.first(where: {
+                  $0.fileURL.standardizedFileURL == lastSessionURL
+              })
+        else { return }
+        await resumeSession(summary)
+    }
+
+    /// 记录当前活跃会话，供下次打开 App / 项目时自动恢复。
+    private func rememberActiveSession(fileURL: URL) {
+        guard let projectURL else { return }
+        NewPiLastSessionStore.save(sessionFileURL: fileURL, for: projectURL)
     }
 
     /// 停止并清空所有后台的 AgentSession（在切换项目等场景下调用）。
@@ -368,7 +389,7 @@ final class NewPiViewModel: ObservableObject {
             if projectURL != nil {
                 await cleanupEmptySessions()
                 await refreshSessionList()
-                await startNewSession()
+                // 不自动新建会话（BACKLOG-SESSION-MANUAL-CREATE）。
             }
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
@@ -403,7 +424,13 @@ final class NewPiViewModel: ObservableObject {
         }
         providerListItems = items
 
-        if let defaultProfile = try? providerConfig.defaultProfile() {
+        // 有活跃会话时显示该会话自己选择的 provider（会话内切换记进 header，逐会话记忆）；
+        // 无活跃会话时显示默认 provider（新建会话将使用它）。
+        if let session = activeRuntime?.session,
+           let header = await session.attachedSessionHeader,
+           let sessionProfile = try? resolveProfile(for: header) {
+            await setActiveProviderState(sessionProfile)
+        } else if let defaultProfile = try? providerConfig.defaultProfile() {
             activeProviderID = defaultProfile.id
             activeProviderName = defaultProfile.name
             activeProviderModel = defaultProfile.modelID
@@ -446,11 +473,11 @@ final class NewPiViewModel: ObservableObject {
             )
 
             if let session,
-               let fileURL = currentSessionFileURL,
                var header = await session.attachedSessionHeader {
                 header.providerProfileID = profile.id
                 header.modelID = profile.modelID
-                await session.attachPersistence(fileURL: fileURL, header: header)
+                // 立即落盘：切换后未发消息就退出 App，也要记住该会话的 provider 选择。
+                await session.updateSessionHeader(header)
             }
 
             activeProviderID = profile.id
@@ -467,7 +494,8 @@ final class NewPiViewModel: ObservableObject {
         do {
             try providerConfigStore.save(providerConfig)
             await refreshProviderList()
-            await startNewSession()
+            // 新默认 provider 只影响之后新建的会话；已有会话保持自己选择的
+            // provider 不变（会话内切换走侧边栏 Picker，随 session header 持久化）。
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
@@ -498,7 +526,7 @@ final class NewPiViewModel: ObservableObject {
                 setAsDefault: setAsDefault
             )
             await refreshProviderList()
-            await startNewSession()
+            // 不自动新建会话、不改已有会话的 provider：新默认只作用于新建会话。
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
@@ -508,16 +536,19 @@ final class NewPiViewModel: ObservableObject {
         do {
             try providerConfigStore.deleteProfile(id: id, from: &providerConfig)
             await refreshProviderList()
-            await startNewSession()
+            // 不自动新建会话、不改已有会话的 provider：新默认只作用于新建会话。
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
     }
 
     func resetSession() async {
+        // 手动入口语义保留：reset 由用户显式触发，等价于手动 New Session。
         await startNewSession()
     }
 
+    /// 新会话的唯一创建入口（侧边栏 New Session 按钮 / ⇧⌘N）。
+    /// 打开项目、切换/保存/删除 provider、归档会话等场景一律不再自动调用。
     func startNewSession() async {
         await beginSession(restoredContext: nil, fileURL: nil)
     }
@@ -542,7 +573,9 @@ final class NewPiViewModel: ObservableObject {
                 try SessionManager.setArchived(true, for: summary.fileURL)
             }.value
             if summary.fileURL == currentSessionFileURL {
-                await startNewSession()
+                // 归档的是当前会话：结束/停止它并回到「无活跃会话」状态，
+                // 而不是自动新建一个会话（BACKLOG-SESSION-MANUAL-CREATE）。
+                await closeActiveSession()
             }
             await refreshSessionList()
             NewPiLogger.info(
@@ -553,6 +586,21 @@ final class NewPiViewModel: ObservableObject {
         } catch {
             appendTranscript(title: "Error", body: error.localizedDescription)
         }
+    }
+
+    /// 结束当前活跃会话：停掉事件循环、移除 runtime、清空活跃状态。
+    /// 之后用户需手动点击 New Session 或从历史列表恢复会话。
+    private func closeActiveSession() async {
+        guard let runtime = activeRuntime else { return }
+        runtime.eventTask?.cancel()
+        runtimes.removeValue(forKey: runtime.fileURL.path)
+        activeRuntime = nil
+        activeSessionID = nil
+        // 会话已结束（如被归档）：清掉「最后活跃会话」记录，避免下次启动恢复一个已归档会话。
+        if let projectURL {
+            NewPiLastSessionStore.clear(for: projectURL)
+        }
+        await runtime.session.shutdown()
     }
 
     func forkFromMessage(index: Int) async {
@@ -674,9 +722,18 @@ final class NewPiViewModel: ObservableObject {
             NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
             if let header = await existing.session.attachedSessionHeader {
                 activeSessionID = header.id
+                // 显示该会话自己选择的 provider（而不是默认 provider）：
+                // 会话内的 provider 切换记进了 header，切回时要原样反映。
+                let sessionProfile = (try? resolveProfile(for: header)) ?? profile
+                existing.lastUsedAt = Date()
+                activeRuntime = existing
+                rememberActiveSession(fileURL: fileURL)
+                await setActiveProviderState(sessionProfile)
+                return
             }
             existing.lastUsedAt = Date()
             activeRuntime = existing
+            rememberActiveSession(fileURL: fileURL)
             await setActiveProviderState(profile)
             return
         }
@@ -793,6 +850,7 @@ final class NewPiViewModel: ObservableObject {
 
             activeRuntime = runtime
             activeSessionID = payload.header.id
+            rememberActiveSession(fileURL: payload.fileURL)
 
             // 冷恢复：启动离屏预测高（GLM #5：仅在真正激活的会话上启动，避免为被放弃的会话白跑）。
             // 只对 cache-miss 行串行测高填缓存；用户滚动到某行时"实例化即命中真实高度"→ 滚动条稳定。
@@ -859,7 +917,12 @@ final class NewPiViewModel: ObservableObject {
 
     func send(_ text: String) {
         guard let runtime = activeRuntime else {
-            appendTranscript(title: "System", body: "Open a project first.")
+            appendTranscript(
+                title: "System",
+                body: projectURL == nil
+                    ? "Open a project first."
+                    : "Start a new session first (⇧⌘N)."
+            )
             return
         }
 

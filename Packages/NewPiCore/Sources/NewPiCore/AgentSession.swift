@@ -217,6 +217,26 @@ public actor AgentSession {
         try? jsonlStore.save(persisted, to: fileURL)
     }
 
+    /// 更新会话 header（如会话内切换 provider/model）并**立即落盘**。
+    /// 注意不能用 `attachPersistence` 代替：它只更新内存中的 header，且会从磁盘重载
+    /// 带旧 header 的 context——下次 persistIfNeeded 会把 header 覆盖回旧值，
+    /// 导致「切换 provider 后未发消息就退出 App」时选择丢失。
+    public func updateSessionHeader(_ header: SessionHeader) {
+        persistenceHeader = header
+        guard var persisted = persistenceContext, let fileURL = persistenceFileURL else { return }
+        persisted.header = header
+        persistenceContext = persisted
+        do {
+            try jsonlStore.save(persisted, to: fileURL)
+        } catch {
+            NewPiLogger.error(
+                category: "agent",
+                message: "Failed to persist session header",
+                details: error.localizedDescription
+            )
+        }
+    }
+
     public var activeBranchLeafID: String? {
         persistenceLeafID
     }

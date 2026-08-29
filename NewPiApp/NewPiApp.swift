@@ -102,15 +102,14 @@ private struct SessionRow: View {
 struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
     @State private var showLogs = false
-    @State private var showsAllSessions = false
+    /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
+    @State private var sessionDisplayLimit = 5
 
     private let recentSessionLimit = 5
+    private let sessionDisplayIncrement = 5
 
     private var displayedSessions: [SessionSummary] {
-        if showsAllSessions || viewModel.savedSessions.count <= recentSessionLimit {
-            return viewModel.savedSessions
-        }
-        return Array(viewModel.savedSessions.prefix(recentSessionLimit))
+        Array(viewModel.savedSessions.prefix(max(sessionDisplayLimit, recentSessionLimit)))
     }
 
     var body: some View {
@@ -156,9 +155,23 @@ struct NewPiRootView: View {
                             }
                         }
 
-                        if viewModel.savedSessions.count > recentSessionLimit {
-                            Button(showsAllSessions ? "Show less" : "Show all (\(viewModel.savedSessions.count))") {
-                                showsAllSessions.toggle()
+                        if viewModel.savedSessions.count > sessionDisplayLimit
+                            || sessionDisplayLimit > recentSessionLimit {
+                            HStack(spacing: 12) {
+                                // 增量展开：每次点击多显示 5 条，直至全部显示。
+                                if viewModel.savedSessions.count > sessionDisplayLimit {
+                                    Button("Show all (\(viewModel.savedSessions.count))") {
+                                        sessionDisplayLimit = min(
+                                            sessionDisplayLimit + sessionDisplayIncrement,
+                                            viewModel.savedSessions.count
+                                        )
+                                    }
+                                }
+                                if sessionDisplayLimit > recentSessionLimit {
+                                    Button("Show less") {
+                                        sessionDisplayLimit = recentSessionLimit
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             .font(.caption)
@@ -167,7 +180,7 @@ struct NewPiRootView: View {
                     }
                 }
                 .onChange(of: viewModel.projectURL) { _, _ in
-                    showsAllSessions = false
+                    sessionDisplayLimit = recentSessionLimit
                 }
 
                 Section("Provider") {
