@@ -125,6 +125,9 @@ Phase 1 排期应为此留出余量。
 | 仅 500 turn 不达标、200 turn 达标 | 🟡 条件 GO：先做 JS 侧 turn 窗口化（DOM 只留最近 N turn + 高度占位 stub），复测 500 turn 再定 |
 | 200 turn 即不达标 | ❌ NO-GO，执行 §4.4 退路 |
 
+> **Spike 结果（2026-08-30）：GO。** 200/500 turns 全部达标（M1 185ms、M2 p95 4ms、
+> M3 +87MB、M4 75fps 零掉帧），详见 [`dev-notes/ui-arch-spike-results.md`](./dev-notes/ui-arch-spike-results.md)。
+
 Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对未来任何渲染架构决策都有价值。
 
 ### 4.3 GO 之后：Phase 1–4（按提案，附修正）

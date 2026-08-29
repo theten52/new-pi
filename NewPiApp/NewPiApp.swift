@@ -22,6 +22,12 @@ struct NewPiApp: App {
         WindowGroup {
             NewPiRootView()
         }
+        // UI 架构 spike（一次性验证工具，不接入生产路径）：独立窗口。
+        // 用 Window（单实例）而非 WindowGroup——后者对同一 id 重复 openWindow 会开多个窗口，
+        // 导致 autorun 序列被多个模型实例并发执行。
+        Window("UI Architecture Spike", id: "ui-arch-spike") {
+            NewPiSpikeTranscriptView()
+        }
         Settings {
             NewPiSettingsView(viewModel: sharedViewModel)
         }
@@ -37,6 +43,9 @@ struct NewPiApp: App {
                     NotificationCenter.default.post(name: .newPiShowLogs, object: nil)
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
+                Button("UI Architecture Spike") {
+                    NotificationCenter.default.post(name: .newPiShowSpike, object: nil)
+                }
             }
         }
     }
@@ -58,6 +67,7 @@ final class NewPiRootViewModelStore {
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
+    static let newPiShowSpike = Notification.Name("com.new-pi.showSpike")
 }
 
 private struct SessionRow: View {
@@ -124,6 +134,7 @@ private struct SessionRow: View {
 
 struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
+    @Environment(\.openWindow) private var openWindow
     @State private var showLogs = false
     /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
     @State private var sessionDisplayLimit = 5
@@ -324,6 +335,15 @@ struct NewPiRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowLogs)) { _ in
             showLogs = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newPiShowSpike)) { _ in
+            openWindow(id: "ui-arch-spike")
+        }
+        .onAppear {
+            // 无人值守 spike：NEWPI_SPIKE_AUTORUN=1 启动时自动打开 spike 窗口。
+            if ProcessInfo.processInfo.environment["NEWPI_SPIKE_AUTORUN"] == "1" {
+                openWindow(id: "ui-arch-spike")
+            }
         }
     }
 }

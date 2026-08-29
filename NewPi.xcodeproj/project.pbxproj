@@ -24,6 +24,7 @@
 		AA0000070000000000000001 /* NewPiLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000070000000000000001 /* NewPiLogStore.swift */; };
 		AA0000080000000000000001 /* NewPiLogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000080000000000000001 /* NewPiLogsView.swift */; };
 		AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000090000000000000001 /* NewPiMCPSettingsView.swift */; };
+		AA0000200000000000000001 /* NewPiSpikeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */; };
 		AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */; };
 		AA00000B0000000000000001 /* MarkdownRenderer in Resources */ = {isa = PBXBuildFile; fileRef = BB00000B0000000000000001 /* MarkdownRenderer */; };
 		AA00000C0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB00000C0000000000000001 /* Assets.xcassets */; };
@@ -49,6 +50,7 @@
 		BB0000070000000000000001 /* NewPiLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogStore.swift; sourceTree = "<group>"; };
 		BB0000080000000000000001 /* NewPiLogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogsView.swift; sourceTree = "<group>"; };
 		BB0000090000000000000001 /* NewPiMCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMCPSettingsView.swift; sourceTree = "<group>"; };
+		BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSpikeTranscriptView.swift; sourceTree = "<group>"; };
 		BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownWebRenderer.swift; sourceTree = "<group>"; };
 		BB00000B0000000000000001 /* MarkdownRenderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MarkdownRenderer; sourceTree = "<group>"; };
 		BB00000C0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -99,6 +101,7 @@
 				BB0000070000000000000001 /* NewPiLogStore.swift */,
 				BB0000080000000000000001 /* NewPiLogsView.swift */,
 				BB0000090000000000000001 /* NewPiMCPSettingsView.swift */,
+				BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
 				BB00000C0000000000000001 /* Assets.xcassets */,
 				BB00000D0000000000000001 /* AppIcon.icns */,
@@ -211,6 +214,7 @@
 				AA0000070000000000000001 /* NewPiLogStore.swift in Sources */,
 				AA0000080000000000000001 /* NewPiLogsView.swift in Sources */,
 				AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */,
+				AA0000200000000000000001 /* NewPiSpikeTranscriptView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
