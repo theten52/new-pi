@@ -171,3 +171,42 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > 最难的渲染器资产已确认可复用；但最大假设未经测量，
 > 所以采纳方向、不采纳立即迁移——先花 < 50 行修掉高度缓存的引擎校验漏洞，
 > 再用 1–2 天 spike 拿数据决定走哪条路。
+
+---
+
+## 7. 补充（2026-08-30）：「block 级高度表」与「展示重规划」的关系
+
+背景：后续计划重新规划 agent 输出的展示方式（工具展示 / 思考过程展示 / 结论展示），
+曾考虑以此为由提前做核验报告待办 #3（block 级高度表）。核实后结论：**两者不在同一层，
+展示重规划不构成提前做 block 级高度表的理由。**
+
+### 7.1 两层「block」，不要混淆
+
+| 层 | 粒度 | 高度管理现状 |
+|---|---|---|
+| transcript item 层（工具卡 / 思考 / 结论 / 用户气泡） | 每行一个 entry | **已是 per-item**：`NewPiTranscriptHeightMap.estimateRow()` 按类型分宽度口径（tool 行 / md 行 / 气泡行），工具卡折叠展开今天已只影响自己一行 |
+| markdown 子块层（一条 assistant 消息内的段落/代码块） | 待办 #3 的目标 | 待做；动机是消息内局部失效，与展示重规划不直接相关 |
+
+### 7.2 展示重规划的真正地基：typed item 模型
+
+当前数据层是 stringly-typed 的，是重规划的第一障碍：
+
+- `item.title == "You"` / `title.hasPrefix("Tool ")` 靠显示字符串判类型
+- `body.hasPrefix("Running ")` 靠解析文案判工具运行状态（`NewPiToolTranscriptView.swift:18-25`）
+- 思考过程未进 transcript：`thinkingDelta` 只写 debug log（`NewPiViewModel.swift:1151`）
+
+应先把 `NewPiTranscriptItem` 改为类型化模型（user / assistant / tool(state) / thinking / summary / …）。
+**该模型两种架构通吃**：当前架构路由原生视图，单文档序列化为 DOM 组件输入，无白做风险。
+
+### 7.3 对排期的影响
+
+子块级高度表动的是全仓最高危区域（rail / 窗口化 / 高度缓存 / 持久化格式 / JS 上报协议），
+且 spike GO 后随高度表整层删除。因此：
+
+```text
+Step 0.5（新增，架构中立）：typed transcript item 模型 + thinking 入 transcript
+仅当 spike NO-GO 且「消息内嵌折叠块」成为明确需求时，才启动子块级高度表
+```
+
+展示重规划本身与 spike 解耦：GO 则做文档内组件（活动带 / 思考折叠区 / per-run 聚合，提案 §6.3），
+NO-GO 则做原生卡片，现有 item 级高度表直接承载。
