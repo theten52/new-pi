@@ -64,6 +64,10 @@ struct NewPiSessionPanel: View {
     /// 首次布局是否恢复了保存的滚动位置：恢复过则禁止 composer 高度变化触发的
     /// 自动钉底（它会在恢复 scrollTo 落地后把会话又拽回底部——原位恢复失效的根因）。
     @State private var restoredSavedPosition = false
+    /// 单文档 transcript 开关（BACKLOG-SINGLE-DOC）：@AppStorage 使菜单切换即时生效。
+    @AppStorage("ui.singleDocumentTranscript") private var useDocumentTranscript = false
+    /// 单文档路径的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom）。
+    @StateObject private var docController = TranscriptDocumentController()
 
     private let messageBottomGap: CGFloat = 16
     /// 判定"已接近底部"的阈值：距底部小于该值视为在底部，流式时才自动钉底；
@@ -102,6 +106,94 @@ struct NewPiSessionPanel: View {
         // 按"轮对话"上色：一个 user 消息开启新轮，后续连续的非 user 消息归入该轮，
         // 同轮内输入/输出气泡同色、跨轮异色（BACKLOG-BUBBLE-BG）。
         let turnTints = turnTints(for: runtime.transcript)
+        if useDocumentTranscript {
+            documentBody
+        } else {
+            legacyBody(turnTints: turnTints)
+        }
+    }
+
+    /// 单文档 transcript（BACKLOG-SINGLE-DOC Phase 1）：整条会话一个 WKWebView，
+    /// 布局/滚动由文档自持（原生不消费任何内容高度）；rail 与 jump-to-latest
+    /// 仍是原生浮层（不在流内，不参与布局）。冷加载直接落底——保存位置恢复属 Phase 2。
+    private var documentBody: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .trailing) {
+                if runtime.transcript.isEmpty {
+                    if viewModel.isSwitchingSession {
+                        ProgressView("Loading session…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    NewPiTranscriptDocumentView(
+                        runtime: runtime,
+                        controller: docController,
+                        tintHues: turnTintHues(for: runtime.transcript)
+                    )
+                    .overlay(alignment: .bottom) {
+                        if runtime.isStreaming && !docController.isNearBottom {
+                            Button {
+                                docController.scrollToBottom()
+                            } label: {
+                                Label("Jump to latest", systemImage: "arrow.down")
+                                    .font(.callout.weight(.medium))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(.regularMaterial, in: Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.bottom, 12)
+                            .transition(.opacity)
+                        }
+                    }
+                }
+
+                NewPiUserMessageRail(
+                    markers: userMessageMarkers,
+                    onSelect: { messageID in
+                        docController.jumpTo(messageID)
+                    }
+                )
+                .padding(.trailing, 10)
+            }
+
+            chatComposer
+                .background {
+                    GeometryReader { composerGeometry in
+                        Color.clear.preference(
+                            key: ComposerHeightPreferenceKey.self,
+                            value: composerGeometry.size.height
+                        )
+                    }
+                }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// 轮对话色调（单文档路径）：只给用户气泡与助手正文卡片传色相，工具/思考卡保持中性色。
+    private func turnTintHues(for transcript: [NewPiTranscriptItem]) -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        var currentAnchor: UUID?
+        for item in transcript {
+            if item.kind == .user {
+                currentAnchor = item.id
+            }
+            guard let anchor = currentAnchor else { continue }
+            if item.kind == .user || item.isAssistantMarkdown {
+                result[item.id] = Color.bubbleTintHueDegrees(for: anchor)
+            }
+        }
+        return result
+    }
+
+    private func legacyBody(turnTints: [UUID: Color]) -> some View {
         GeometryReader { geometry in
             let scrollViewportHeight = max(0, geometry.size.height - composerHeight)
             // 可见窗口：派生值。scrollOffset/视口/高度表任一变化即重算，永远与当前几何一致。

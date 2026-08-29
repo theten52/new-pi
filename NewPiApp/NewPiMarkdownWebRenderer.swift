@@ -396,6 +396,50 @@ enum NewPiMarkdownWebDocument {
         """
     }
 
+    /// 单文档 transcript 外壳（BACKLOG-SINGLE-DOC，Phase 1）：整条会话一个文档。
+    /// 与 per-message 页同样的本地资源 + CSP；多加载 transcript-document.css/js。
+    static func transcriptDocumentHTML(rendererScriptURL: URL) -> String {
+        let rendererDirectoryURL = rendererScriptURL.deletingLastPathComponent()
+        let markdownItURL = rendererDirectoryURL.appendingPathComponent("markdown-it.min.js")
+        let highlightURL = rendererDirectoryURL.appendingPathComponent("highlight.min.js")
+        let githubMarkdownCSSURL = rendererDirectoryURL.appendingPathComponent("github-markdown-light.css")
+        let highlightCSSURL = rendererDirectoryURL.appendingPathComponent("highlight-github.min.css")
+        let appCSSURL = rendererDirectoryURL.appendingPathComponent("markdown-renderer.css")
+        let transcriptCSSURL = rendererDirectoryURL.appendingPathComponent("transcript-document.css")
+        let transcriptJSURL = rendererDirectoryURL.appendingPathComponent("transcript-document.js")
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self' file:; script-src 'self' file: 'nonce-\(scriptNonce)'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(githubMarkdownCSSURL.absoluteString))">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(highlightCSSURL.absoluteString))">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(appCSSURL.absoluteString))">
+          <link rel="stylesheet" href="\(htmlAttributeEscaped(transcriptCSSURL.absoluteString))">
+        </head>
+        <body>
+          <main id="transcript"></main>
+          <script nonce="\(scriptNonce)">
+            window.onerror = function (message, source, line, column) {
+              if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.rendererError) {
+                window.webkit.messageHandlers.rendererError.postMessage(
+                  String(message) + " @ " + String(source) + ":" + String(line) + ":" + String(column)
+                );
+              }
+            };
+          </script>
+          <script src="\(htmlAttributeEscaped(markdownItURL.absoluteString))"></script>
+          <script src="\(htmlAttributeEscaped(highlightURL.absoluteString))"></script>
+          <script src="\(htmlAttributeEscaped(rendererScriptURL.absoluteString))"></script>
+          <script src="\(htmlAttributeEscaped(transcriptJSURL.absoluteString))"></script>
+        </body>
+        </html>
+        """
+    }
+
     static func renderJavaScript(for markdown: String, streaming: Bool = false) throws -> String {
         let expression = try jsonParseExpression(for: markdown)
         if streaming {

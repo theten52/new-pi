@@ -18,6 +18,11 @@ extension Color {
         }
         return Double(hash % 360) / 360.0
     }
+
+    /// 色相度数（0-359）：供单文档 transcript 把同一套确定性配色传给 CSS hsl()。
+    static func bubbleTintHueDegrees(for anchorID: UUID) -> Int {
+        Int(deterministicHue(for: anchorID) * 360) % 360
+    }
 }
 
 /// 流式与完成态统一使用 WKWebView（markdown-it + highlight.js）渲染，

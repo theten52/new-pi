@@ -1,0 +1,178 @@
+/* 单文档 transcript 样式（BACKLOG-SINGLE-DOC，Phase 1）。
+   与遗留 per-message 页的 markdown-renderer.css 叠加使用（markdown-body/代码块/光标样式复用）。 */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: #1d1d1f;
+}
+
+#transcript {
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+/* 单文档虚拟化：视口外条目跳过布局/绘制；200px 是高度预留（条目均值量级）。
+   注意：不要用 <details> 做折叠（Safari 18.0 与 content-visibility 组合有回归）。 */
+.ti {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 200px;
+  margin-bottom: 16px;
+}
+
+/* ===== 用户气泡（右对齐，轮对话色调由 --tint（色相度数）驱动） ===== */
+
+.ti-user .bubble {
+  max-width: 640px;
+  margin-left: auto;
+  padding: 12px;
+  border-radius: 14px;
+  background: hsl(var(--tint, 212) 55% 60% / 0.18);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* ===== 助手回答卡片（左对齐，同轮色调） ===== */
+
+.ti-answer .card.answer {
+  max-width: 760px;
+  padding: 12px;
+  border-radius: 14px;
+  background: hsl(var(--tint, 212) 55% 60% / 0.18);
+}
+
+.answer-hd {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(60, 60, 67, 0.6);
+  margin-bottom: 6px;
+}
+
+.ti-answer .article {
+  max-width: 100%;
+}
+
+/* ===== 思考 / 工具折叠卡 ===== */
+
+.ti-thinking .card,
+.ti-tool .card {
+  max-width: 640px;
+  border-radius: 12px;
+  background: rgba(120, 120, 128, 0.10);
+  border: 1px solid rgba(60, 60, 67, 0.08);
+  overflow: hidden;
+}
+
+.ti-tool .card.is-error {
+  background: rgba(255, 59, 48, 0.06);
+  border-color: rgba(255, 59, 48, 0.2);
+}
+
+.card-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.card-chevron::before {
+  content: "▸";
+  font-size: 11px;
+  color: rgba(60, 60, 67, 0.5);
+  display: inline-block;
+  width: 12px;
+  transition: transform 0.15s ease;
+}
+
+.card.expanded .card-chevron::before {
+  content: "▾";
+}
+
+.card-title {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0, 112, 255, 0.12);
+  color: #1d1d1f;
+}
+
+.card-title.thinking {
+  background: rgba(175, 82, 222, 0.14);
+}
+
+.card-badge {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(60, 60, 67, 0.6);
+}
+
+.card-badge::before {
+  content: "●";
+  margin-right: 4px;
+  color: #34c759;
+}
+
+.card-badge.error::before {
+  color: #ff3b30;
+}
+
+.card-badge.running::before {
+  color: #ff9500;
+}
+
+.card-preview {
+  font-size: 11px;
+  color: rgba(60, 60, 67, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.card.expanded .card-preview {
+  display: none;
+}
+
+.card-body {
+  display: none;
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(60, 60, 67, 0.08);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.card.is-error .card-body {
+  color: #d70015;
+}
+
+.card.expanded .card-body {
+  display: block;
+}
+
+/* ===== 系统 / 错误行 ===== */
+
+.ti-system .sysline,
+.ti-error .sysline {
+  max-width: 760px;
+  padding: 12px;
+  font-size: 12px;
+  color: rgba(60, 60, 67, 0.75);
+}
+
+.ti-error .sysline {
+  color: #d70015;
+}

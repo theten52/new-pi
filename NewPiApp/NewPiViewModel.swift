@@ -970,7 +970,8 @@ final class NewPiViewModel: ObservableObject {
 
             // 冷恢复：启动离屏预测高（GLM #5：仅在真正激活的会话上启动，避免为被放弃的会话白跑）。
             // 只对 cache-miss 行串行测高填缓存；用户滚动到某行时"实例化即命中真实高度"→ 滚动条稳定。
-            if restoredContext != nil {
+            // 单文档模式下布局由文档自持，预热是纯浪费，跳过。
+            if restoredContext != nil, !NewPiFeatureFlags.singleDocumentTranscript {
                 MarkdownHeightPreheater.shared.preheat(items: payload.transcriptItems)
             }
 
