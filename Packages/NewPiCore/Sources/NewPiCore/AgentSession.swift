@@ -93,9 +93,30 @@ public actor AgentSession {
                     // 快照代表已提交，未完成的流式文本从此重置。
                     inFlightText = ""
                     context = snapshot
+                    // 诊断：persistIfNeeded 在 actor 上同步全量重写 JSONL，
+                    // 若变慢会阻塞后续事件向 UI 的投递（疑似回复慢的根因之一）。
+                    let persistStart = Date()
                     persistIfNeeded()
+                    let persistElapsed = Date().timeIntervalSince(persistStart)
+                    if persistElapsed > 0.05 {
+                        NewPiLogger.info(
+                            category: "agent-session",
+                            message: "Slow session persist",
+                            details: "elapsed=\(String(format: "%.2f", persistElapsed))s messages=\(snapshot.messages.count)"
+                        )
+                    }
                 }
+                // 诊断：事件从 loop 到 broadcast 的处理耗时（>0.2s 记日志）。
+                let broadcastStart = Date()
                 broadcast(event)
+                let broadcastElapsed = Date().timeIntervalSince(broadcastStart)
+                if broadcastElapsed > 0.2 {
+                    NewPiLogger.info(
+                        category: "agent-session",
+                        message: "Slow event broadcast",
+                        details: "elapsed=\(String(format: "%.2f", broadcastElapsed))s"
+                    )
+                }
             }
         }
     }

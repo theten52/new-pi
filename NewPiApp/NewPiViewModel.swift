@@ -56,6 +56,10 @@ final class SessionRuntime: ObservableObject {
     @Published var pendingToolApproval: ToolApprovalRequest?
     @Published var branchPointCount = 0
     @Published var isForkedBranch = false
+    /// 本会话累计 token 用量（逐 assistant 消息累加；冷恢复时从历史消息重建）。
+    @Published var totalUsage = UsageStats()
+    /// 最近一次 assistant 回复的 token 用量（本轮）。
+    @Published var lastTurnUsage = UsageStats()
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
@@ -131,6 +135,23 @@ private struct BuiltSessionPayload: Sendable {
     let branchPointCount: Int
     let isForkedBranch: Bool
     let liveMessageCount: Int
+    /// 从历史消息重建的累计 / 最近一轮 token 用量（新建会话为零值）。
+    let totalUsage: UsageStats
+    let lastTurnUsage: UsageStats
+}
+
+/// 从历史消息累计 token 用量（纯函数，供后台线程调用）。
+private func accumulateUsage(
+    from messages: [AgentMessage]
+) -> (total: UsageStats, lastTurn: UsageStats) {
+    var total = UsageStats()
+    var lastTurn = UsageStats()
+    for message in messages {
+        guard case let .assistant(assistant) = message else { continue }
+        total.add(assistant.usage)
+        lastTurn = assistant.usage
+    }
+    return (total, lastTurn)
 }
 
 /// 由消息列表构建转录条目（纯函数，供后台线程调用；新建 session 的转录为空，
@@ -291,7 +312,9 @@ final class NewPiViewModel: ObservableObject {
     func openProject(at url: URL) async {
         let newURL = url.standardizedFileURL
         // 切换到不同项目：先停掉并清理上个项目的后台 sessions（避免其继续运行/泄漏）。
-        if newURL != projectURL {
+        // 注意必须排除「启动时 nil → 首个项目」：否则每次冷启动都清空高度缓存，
+        // 让「启动自动恢复上次会话」退化为全量 cache-miss（预热 9-13s、滚动条频繁跳动）。
+        if let current = projectURL, newURL != current {
             await stopAllLiveSessions()
             // 跨项目时高度缓存里的内容不再适用，清空避免残留。
             MarkdownRenderingCache.shared.clear()
@@ -801,6 +824,7 @@ final class NewPiViewModel: ObservableObject {
                 let messages = await session.context.messages
                 let entryIDs = await session.branchEntryIDs()
                 let branchPointCount = await session.branchPointCount()
+                let usage = accumulateUsage(from: messages)
                 return BuiltSessionPayload(
                     session: session,
                     header: header,
@@ -808,7 +832,9 @@ final class NewPiViewModel: ObservableObject {
                     transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs),
                     branchPointCount: branchPointCount,
                     isForkedBranch: branchPointCount > 0,
-                    liveMessageCount: messages.count
+                    liveMessageCount: messages.count,
+                    totalUsage: usage.total,
+                    lastTurnUsage: usage.lastTurn
                 )
             }.value
 
@@ -843,6 +869,8 @@ final class NewPiViewModel: ObservableObject {
             runtime.branchPointCount = payload.branchPointCount
             runtime.isForkedBranch = payload.isForkedBranch
             runtime.liveMessageCount = payload.liveMessageCount
+            runtime.totalUsage = payload.totalUsage
+            runtime.lastTurnUsage = payload.lastTurnUsage
             runtime.lastUsedAt = Date()
 
             // 冷恢复：开启就绪门控——只纳入「高度缓存 miss」的 markdown 行，避免 LazyVStack 惰性
@@ -1007,8 +1035,29 @@ final class NewPiViewModel: ObservableObject {
         let session = runtime.session
         runtime.eventTask = Task { @MainActor in
             let stream = await session.events()
+            // 诊断：记录 agent 起点与上一事件的处理间隔，定位「LLM 已完、UI 未更新」的延迟。
+            var runStartedAt: Date?
+            var lastEventHandledAt = Date()
             for await event in stream {
+                let now = Date()
+                let gap = now.timeIntervalSince(lastEventHandledAt)
+                if gap > 0.5 {
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "UI event loop stall",
+                        details: "gap=\(String(format: "%.2f", gap))s nextEvent=\(event.diagnosticName)"
+                    )
+                }
+                if case .agentStart = event { runStartedAt = now }
+                if case .agentEnd = event, let runStartedAt {
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "UI: run wall time",
+                        details: "elapsed=\(String(format: "%.2f", now.timeIntervalSince(runStartedAt)))s"
+                    )
+                }
                 handle(event, on: runtime)
+                lastEventHandledAt = Date()
             }
         }
     }
@@ -1057,6 +1106,14 @@ final class NewPiViewModel: ObservableObject {
                     details: "Summary length: \(summary.count) characters"
                 )
             }
+        case let .messageEnd(message):
+            // token 用量累计：assistant 消息落定即累加，状态栏实时反映（BACKLOG-TOKEN-BAR）。
+            if case let .assistant(assistant) = message,
+               assistant.usage.inputTokens > 0 || assistant.usage.outputTokens > 0 {
+                runtime.totalUsage.add(assistant.usage)
+                runtime.lastTurnUsage = assistant.usage
+            }
+            hasVisibleStateChange = false
         case let .textDelta(delta):
             runtime.agentActivity = .writing
             enqueueStreamingDelta(delta, on: runtime)
@@ -1382,17 +1439,27 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    /// 流式增量合并的节流间隔（毫秒）：间隔内到达的 textDelta 会合并成一次 transcript 刷新，
-    /// 避免逐字符触发 O(n) 拼接、全量 markdown 重解析与 UI 重渲染。
-    private let streamingFlushIntervalMS: UInt64 = 40
+    /// 流式增量合并的节流间隔（毫秒）：间隔内到达的 textDelta 会合并成一次 transcript 刷新。
+    /// 自适应：主线程渲染跟不上时 delta 会积压，积压越深刷新间隔越长——
+    /// 用更少的渲染提交换主线程喘息，避免 backlog 雪崩（实测：40ms 固定节流时
+    /// LLM 流完后 UI 还要 4 分钟排空积压，run wall time 272s）。
+    private func streamingFlushIntervalMS(for runtime: SessionRuntime) -> UInt64 {
+        // 平滑斜坡：随积压线性增加（40ms 起、每 150 字符 +1ms、600ms 封顶），
+        // 避免硬档位切换造成的「顺畅→突然卡一下→涌一大段」观感。
+        // 实测（sample）：主线程 ~44% 时间阻塞在每次渲染提交的 CA 表面分配同步上，
+        // 单次提交成本 0.5~1s；积压越深就要把提交降得越稀，否则 backlog 雪崩。
+        let backlog = runtime.pendingStreamingDelta.count
+        return UInt64(min(40 + backlog / 150, 600))
+    }
 
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
     private func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
         runtime.pendingStreamingDelta += delta
         guard runtime.streamingFlushTask == nil else { return }
+        let intervalMS = streamingFlushIntervalMS(for: runtime)
         runtime.streamingFlushTask = Task { @MainActor [weak runtime] in
             do {
-                try await Task.sleep(nanoseconds: streamingFlushIntervalMS * 1_000_000)
+                try await Task.sleep(nanoseconds: intervalMS * 1_000_000)
             } catch {
                 return
             }
@@ -1409,7 +1476,13 @@ final class NewPiViewModel: ObservableObject {
         guard !runtime.pendingStreamingDelta.isEmpty else { return }
         let delta = runtime.pendingStreamingDelta
         runtime.pendingStreamingDelta = ""
+        // 诊断：flush 本身（字符串拼接 + transcript 更新 + SwiftUI 提交）若过慢会卡事件循环。
+        let start = Date()
         appendOrUpdateAssistant(delta, on: runtime)
+        let elapsed = Date().timeIntervalSince(start)
+        if elapsed > 0.1 {
+            NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(delta.count)")
+        }
     }
 
     private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
@@ -1425,8 +1498,8 @@ final class NewPiViewModel: ObservableObject {
         } else {
             runtime.transcript.append(NewPiTranscriptItem(title: "NewPi", body: delta))
         }
-        if runtime === activeRuntime {
-            transcript = runtime.transcript
-        }
+        // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
+        // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着
+        // 重评估。viewModel.transcript 在 agentEnd 的 rebuildTranscript 时统一同步。
     }
 }

@@ -93,7 +93,7 @@ final class MarkdownRenderingCache: ObservableObject {
         }
         evictIfNeeded()
         scheduleSave()
-        version += 1
+        scheduleVersionBump()
     }
 
     /// 命中即返回可重放的最终渲染产物（HTML）。要求当前宽度桶内有该内容、
@@ -123,7 +123,23 @@ final class MarkdownRenderingCache: ObservableObject {
         buckets[widthKey]?[hash] = entry
         evictIfNeeded()
         scheduleSave()
-        version += 1
+        scheduleVersionBump()
+    }
+
+    /// 版本号通知合并：预热/实测会连续写入（一个预热批次可达上百次），
+    /// 逐次 bump 会让订阅方（高度表重建 + 锚点校正）每行都跑一次 → 滚动条频繁跳动。
+    /// 数据写入是即时的（height(for:) 读取不受影响），合并的只是「通知」；
+    /// 300ms 窗口内的写入合并为一次版本变更。
+    private var versionBumpWorkItem: DispatchWorkItem?
+    private func scheduleVersionBump() {
+        guard versionBumpWorkItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.versionBumpWorkItem = nil
+            self.version += 1
+        }
+        versionBumpWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
     /// 项目切换等场景下清空缓存，避免跨项目高度残留。
@@ -132,6 +148,9 @@ final class MarkdownRenderingCache: ObservableObject {
     func clear() {
         buckets.removeAll()
         scheduleSave()
+        // 清空需要即时通知（新项目的占位高度必须立刻生效），不合并。
+        versionBumpWorkItem?.cancel()
+        versionBumpWorkItem = nil
         version += 1
     }
 
@@ -840,9 +859,14 @@ struct NewPiMarkdownWebRendererView: NSViewRepresentable {
         }
 
         private func applyStreamingHeight(_ reportedHeight: CGFloat) {
-            // 流式期间高度只增不减，避免布局回跳；滚动跟随由 ChatView 监听
-            // transcript 变化驱动，无需在此额外发通知。
-            let nextHeight = max(height, max(1, reportedHeight))
+            // 流式期间高度只增不减，且量化到 160pt 向上步进：内容增高未越档就不改 frame。
+            // 实测（sample）主线程约 73% 时间阻塞在 WebView layer 重分配的 CA 表面同步
+            // （RBLayer display → wait_for_allocations）上，根因就是这里每次 delta 都改高度；
+            // 量化把 layer 重分配次数降一到两个数量级。flush（完成态）走 scheduleHeightUpdate
+            // 落精确高度。frame ≥ 内容恒成立，不会裁剪（.clipped() 安全）。
+            let step: CGFloat = 160
+            let stepped = ceil(max(1, reportedHeight) / step) * step
+            let nextHeight = max(height, stepped)
             guard nextHeight > height else { return }
 
             height = nextHeight

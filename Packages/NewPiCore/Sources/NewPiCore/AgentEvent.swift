@@ -15,6 +15,26 @@ public enum AgentEvent: Sendable {
     case messageEnd(AgentMessage)
     case contextSnapshot(AgentContext)
     case error(AgentError)
+
+    /// 事件名（不含负载），供诊断日志使用。
+    public var diagnosticName: String {
+        switch self {
+        case .agentStart: "agentStart"
+        case .agentEnd: "agentEnd"
+        case .turnStart: "turnStart"
+        case .turnEnd: "turnEnd"
+        case .messageStart: "messageStart"
+        case .textDelta: "textDelta"
+        case .thinkingDelta: "thinkingDelta"
+        case .toolExecutionStart: "toolExecutionStart"
+        case .toolApprovalRequired: "toolApprovalRequired"
+        case .toolExecutionUpdate: "toolExecutionUpdate"
+        case .toolExecutionEnd: "toolExecutionEnd"
+        case .messageEnd: "messageEnd"
+        case .contextSnapshot: "contextSnapshot"
+        case .error: "error"
+        }
+    }
 }
 
 public struct ToolResult: Sendable, Equatable {
