@@ -70,7 +70,7 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 
 | ID | Item | Status | Priority | Notes |
 |---|---|---|---|---|
-| BACKLOG-TOKEN-BAR | 状态栏显示当前对话的 token 用量 | open | P1 | 在 app 状态栏/工具栏展示当前会话累计的 input/output token。数据源：LLM 流式响应中的 `UsageStats`（见 `ModelTypes.swift`）与会话事件（`AgentSession.events()`）。需累计本回合/整个会话的总量，可同时显示本次与累计值；考虑与 `NewPiViewModel` 的统计状态集成。 |
+| BACKLOG-TOKEN-BAR | 状态栏显示当前对话的 token 用量 | done | P1 | 已实现：`SessionRuntime` 新增 `totalUsage`/`lastTurnUsage`（@Published），`messageEnd(.assistant)` 时累计；冷恢复由历史消息的 usage 重建（`accumulateUsage`）；输入框上方状态栏右侧显示累计 `↑输入 ↓输出`（紧凑格式，tooltip 含最近一轮明细）+ 缓存命中率（⚡xx%，`UsageStats` 新增 cacheRead/cacheCreation 字段，Anthropic/OpenAI 兼容/Responses 三个 provider 均已解析，含 DeepSeek `prompt_cache_hit_tokens` 变体；旧 JSONL 解码兼容缺省 0）。另：状态栏与输入框间的 Divider 移到状态栏上方。注意：OpenAI 兼容 provider 流式原本不报 usage（REV-PROV-6），需端点支持才显示。 |
 | BACKLOG-SESSION-HOVER-GLASS | Session 列表鼠标悬浮玻璃高亮效果 | open | P2 | 鼠标移动到右侧（侧边栏）Session 列表项时，给出玻璃（glass / 毛玻璃）高亮效果。可参考 SwiftUI 的 `.glassEffect` 或自定义 `NSVisualEffectView` / `.background(.thinMaterial)`，实现悬浮态 hover 高亮。目标文件：`NewPiApp/NewPiApp.swift` 中的 `SessionRow`。 |
 | BACKLOG-BUBBLE-BG | 对话气泡背景色（Agent 输出气泡 + 同对话同色 + 跨对话异色） | open | P2 | 对话气泡需要有背景色。用户输入气泡已有背景色，Agent（NewPi）输出气泡也需要有；**同一对话内**输入/输出气泡背景色需一致；**不同对话**之间的背景色需不一样，以方便区分。背景色随机生成，以浅色为主、视觉柔和。注意：是**气泡**的背景色，不是整个对话窗口的背景色。目标文件：`NewPiApp/NewPiChatView.swift` 与气泡渲染逻辑（用户输入气泡、`NewPiMarkdownText` / `NewPiMarkdownWebRenderer` 的 Agent 气泡）。 |
 | BACKLOG-THINKING-COLLAPSE | 思考过程默认折叠，提供按钮手动展开查看 | open | P2 | 思考（thinking / reasoning）过程占据过多版面，考虑默认隐藏/折叠，提供按钮供用户手动点击展开查看。涉及 Agent 输出的 reasoning/thinking 内容在气泡中的展示逻辑，相关文件：`NewPiChatView.swift`、`NewPiMarkdownText.swift`（streaming 时 thinking 显示）、以及 `NewPiViewModel` 的思考增量处理。折叠态默认收起，展开后保持可再次收起。 |

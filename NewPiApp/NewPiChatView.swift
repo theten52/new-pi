@@ -386,7 +386,13 @@ struct NewPiSessionPanel: View {
 
     /// 按最新缓存/布局常量重建高度表（rail 定位与窗口占位的共同数据源）。
     private func rebuildHeightMap(contentWidth: CGFloat) {
+        // 诊断：流式期间每次 flush / 高度上报都可能触发，O(n) 重建若过慢会卡主线程。
+        let start = Date()
         heightMap.rebuild(items: runtime.transcript, contentWidth: contentWidth)
+        let elapsed = Date().timeIntervalSince(start)
+        if elapsed > 0.05 {
+            NewPiLogger.info(category: "app", message: "Slow heightMap rebuild", details: "elapsed=\(String(format: "%.2f", elapsed))s rows=\(runtime.transcript.count)")
+        }
     }
 
     /// rail 着陆后的有界跟进校正：预热/实测仍在改动几何时目标 y 会漂移（第一次点击不准、
@@ -437,41 +443,58 @@ struct NewPiSessionPanel: View {
     private func pinScrollToBottom(using proxy: ScrollViewProxy) {
         let anchor = NewPiChatScrollSupport.bottomAnchorID
 
+        // 诊断：流式期间每次 flush 都会钉底，scrollTo 触发布局若过慢会卡主线程。
+        let start = Date()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             proxy.scrollTo(anchor, anchor: .bottom)
         }
+        let elapsed = Date().timeIntervalSince(start)
+        if elapsed > 0.05 {
+            NewPiLogger.info(category: "app", message: "Slow pin-to-bottom", details: "elapsed=\(String(format: "%.2f", elapsed))s")
+        }
     }
 
     private var chatComposer: some View {
         VStack(spacing: 0) {
-            NewPiAgentStatusBar(presentation: viewModel.agentStatusPresentation)
-
+            // 分隔线移到状态栏上方：状态栏与输入框之间不再隔开，视觉上连成一体。
             Divider()
 
             HStack(alignment: .bottom, spacing: 8) {
-                // 多行输入框（NSTextView）：真实多行、自动增高，
-                // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
-                NewPiComposerTextView(
-                    text: $input,
-                    isDisabled: runtime.isStreaming,
-                    placeholder: "Message NewPi…",
-                    onSubmit: sendComposerInput,
-                    onHeightChange: { newHeight in
-                        guard abs(composerInputHeight - newHeight) > 0.5 else { return }
-                        composerInputHeight = newHeight
-                    }
-                )
-                .frame(height: composerInputHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
+                // 状态栏 + 输入框同一列：状态栏宽度 = 输入框宽度，上下左右边缘对齐
+                //（按钮在外层 HStack，不再挤占输入框宽度）。
+                VStack(spacing: 8) {
+                    NewPiAgentStatusBar(
+                        presentation: viewModel.agentStatusPresentation,
+                        usageText: runtime.totalUsage.newPiCompactText,
+                        lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
+                        cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText
+                    )
+
+                    // 多行输入框（NSTextView）：真实多行、自动增高，
+                    // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
+                    NewPiComposerTextView(
+                        text: $input,
+                        isDisabled: runtime.isStreaming,
+                        placeholder: "Message NewPi…",
+                        onSubmit: sendComposerInput,
+                        onHeightChange: { newHeight in
+                            guard abs(composerInputHeight - newHeight) > 0.5 else { return }
+                            composerInputHeight = newHeight
+                        }
+                    )
+                    .frame(height: composerInputHeight)
+                    // 高亮：与状态栏一致的淡 accent 填充 + 描边。
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    )
+                }
 
                 Button("Stop") {
                     viewModel.abort()
@@ -485,7 +508,9 @@ struct NewPiSessionPanel: View {
                 Button("Send", action: sendComposerInput)
                     .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || runtime.isStreaming)
             }
-            .padding()
+            .padding(.top, 8)
+            .padding(.horizontal)
+            .padding(.bottom)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .animation(nil, value: runtime.isStreaming)
