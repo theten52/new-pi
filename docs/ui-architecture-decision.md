@@ -137,6 +137,17 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > 已知留待 Phase 2 的缺口：保存位置恢复（冷加载目前落底）、rail 改用 JS turn offsets、
 > 滚动状态机入文档。修正 1（per-turn 渲染器状态）已按工厂化落地；
 > 修正 3（渲染器快照测试）仍未做。
+>
+> **Phase 2 已落地（同日稍后）**：滚动收敛入文档完成——
+> ① JS 侧 `Scroll` 模块为文档内滚动唯一 writer（意图状态机：idle / pinnedBottom /
+> userScrolling / jumpingToTarget / restoringAnchor；wheel/按键即用户接管；scrollend 收束）；
+> ② 视口稳定与钉底在同一同步块内完成（保存锚点→变更→恢复），不再有跨异步边界的中间态；
+> ③ 保存位置恢复：JS 上报视口锚点（顶部条目 id + 行内偏移）→ `ScrollPositionStore` 持久化，
+> 冷启动/切回随首个内容批次同批恢复，restoringAnchor 3s 有界校正窗口；
+> ④ rail 升级 minimap：JS 实测上报 user 条目相对位置，刻度按比例分布（未上报条目退化为均匀位）。
+> ⑤ 遗留路径**尚未删除**（验收条件），先 dogfood 验证单文档路径再执行删除。
+> 已知限制：content-visibility 未渲染区域用 200px 估算高，冷恢复的锚点位置可能有小幅漂移
+>（restoringAnchor 窗口 + 后续批次重校缓解）——验收指标「误差 < 2px」待 dogfood 验证。
 
 沿用提案 §7 的四阶段，补充三点修正：
 

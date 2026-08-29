@@ -3,14 +3,18 @@ import NewPiCore
 import SwiftUI
 import WebKit
 
-/// 单文档 transcript 的原生侧控制器（BACKLOG-SINGLE-DOC，Phase 1）。
-/// 原生只发意图（jumpTo / scrollToBottom），滚动位置与布局完全由文档自持；
-/// isNearBottom 由 JS 侧上报（原生不再计算滚动几何）。
+/// 单文档 transcript 的原生侧控制器（BACKLOG-SINGLE-DOC，Phase 2）。
+/// 原生只发意图（jumpTo / scrollToBottom / restoreAnchor），滚动位置与布局完全由文档自持；
+/// isNearBottom / 滚动锚点 / turn offsets 均由 JS 侧上报（原生不计算任何滚动几何）。
 @MainActor
 final class TranscriptDocumentController: ObservableObject {
     @Published private(set) var isNearBottom = true
+    /// rail minimap 数据源：user 条目 id → 文档内相对位置（0-1），JS 实测上报。
+    @Published private(set) var markerPositions: [UUID: Double] = [:]
 
     fileprivate weak var coordinator: NewPiTranscriptDocumentView.Coordinator?
+    /// 滚动锚点持久化所属会话（由视图挂载时注入）。
+    var sessionID: UUID?
 
     func jumpTo(_ id: UUID) {
         coordinator?.jumpTo(id)
@@ -20,8 +24,22 @@ final class TranscriptDocumentController: ObservableObject {
         coordinator?.scrollToBottom()
     }
 
-    fileprivate func updateNearBottom(_ value: Bool) {
-        isNearBottom = value
+    fileprivate func updateScrollState(nearBottom: Bool, anchorID: String?, anchorDelta: CGFloat, scrollTop: CGFloat) {
+        isNearBottom = nearBottom
+        // 滚动锚点即改即存（内存表；磁盘写由 store 自带 2s 防抖），
+        // 切换会话/冷启动恢复时的数据源。
+        if let sessionID {
+            ScrollPositionStore.shared.set(
+                sessionID,
+                rowID: anchorID.flatMap { UUID(uuidString: $0) },
+                delta: anchorDelta,
+                offset: scrollTop
+            )
+        }
+    }
+
+    fileprivate func updateMarkerPositions(_ positions: [UUID: Double]) {
+        markerPositions = positions
     }
 }
 
@@ -32,6 +50,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     let controller: TranscriptDocumentController
     /// 轮对话色调：itemID → 色相度数（面板层按最近 user 锚点算好传入）。
     var tintHues: [UUID: Int] = [:]
+    /// 冷启动/切回时要恢复的滚动锚点（nil = 落底）。仅首个内容批次应用一次。
+    var restoreEntry: ScrollPositionStore.Entry?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller)
@@ -44,11 +64,14 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
         configuration.userContentController.add(context.coordinator, name: "scrollState")
+        configuration.userContentController.add(context.coordinator, name: "turnOffsets")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         context.coordinator.attach(webView)
+        context.coordinator.sessionID = runtime.sessionID
+        context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.loadShell()
         return webView
     }
@@ -66,6 +89,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
         webView.navigationDelegate = nil
     }
 
@@ -79,6 +103,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         /// 上一次已应用的条目签名（id → 签名）与顺序，用于增量 diff。
         private var lastSignatures: [UUID: String] = [:]
         private var lastOrder: [UUID] = []
+        /// 会话标识（供控制器持久化滚动锚点）。
+        var sessionID: UUID?
+        /// 待恢复的滚动锚点：首个内容批次应用后随批下发一次（nil = 落底）。
+        var pendingRestoreEntry: ScrollPositionStore.Entry?
+        private var didApplyRestore = false
 
         init(controller: TranscriptDocumentController) {
             self.controller = controller
@@ -87,6 +116,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         func attach(_ webView: WKWebView) {
             self.webView = webView
             controller?.coordinator = self
+            controller?.sessionID = sessionID
         }
 
         func loadShell() {
@@ -167,6 +197,19 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             lastOrder = newOrder
 
             guard !ops.isEmpty else { return }
+            // 首个内容批次末尾附带滚动位置恢复（同批同步执行：upsert 完即锚定，
+            // 无「高度未回」中间态）；无保存位置则落底。
+            if !didApplyRestore {
+                didApplyRestore = true
+                if let entry = pendingRestoreEntry {
+                    var restore: [String: Any] = ["op": "restoreAnchor", "delta": entry.delta, "offset": entry.offset]
+                    if let rowID = entry.rowID { restore["id"] = rowID }
+                    ops.append(restore)
+                } else {
+                    ops.append(["op": "scrollToBottom", "smooth": false])
+                }
+                pendingRestoreEntry = nil
+            }
             send(ops: ops)
         }
 
@@ -265,6 +308,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             NewPiLogger.error(category: "app", message: "Transcript document process terminated, rebuilding")
             lastSignatures = [:]
             lastOrder = []
+            // 重建后按当前会话的保存位置再恢复一次（白屏重建前刚存下的位置）。
+            if let sessionID {
+                pendingRestoreEntry = ScrollPositionStore.shared.entry(for: sessionID)
+                didApplyRestore = false
+            }
             loadShell()
         }
 
@@ -303,7 +351,27 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             case "scrollState":
                 guard let body = message.body as? [String: Any],
                       let nearBottom = body["nearBottom"] as? Bool else { return }
-                controller?.updateNearBottom(nearBottom)
+                let anchorID = body["anchorID"] as? String
+                let anchorDelta = (body["anchorDelta"] as? NSNumber)?.doubleValue ?? 0
+                let scrollTop = (body["scrollTop"] as? NSNumber)?.doubleValue ?? 0
+                controller?.updateScrollState(
+                    nearBottom: nearBottom,
+                    anchorID: anchorID,
+                    anchorDelta: anchorDelta,
+                    scrollTop: scrollTop
+                )
+            case "turnOffsets":
+                guard let body = message.body as? [String: Any],
+                      let offsets = body["offsets"] as? [[String: Any]] else { return }
+                var positions: [UUID: Double] = [:]
+                for entry in offsets {
+                    if let idString = entry["id"] as? String,
+                       let id = UUID(uuidString: idString),
+                       let frac = (entry["frac"] as? NSNumber)?.doubleValue {
+                        positions[id] = frac
+                    }
+                }
+                controller?.updateMarkerPositions(positions)
             default:
                 break
             }
