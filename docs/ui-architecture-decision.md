@@ -132,6 +132,12 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 
 ### 4.3 GO 之后：Phase 1–4（按提案，附修正）
 
+> **进度（2026-08-30）**：Phase 1 已落地（commit `f8e2e50`）——文档外壳 + 渲染迁移完成，
+> feature flag（菜单 Help → Single-Document Transcript）与遗留路径并行，真实会话双路径冒烟通过。
+> 已知留待 Phase 2 的缺口：保存位置恢复（冷加载目前落底）、rail 改用 JS turn offsets、
+> 滚动状态机入文档。修正 1（per-turn 渲染器状态）已按工厂化落地；
+> 修正 3（渲染器快照测试）仍未做。
+
 沿用提案 §7 的四阶段，补充三点修正：
 
 1. **Phase 1 增加 per-turn 渲染器状态重构**（§2.3），并为 `renderStreaming` 补 JS 侧
