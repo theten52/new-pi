@@ -85,6 +85,12 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 |---|---|---|---|
 | BACKLOG-SCROLL-LAG | 对话流滑动不跟手 | P1 | 聊天列表滚动有滞后/不跟手手感。当前实现为「手动窗口化 + 高度表占位」（`TranscriptHeightMap`）+ `ScrollView` + `scrollPosition($jumpPosition)` + `ScrollViewReader.scrollTo` 多机制叠加，见 `docs/dev-notes/chat-scroll-layout.md`。需要：① 排查多种滚动机制是否互相干扰（dev-notes 明确警告「一种 scroll 机制」）；② 检查手动窗口化下滚动跟随全由 `onGeometryChange` 写回 `scrollOffset` 驱动是否造成每帧重算/卡顿；③ 优化滚动顺滑度（惯性、跟手度、无跳变）。涉及 `NewPiChatView.swift`、`NewPiChatScrollHelper.swift`、`NewPiTranscriptHeightMap.swift`。改前先读 `docs/dev-notes/chat-scroll-layout.md` 与 `2026-08-28-streaming-markdown-rendering-context.md`。 |
 
+## Backlog — 状态栏
+
+| ID | Item | Status | Priority | Notes |
+|---|---|---|---|---|
+| BACKLOG-STATUS-READY-LAG | 状态栏从 working/writing 翻回 ready 比正文完成晚数秒 | open | P2 | 现象：正文输出完毕、气泡光标已提前消失（streamingBubbleComplete）后，状态栏仍等 `agentEnd` 才翻回 ready；agentEnd 排在流式积压与收尾事件（messageStart/messageEnd/contextSnapshot×2/persist）之后，每一步主线程渲染提交 ~1s，累计晚 2-6s。方向：状态是否可跟 messageEnd/最后 textDelta 走（如「正文完成即 finishing」，工具调用/多轮场景需区分）；或压缩收尾事件的渲染提交次数。注意与 streamingBubbleComplete 的语义区分（气泡完成 ≠ run 完成，后续可能还有 turn/工具）。涉及 `NewPiViewModel.handle`、`agentStatusPresentation`。 |
+
 ## Backlog — 输入框
 
 | ID | Item | Status | Priority | Notes |

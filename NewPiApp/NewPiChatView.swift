@@ -119,6 +119,7 @@ struct NewPiSessionPanel: View {
                                                 item: item,
                                                 isStreaming: runtime.isStreaming,
                                                 isActiveStreamingItem: runtime.isStreaming
+                                                    && !runtime.streamingBubbleComplete
                                                     && item.id == runtime.transcript.last?.id
                                                     && (item.title == "NewPi" || item.title == "Summary"),
                                                 onInitialRendered: { runtime.markInitialRowRendered(item.id) }

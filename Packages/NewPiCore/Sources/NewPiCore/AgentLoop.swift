@@ -166,6 +166,10 @@ public struct AgentLoop: Sendable {
         var toolCalls: [ToolCallContent] = []
         var stopReason: StopReason = .stop
         var usage = UsageStats()
+        // 诊断：记录最后一次 text/thinking 增量的时刻，区分「服务端静默尾段」
+        // 与「收尾 reasoning 占时间」（回复结束后状态迟迟不变的根因定位）。
+        var lastTextDeltaAt: Date?
+        var lastThinkingDeltaAt: Date?
 
         let llmMessages = context.messages
         let toolDefinitions = config.tools.map(\.definition)
@@ -190,9 +194,11 @@ public struct AgentLoop: Sendable {
             switch event {
             case let .textDelta(delta):
                 text += delta
+                lastTextDeltaAt = Date()
                 continuation.yield(.textDelta(delta))
             case let .thinkingDelta(delta):
                 reasoningContent += delta
+                lastThinkingDeltaAt = Date()
                 continuation.yield(.thinkingDelta(delta))
             case let .thinkingSignature(signature):
                 reasoningSignature += signature
@@ -202,6 +208,19 @@ public struct AgentLoop: Sendable {
                 stopReason = reason
                 usage = stats
             }
+        }
+
+        // 诊断：流结束时的尾段分析。textTail 大 = 服务端发完正文后静默；
+        // thinking 区间长且贴近结束 = 收尾 reasoning 占用时间。
+        let streamEndAt = Date()
+        let textTail = lastTextDeltaAt.map { streamEndAt.timeIntervalSince($0) } ?? -1
+        let thinkTail = lastThinkingDeltaAt.map { streamEndAt.timeIntervalSince($0) } ?? -1
+        if textTail > 1 || thinkTail > 1 {
+            NewPiLogger.info(
+                category: "agent-loop",
+                message: "Stream tail analysis",
+                details: "textTail=\(String(format: "%.1f", textTail))s thinkTail=\(String(format: "%.1f", thinkTail))s textLen=\(text.count) reasoningLen=\(reasoningContent.count)"
+            )
         }
 
         return AssistantMessage(

@@ -393,15 +393,22 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                     var sseParser = SSEByteStreamParser()
                     var decoder = AnthropicSSEDecoder()
                     var parser = AnthropicStreamParser()
+                    // 收到终止事件（message_delta 带 stop_reason）即主动结束：
+                    // 服务端常在此后保持连接不关（keep-alive ~10s），等连接关闭
+                    // 会让 agentEnd 晚到、状态栏迟迟不变「完成」。跳出 for-await
+                    // 会自动取消底层 URLSession 请求。
+                    var didComplete = false
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
                         for block in sseParser.feed(byte) {
                             let parsed = parser.parse(events: decoder.decodeLines(block))
                             for event in parsed {
+                                if case .completed = event { didComplete = true }
                                 continuation.yield(event)
                             }
                         }
+                        if didComplete { break }
                     }
 
                     for block in sseParser.finish() {

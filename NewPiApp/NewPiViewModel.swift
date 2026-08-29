@@ -60,6 +60,10 @@ final class SessionRuntime: ObservableObject {
     @Published var totalUsage = UsageStats()
     /// 最近一次 assistant 回复的 token 用量（本轮）。
     @Published var lastTurnUsage = UsageStats()
+    /// 本轮正文是否已完整落定（messageEnd(assistant) 收到）。
+    /// 用于让流式气泡提前切换到完成态渲染（去 ✦ 光标、上 hljs 高亮），
+    /// 不必等 agentEnd（它排在流式积压与收尾事件之后，实测会晚数秒）。
+    @Published var streamingBubbleComplete = false
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
@@ -1084,7 +1088,7 @@ final class NewPiViewModel: ObservableObject {
     private func handle(_ event: AgentEvent, on runtime: SessionRuntime) {
         // 非文本事件是状态边界：先把未合并的流式增量冲刷掉，保证内容顺序一致且不丢失。
         switch event {
-        case .messageStart, .toolExecutionStart, .toolExecutionEnd, .agentEnd, .error:
+        case .messageStart, .messageEnd, .toolExecutionStart, .toolExecutionEnd, .agentEnd, .error:
             flushStreamingDelta(on: runtime)
         default:
             break
@@ -1095,6 +1099,7 @@ final class NewPiViewModel: ObservableObject {
         case .agentStart:
             runtime.isStreaming = true
             runtime.agentActivity = .thinking
+            runtime.streamingBubbleComplete = false
             NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
@@ -1113,9 +1118,15 @@ final class NewPiViewModel: ObservableObject {
                 runtime.totalUsage.add(assistant.usage)
                 runtime.lastTurnUsage = assistant.usage
             }
+            // 正文已完整：气泡提前切完成态渲染（去 ✦ 光标），不等 agentEnd。
+            if case .assistant = message {
+                runtime.streamingBubbleComplete = true
+            }
             hasVisibleStateChange = false
         case let .textDelta(delta):
             runtime.agentActivity = .writing
+            // 新一轮正文开始（多轮 run 的后续 turn）：气泡切回流式渲染。
+            runtime.streamingBubbleComplete = false
             enqueueStreamingDelta(delta, on: runtime)
             if runtime === activeRuntime, agentActivity != .writing {
                 agentActivity = .writing

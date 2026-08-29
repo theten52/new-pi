@@ -345,6 +345,11 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     let decoder = OpenAISSEDecoder()
                     var parser = OpenAIStreamParser()
                     var lastUsage = UsageStats()
+                    // 收到 finish_reason 块（.completed）即主动结束，不等服务端关连接
+                    //（keep-alive 会让完成状态晚 ~10s）。注意：若未来开启
+                    // stream_options.include_usage，usage 会落在 finish 之后的独立块，
+                    // 届时需改为收到 usage 块或 [DONE] 再结束。
+                    var didComplete = false
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
@@ -353,10 +358,12 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                             for event in parsed {
                                 if case let .completed(_, usage) = event {
                                     lastUsage = usage
+                                    didComplete = true
                                 }
                                 continuation.yield(event)
                             }
                         }
+                        if didComplete { break }
                     }
 
                     for block in sseParser.finish() {

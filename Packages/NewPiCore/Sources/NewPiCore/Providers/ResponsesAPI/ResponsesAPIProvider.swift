@@ -104,6 +104,9 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     var parser = ResponsesStreamParser()
                     var lastUsage = UsageStats()
                     var failedMessage: String?
+                    // response.completed / response.incomplete / response.failed 均为终态；
+                    // 收到即主动结束，不等服务端关连接（keep-alive 会让完成状态晚 ~10s）。
+                    var didReachTerminal = false
 
                     for try await byte in bytes {
                         try Task.checkCancellation()
@@ -112,16 +115,19 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                             for raw in rawEvents {
                                 if case let .failed(message) = raw {
                                     failedMessage = message
+                                    didReachTerminal = true
                                 }
                             }
                             let parsed = parser.parse(events: rawEvents)
                             for event in parsed {
                                 if case let .completed(_, usage) = event {
                                     lastUsage = usage
+                                    didReachTerminal = true
                                 }
                                 continuation.yield(event)
                             }
                         }
+                        if didReachTerminal { break }
                     }
 
                     for block in sseParser.finish() {
