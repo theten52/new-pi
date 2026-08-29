@@ -104,7 +104,7 @@ struct ResponsesSSEDecoderTests {
             }
         })
         #expect(events.contains {
-            if case let .completed(status, _, input, output) = $0 {
+            if case let .completed(status, _, input, output, _) = $0 {
                 status == "completed" && input == 10 && output == 5
             } else {
                 false

@@ -6,7 +6,7 @@ public enum ResponsesStreamEvent: Sendable, Equatable {
     case functionCallMeta(outputIndex: Int, callID: String?, name: String?)
     case functionCallArgumentsDelta(outputIndex: Int, delta: String)
     case functionCallArgumentsDone(outputIndex: Int, callID: String?, name: String?, arguments: String)
-    case completed(status: String, incompleteReason: String?, inputTokens: Int, outputTokens: Int)
+    case completed(status: String, incompleteReason: String?, inputTokens: Int, outputTokens: Int, cacheReadTokens: Int = 0)
     case failed(message: String)
 }
 
@@ -84,11 +84,16 @@ public struct ResponsesSSEDecoder: Sendable {
         let usage = response["usage"] as? [String: Any] ?? [:]
         let inputTokens = usage["input_tokens"] as? Int ?? 0
         let outputTokens = usage["output_tokens"] as? Int ?? 0
+        // 缓存命中：input_tokens_details.cached_tokens（input_tokens 含缓存部分）。
+        let inputDetails = usage["input_tokens_details"] as? [String: Any]
+        let cached = inputDetails?["cached_tokens"] as? Int ?? 0
         return .completed(
             status: status,
             incompleteReason: incompleteReason,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens
+            // 归一化语义：inputTokens 不含缓存命中部分（与 Anthropic 一致）。
+            inputTokens: max(0, inputTokens - cached),
+            outputTokens: outputTokens,
+            cacheReadTokens: cached
         )
     }
 }

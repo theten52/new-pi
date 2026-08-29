@@ -100,7 +100,7 @@ public enum OpenAIStreamEvent: Sendable, Equatable {
     case textDelta(String)
     case reasoningDelta(String)
     case toolCallDelta(index: Int, id: String?, name: String?, argumentsDelta: String?)
-    case completed(reason: String?, inputTokens: Int, outputTokens: Int)
+    case completed(reason: String?, inputTokens: Int, outputTokens: Int, cacheReadTokens: Int = 0)
 }
 
 public struct OpenAIStreamParser: Sendable {
@@ -125,7 +125,7 @@ public struct OpenAIStreamParser: Sendable {
                 if let argumentsDelta {
                     toolArguments[index, default: ""] += argumentsDelta
                 }
-            case let .completed(reason, inputTokens, outputTokens):
+            case let .completed(reason, inputTokens, outputTokens, cacheReadTokens):
                 let hadToolCalls = !toolIDs.isEmpty
                 output.append(contentsOf: flushToolCalls())
                 var stopReason = mapStopReason(reason)
@@ -134,7 +134,7 @@ public struct OpenAIStreamParser: Sendable {
                     // even when tool_calls were streamed.
                     stopReason = .toolUse
                 }
-                let usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                let usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens, cacheReadTokens: cacheReadTokens)
                 output.append(.completed(stopReason: stopReason, usage: usage))
             }
         }
@@ -210,11 +210,20 @@ public struct OpenAISSEDecoder: Sendable {
                 }
                 if let finishReason = choice["finish_reason"] as? String {
                     let usageJSON = json["usage"] as? [String: Any]
+                    let promptTokens = usageJSON?["prompt_tokens"] as? Int ?? 0
+                    // 缓存命中：OpenAI 为 prompt_tokens_details.cached_tokens；
+                    // DeepSeek 为 prompt_cache_hit_tokens。
+                    let details = usageJSON?["prompt_tokens_details"] as? [String: Any]
+                    let cached = details?["cached_tokens"] as? Int
+                        ?? usageJSON?["prompt_cache_hit_tokens"] as? Int
+                        ?? 0
                     events.append(
                         .completed(
                             reason: finishReason,
-                            inputTokens: usageJSON?["prompt_tokens"] as? Int ?? 0,
-                            outputTokens: usageJSON?["completion_tokens"] as? Int ?? 0
+                            // 归一化语义：inputTokens 不含缓存命中部分（与 Anthropic 一致）。
+                            inputTokens: max(0, promptTokens - cached),
+                            outputTokens: usageJSON?["completion_tokens"] as? Int ?? 0,
+                            cacheReadTokens: cached
                         )
                     )
                 }

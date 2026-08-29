@@ -60,12 +60,53 @@ public struct ToolDefinition: Sendable, Codable, Equatable {
 }
 
 public struct UsageStats: Sendable, Codable, Equatable {
+    /// 未命中缓存的输入 token。
     public var inputTokens: Int
     public var outputTokens: Int
+    /// 命中缓存的输入 token（cache read）。
+    public var cacheReadTokens: Int
+    /// 写入缓存的输入 token（cache creation/write）。
+    public var cacheCreationTokens: Int
 
-    public init(inputTokens: Int = 0, outputTokens: Int = 0) {
+    public init(
+        inputTokens: Int = 0,
+        outputTokens: Int = 0,
+        cacheReadTokens: Int = 0,
+        cacheCreationTokens: Int = 0
+    ) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreationTokens = cacheCreationTokens
+    }
+
+    /// 自定义解码：旧 JSONL 中的 usage 没有 cache 字段，缺省补 0。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        inputTokens = try container.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
+        outputTokens = try container.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+        cacheReadTokens = try container.decodeIfPresent(Int.self, forKey: .cacheReadTokens) ?? 0
+        cacheCreationTokens = try container.decodeIfPresent(Int.self, forKey: .cacheCreationTokens) ?? 0
+    }
+
+    /// 总输入 token（未命中 + 命中 + 写缓存）。
+    public var totalInputTokens: Int {
+        inputTokens + cacheReadTokens + cacheCreationTokens
+    }
+
+    /// 缓存命中率 = 命中 / 总输入；无输入或无缓存信息时为 nil。
+    public var cacheHitRate: Double? {
+        let total = totalInputTokens
+        guard total > 0 else { return nil }
+        return Double(cacheReadTokens) / Double(total)
+    }
+
+    /// 累加另一份用量。
+    public mutating func add(_ other: UsageStats) {
+        inputTokens += other.inputTokens
+        outputTokens += other.outputTokens
+        cacheReadTokens += other.cacheReadTokens
+        cacheCreationTokens += other.cacheCreationTokens
     }
 }
 

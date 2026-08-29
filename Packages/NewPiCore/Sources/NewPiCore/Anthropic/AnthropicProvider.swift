@@ -138,11 +138,16 @@ public struct AnthropicStreamParser: Sendable {
                     arguments = .object([:])
                 }
                 output.append(.toolCall(ToolCallContent(id: id, name: name, arguments: arguments)))
-            case let .messageDelta(reason, inputTokens, outputTokens):
+            case let .messageDelta(reason, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
                 if reason != nil {
                     stopReason = mapStopReason(reason)
                 }
-                usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                // message_start（输入/cache）与 message_delta（输出）分两次上报，
+                // 单调取 max 合并，避免后到的缺省 0 覆盖先到的真实值。
+                usage.inputTokens = max(usage.inputTokens, inputTokens)
+                usage.outputTokens = max(usage.outputTokens, outputTokens)
+                usage.cacheReadTokens = max(usage.cacheReadTokens, cacheReadTokens)
+                usage.cacheCreationTokens = max(usage.cacheCreationTokens, cacheCreationTokens)
                 if reason != nil {
                     output.append(completedEvent())
                 }
@@ -183,7 +188,13 @@ public enum AnthropicStreamEvent: Sendable, Equatable {
     case thinkingSignature(String)
     case toolInputDelta(id: String, name: String, partialJSON: String)
     case contentBlockStop(id: String, name: String, input: JSONValue?)
-    case messageDelta(reason: String?, inputTokens: Int, outputTokens: Int)
+    case messageDelta(
+        reason: String?,
+        inputTokens: Int,
+        outputTokens: Int,
+        cacheReadTokens: Int,
+        cacheCreationTokens: Int
+    )
 }
 
 public struct AnthropicSSEDecoder: Sendable {
@@ -251,6 +262,18 @@ public struct AnthropicSSEDecoder: Sendable {
                     events.append(.contentBlockStop(id: block.id, name: block.name, input: nil))
                     openToolBlocks.removeValue(forKey: index)
                 }
+            // message_start 携带本次请求的输入/cache 用量（cache_read/cache_creation 只在这里出现）。
+            case "message_start":
+                let usageJSON = (json["message"] as? [String: Any])?["usage"] as? [String: Any]
+                events.append(
+                    .messageDelta(
+                        reason: nil,
+                        inputTokens: usageJSON?["input_tokens"] as? Int ?? 0,
+                        outputTokens: usageJSON?["output_tokens"] as? Int ?? 0,
+                        cacheReadTokens: usageJSON?["cache_read_input_tokens"] as? Int ?? 0,
+                        cacheCreationTokens: usageJSON?["cache_creation_input_tokens"] as? Int ?? 0
+                    )
+                )
             case "message_delta":
                 let delta = json["delta"] as? [String: Any]
                 let usageJSON = json["usage"] as? [String: Any]
@@ -258,7 +281,9 @@ public struct AnthropicSSEDecoder: Sendable {
                     .messageDelta(
                         reason: delta?["stop_reason"] as? String,
                         inputTokens: usageJSON?["input_tokens"] as? Int ?? 0,
-                        outputTokens: usageJSON?["output_tokens"] as? Int ?? 0
+                        outputTokens: usageJSON?["output_tokens"] as? Int ?? 0,
+                        cacheReadTokens: usageJSON?["cache_read_input_tokens"] as? Int ?? 0,
+                        cacheCreationTokens: usageJSON?["cache_creation_input_tokens"] as? Int ?? 0
                     )
                 )
             default:

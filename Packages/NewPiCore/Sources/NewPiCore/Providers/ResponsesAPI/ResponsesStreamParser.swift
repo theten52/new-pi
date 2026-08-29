@@ -39,10 +39,10 @@ public struct ResponsesStreamParser: Sendable {
                 }
                 pendingCalls[outputIndex] = pending
                 output.append(contentsOf: flushCall(at: outputIndex))
-            case let .completed(status, incompleteReason, inputTokens, outputTokens):
+            case let .completed(status, incompleteReason, inputTokens, outputTokens, cacheReadTokens):
                 output.append(contentsOf: flushAllCalls())
                 let stopReason = mapStopReason(status: status, incompleteReason: incompleteReason)
-                let usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens)
+                let usage = UsageStats(inputTokens: inputTokens, outputTokens: outputTokens, cacheReadTokens: cacheReadTokens)
                 output.append(.completed(stopReason: stopReason, usage: usage))
             case let .failed(message):
                 output.append(contentsOf: flushAllCalls())
