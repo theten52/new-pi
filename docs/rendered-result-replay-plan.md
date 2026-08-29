@@ -96,6 +96,8 @@ flush 完成 = 产物落盘，此后**永远重放、不再解析**。
 
 ## 五、风险与边界
 
+> **实现与调试全记录**：见 [`dev-notes/2026-08-29-render-replay-windowing-scroll-restore.md`](./dev-notes/2026-08-29-render-replay-windowing-scroll-restore.md)（含窗口化、锚点恢复与设计原则 P1–P5）。
+
 - **产物 HTML 体积**：每条消息几 KB，几十条/会话规模下磁盘占用可忽略；LRU 2048 条上限兜底。
 - **窗口 resize**：宽度变 → 桶切换 → 产物 miss → 回落正常渲染重捕获（与现有高度缓存同策略）。
 - **重放失败**：看门狗/进程终止等现有防线照旧；失败行退回原生文本兜底并写日志。
