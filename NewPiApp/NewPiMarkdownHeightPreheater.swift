@@ -46,7 +46,7 @@ final class MarkdownHeightPreheater {
         // 全量扫 cache-miss 行（尾部优先——用户总是从底部开始浏览）。
         // 几十条/会话的规模 + maxProbes 上限兜底；逐行 SHA256 成本可忽略。
         let misses = items.reversed().filter { item in
-            (item.title == "NewPi" || item.title == "Summary")
+            item.isAssistantMarkdown
                 && MarkdownRenderingCache.shared.height(for: item.body) == nil
         }
         guard !misses.isEmpty else { return }

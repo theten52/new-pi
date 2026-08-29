@@ -16,3 +16,6 @@ dist/
 .vscode/
 .hermes/
 research-repos/
+
+# Claude Code 个人本地覆盖（不提交）
+.claude/settings.local.json

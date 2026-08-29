@@ -74,7 +74,7 @@ struct NewPiSessionPanel: View {
 
     private var userMessageMarkers: [UserMessageMarker] {
         runtime.transcript
-            .filter { $0.title == "You" }
+            .filter { $0.kind == .user }
             .map { UserMessageMarker(id: $0.id, preview: $0.body) }
     }
 
@@ -85,7 +85,7 @@ struct NewPiSessionPanel: View {
         var result: [UUID: Color] = [:]
         var currentAnchor: UUID?
         for item in transcript {
-            if item.title == "You" {
+            if item.kind == .user {
                 currentAnchor = item.id
             }
             if let anchor = currentAnchor {
@@ -145,7 +145,7 @@ struct NewPiSessionPanel: View {
                                                 isActiveStreamingItem: runtime.isStreaming
                                                     && !runtime.streamingBubbleComplete
                                                     && item.id == runtime.transcript.last?.id
-                                                    && (item.title == "NewPi" || item.title == "Summary"),
+                                                    && item.isAssistantMarkdown,
                                                 onInitialRendered: { runtime.markInitialRowRendered(item.id) }
                                             ) { forkIndex in
                                                 Task { await viewModel.forkFromMessage(index: forkIndex) }

@@ -7,19 +7,16 @@ enum NewPiToolTranscriptKind: Equatable {
 }
 
 extension NewPiTranscriptItem {
+    /// 工具条目的展示形态：直接从 typed kind 读取（BACKLOG-TYPED-TRANSCRIPT），
+    /// 不再从 title/body 文案反向解析。
     var toolTranscriptKind: NewPiToolTranscriptKind? {
-        if title == "Tool" {
-            if body.hasPrefix("Running "), body.hasSuffix("…") {
-                let name = String(body.dropFirst("Running ".count).dropLast())
-                return .running(toolName: name)
-            }
-            return .running(toolName: "tool")
+        guard case let .tool(name, state) = kind else { return nil }
+        switch state {
+        case .running:
+            return .running(toolName: name)
+        case .completed(let isError):
+            return .result(toolName: name, isError: isError)
         }
-        if title.hasPrefix("Tool ") {
-            let name = String(title.dropFirst("Tool ".count))
-            return .result(toolName: name, isError: body.hasPrefix("Error:"))
-        }
-        return nil
     }
 
     var isToolTranscript: Bool { toolTranscriptKind != nil }
@@ -208,6 +205,7 @@ struct NewPiToolTranscriptView: View {
     }
 
     private func displayText(isError: Bool) -> String {
+        // 兼容历史数据：typed 模型之前，错误输出的 body 带 "Error:" 前缀。
         if isError, item.body.hasPrefix("Error:") {
             return String(item.body.dropFirst("Error:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -270,12 +268,12 @@ struct NewPiToolTranscriptView: View {
 #Preview("Tool results") {
     VStack(alignment: .leading, spacing: 12) {
         NewPiToolTranscriptView(item: NewPiTranscriptItem(
-            title: "Tool",
-            body: "Running read…"
+            kind: .tool(name: "read", state: .running),
+            body: ""
         ))
 
         NewPiToolTranscriptView(item: NewPiTranscriptItem(
-            title: "Tool read",
+            kind: .tool(name: "read", state: .completed(isError: false)),
             body: """
             1|# new-pi
             2|
@@ -286,7 +284,7 @@ struct NewPiToolTranscriptView: View {
         ))
 
         NewPiToolTranscriptView(item: NewPiTranscriptItem(
-            title: "Tool bash",
+            kind: .tool(name: "bash", state: .completed(isError: false)),
             body: """
             total 24
             drwxr-xr-x  8 user  staff  256 Aug 26 10:00 .
@@ -296,8 +294,111 @@ struct NewPiToolTranscriptView: View {
         ))
 
         NewPiToolTranscriptView(item: NewPiTranscriptItem(
-            title: "Tool write",
-            body: "Error: Permission denied: /etc/hosts"
+            kind: .tool(name: "write", state: .completed(isError: true)),
+            body: "Permission denied: /etc/hosts"
+        ))
+    }
+    .padding()
+    .frame(width: 560)
+}
+
+/// 思考过程条目（BACKLOG-TYPED-TRANSCRIPT）：默认折叠的过程卡片，与工具卡同族视觉。
+/// 流式中头部显示进行中指示；展开显示完整推理文本（等宽、可选中）。
+/// 数据来自 typed kind（.thinking），不再依赖「思考不进转录」的旧边界。
+struct NewPiThinkingTranscriptView: View {
+    let item: NewPiTranscriptItem
+
+    @State private var isExpanded = false
+
+    private var isStreaming: Bool { item.isStreamingThinking }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 12)
+
+                    Image(systemName: "brain.head.profile")
+                        .foregroundStyle(.secondary)
+
+                    Text(isStreaming ? "Thinking…" : "Thinking")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.purple.opacity(0.12), in: Capsule())
+
+                    if isStreaming {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    if !isExpanded, let preview = collapsedPreview {
+                        Text(preview)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            if isExpanded {
+                Divider()
+                    .padding(.horizontal, 12)
+
+                ScrollView {
+                    Text(item.body.isEmpty ? " " : item.body)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                .frame(maxHeight: 280)
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+    }
+
+    /// 折叠态预览：最后一个非空行（思考是流式追加的，尾部最新）。
+    private var collapsedPreview: String? {
+        let lastLine = item.body
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .last(where: { !$0.isEmpty })
+        guard let lastLine else { return nil }
+        return String(lastLine.prefix(100))
+    }
+}
+
+#Preview("Thinking") {
+    VStack(alignment: .leading, spacing: 12) {
+        NewPiThinkingTranscriptView(item: NewPiTranscriptItem(
+            kind: .thinking(isStreaming: true),
+            body: "用户要求把 cherry-pick 到主分支…\n先看冲突范围…"
+        ))
+        NewPiThinkingTranscriptView(item: NewPiTranscriptItem(
+            kind: .thinking(isStreaming: false),
+            body: "第一步：确认分支差异。\n第二步：检查冲突文件。\n结论：冲突集中在 ChatView。"
         ))
     }
     .padding()

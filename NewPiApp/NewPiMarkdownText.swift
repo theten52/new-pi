@@ -218,16 +218,19 @@ struct NewPiTranscriptRow: View {
         }
     }
 
-    private var isUser: Bool { item.title == "You" }
+    private var isUser: Bool { item.isUser }
 
     private var usesMarkdown: Bool {
-        item.title == "NewPi" || item.title == "Summary"
+        item.isAssistantMarkdown
     }
 
     var body: some View {
         HStack {
             if item.isToolTranscript {
                 NewPiToolTranscriptView(item: item)
+                Spacer(minLength: 72)
+            } else if case .thinking = item.kind {
+                NewPiThinkingTranscriptView(item: item)
                 Spacer(minLength: 72)
             } else if isUser {
                 Spacer(minLength: 72)
@@ -312,7 +315,7 @@ struct NewPiTranscriptRow: View {
                 flushRendering: !isActiveStreamingItem,
                 onInitialRendered: onInitialRendered
             )
-        } else if item.title == "Error" {
+        } else if item.kind == .error {
             Text(item.body)
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
@@ -354,10 +357,10 @@ struct NewPiChatEmptyStateView: View {
 #Preview {
     VStack(alignment: .leading, spacing: 16) {
         NewPiTranscriptRow(item: NewPiTranscriptItem(
-            title: "NewPi",
+            kind: .assistant,
             body: "**Bold** and `code`\n\n```swift\nprint(\"hi\")\n```"
         ))
-        NewPiTranscriptRow(item: NewPiTranscriptItem(title: "You", body: "Plain user text"))
+        NewPiTranscriptRow(item: NewPiTranscriptItem(kind: .user, body: "Plain user text"))
     }
     .padding()
     .frame(width: 520)

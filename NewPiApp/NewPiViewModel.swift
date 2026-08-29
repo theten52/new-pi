@@ -4,29 +4,74 @@ import NewPiCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 工具执行状态（typed item 模型的结构化字段，替代原先从 body 文案解析 "Running …"）。
+enum NewPiToolState: Equatable, Sendable {
+    case running
+    case completed(isError: Bool)
+}
+
+/// 转录条目类型（BACKLOG-TYPED-TRANSCRIPT）。
+/// 类型是数据，显示文案是类型的派生——取代原先「把类型编码进 title/body 字符串、
+/// UI 反向解析文案」的 stringly-typed 写法（改文案会静默破坏类型识别、
+/// 结构化字段（工具名/状态/耗时）无处存放、thinking 无法入转录）。
+enum NewPiTranscriptItemKind: Equatable, Sendable {
+    case user
+    case assistant
+    case summary
+    case system
+    case error
+    /// 思考过程（reasoning/thinking delta）。isStreaming=true 表示仍在流入。
+    case thinking(isStreaming: Bool)
+    case tool(name: String, state: NewPiToolState)
+}
+
 struct NewPiTranscriptItem: Identifiable, Sendable {
     let id: UUID
-    let title: String
+    let kind: NewPiTranscriptItemKind
     let body: String
     let messageIndex: Int?
     let sessionEntryID: String?
 
     init(
         id: UUID = UUID(),
-        title: String,
+        kind: NewPiTranscriptItemKind,
         body: String,
         messageIndex: Int? = nil,
         sessionEntryID: String? = nil
     ) {
         self.id = id
-        self.title = title
+        self.kind = kind
         self.body = body
         self.messageIndex = messageIndex
         self.sessionEntryID = sessionEntryID
     }
 
+    /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
+    /// 只用于展示，不要再拿它做类型判断——类型判断一律用 kind。
+    var title: String {
+        switch kind {
+        case .user: "You"
+        case .assistant: "NewPi"
+        case .summary: "Summary"
+        case .system: "System"
+        case .error: "Error"
+        case .thinking: "Thinking"
+        case .tool(_, .running): "Tool"
+        case .tool(let name, .completed): "Tool \(name)"
+        }
+    }
+
+    var isUser: Bool { kind == .user }
+    /// assistant/summary：走 markdown 渲染的正文类条目。
+    var isAssistantMarkdown: Bool { kind == .assistant || kind == .summary }
+    /// 流式中的 thinking 条目（用于高度表：流式期不入行高缓存，避免中间态高度污染缓存）。
+    var isStreamingThinking: Bool {
+        if case .thinking(true) = kind { return true }
+        return false
+    }
+
     var canFork: Bool {
-        messageIndex != nil && (title == "You" || title == "NewPi" || title == "Summary")
+        messageIndex != nil && (kind == .user || kind == .assistant || kind == .summary)
     }
 }
 
@@ -71,6 +116,8 @@ final class SessionRuntime: ObservableObject {
     /// 流式文本增量合并缓冲：textDelta 先累积到这里，按节流间隔一次性合并进 transcript，
     /// 避免每个 delta 都触发 O(n) 字符串拼接与全量 UI 重渲染（见流式渲染优化）。
     var pendingStreamingDelta = ""
+    /// 流式思考增量缓冲：与 pendingStreamingDelta 同管线同节流，flush 时先入 thinking 条目。
+    var pendingThinkingDelta = ""
     var streamingFlushTask: Task<Void, Never>?
     /// 冷加载就绪门控：false 时面板隐藏内容、显示 Loading，等尾部 markdown 行上报首次高度
     /// （或超时）后才揭示。默认 true（新会话/保活命中零开销）。
@@ -170,18 +217,24 @@ private func makeTranscriptItems(
         let entryID = index < entryIDs.count ? entryIDs[index] : nil
         switch message {
         case let .user(user):
-            items.append(NewPiTranscriptItem(title: "You", body: user.content, messageIndex: index, sessionEntryID: entryID))
+            items.append(NewPiTranscriptItem(kind: .user, body: user.content, messageIndex: index, sessionEntryID: entryID))
         case let .assistant(assistant):
-            items.append(NewPiTranscriptItem(title: "NewPi", body: assistant.text, messageIndex: index, sessionEntryID: entryID))
+            // 思考过程入转录（BACKLOG-TYPED-TRANSCRIPT）：reasoningContent 非空时
+            // 在正文前补一条 thinking 条目。不带 messageIndex——它跟随正文条目进退，
+            // 不参与 fork 锚点，也避免与正文条目争抢 id 保留表的同一 messageIndex。
+            if !assistant.reasoningContent.isEmpty {
+                items.append(NewPiTranscriptItem(kind: .thinking(isStreaming: false), body: assistant.reasoningContent))
+            }
+            items.append(NewPiTranscriptItem(kind: .assistant, body: assistant.text, messageIndex: index, sessionEntryID: entryID))
         case let .toolResult(result):
             items.append(NewPiTranscriptItem(
-                title: "Tool \(result.toolName)",
-                body: result.isError ? "Error: \(result.content)" : result.content,
+                kind: .tool(name: result.toolName, state: .completed(isError: result.isError)),
+                body: result.content,
                 messageIndex: index,
                 sessionEntryID: entryID
             ))
         case let .compactionSummary(summary):
-            items.append(NewPiTranscriptItem(title: "Summary", body: summary, messageIndex: index, sessionEntryID: entryID))
+            items.append(NewPiTranscriptItem(kind: .summary, body: summary, messageIndex: index, sessionEntryID: entryID))
         }
     }
     return items
@@ -419,7 +472,7 @@ final class NewPiViewModel: ObservableObject {
                 // 不自动新建会话（BACKLOG-SESSION-MANUAL-CREATE）。
             }
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -512,7 +565,7 @@ final class NewPiViewModel: ObservableObject {
             activeProviderModel = profile.modelID
             activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -524,7 +577,7 @@ final class NewPiViewModel: ObservableObject {
             // 新默认 provider 只影响之后新建的会话；已有会话保持自己选择的
             // provider 不变（会话内切换走侧边栏 Picker，随 session header 持久化）。
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -555,7 +608,7 @@ final class NewPiViewModel: ObservableObject {
             await refreshProviderList()
             // 不自动新建会话、不改已有会话的 provider：新默认只作用于新建会话。
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -565,7 +618,7 @@ final class NewPiViewModel: ObservableObject {
             await refreshProviderList()
             // 不自动新建会话、不改已有会话的 provider：新默认只作用于新建会话。
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -590,7 +643,7 @@ final class NewPiViewModel: ObservableObject {
             }.value
             await beginSession(restoredContext: context, fileURL: fileURL)
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -626,7 +679,7 @@ final class NewPiViewModel: ObservableObject {
                 details: summary.fileURL.lastPathComponent
             )
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -657,7 +710,7 @@ final class NewPiViewModel: ObservableObject {
                 details: "\(summary.fileURL.lastPathComponent) → \(newLabel)"
             )
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
 
@@ -672,12 +725,12 @@ final class NewPiViewModel: ObservableObject {
             runtime.isForkedBranch = runtime.branchPointCount > 0
             reflectActive()
             appendTranscript(
-                title: "System",
+                kind: .system,
                 body: "Forked conversation from message \(index + 1). New replies continue on this branch.",
                 on: runtime
             )
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription, on: runtime)
+            appendTranscript(kind: .error, body: error.localizedDescription, on: runtime)
         }
     }
 
@@ -770,7 +823,7 @@ final class NewPiViewModel: ObservableObject {
         do {
             profile = try resolveProfile(for: restoredContext?.header)
         } catch {
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
             activeProviderReady = false
             return
         }
@@ -943,7 +996,7 @@ final class NewPiViewModel: ObservableObject {
                 message: "Failed to begin session",
                 details: error.localizedDescription
             )
-            appendTranscript(title: "Error", body: error.localizedDescription)
+            appendTranscript(kind: .error, body: error.localizedDescription)
             activeProviderReady = false
         }
     }
@@ -962,7 +1015,7 @@ final class NewPiViewModel: ObservableObject {
         guard !items.isEmpty else { return [] }
         var ids: Set<UUID> = []
         for item in items.suffix(scanLimit).reversed() {
-            guard item.title == "NewPi" || item.title == "Summary" else { continue }
+            guard item.isAssistantMarkdown else { continue }
             guard MarkdownRenderingCache.shared.height(for: item.body) == nil else { continue }
             ids.insert(item.id)
             if ids.count >= maxCount { break }
@@ -981,7 +1034,7 @@ final class NewPiViewModel: ObservableObject {
     func send(_ text: String) {
         guard let runtime = activeRuntime else {
             appendTranscript(
-                title: "System",
+                kind: .system,
                 body: projectURL == nil
                     ? "Open a project first."
                     : "Start a new session first (⇧⌘N)."
@@ -989,7 +1042,7 @@ final class NewPiViewModel: ObservableObject {
             return
         }
 
-        appendTranscript(title: "You", body: text, on: runtime)
+        appendTranscript(kind: .user, body: text, on: runtime)
         runtime.isStreaming = true
         runtime.agentActivity = .thinking
         reflectActive()
@@ -1120,7 +1173,7 @@ final class NewPiViewModel: ObservableObject {
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
             if case let .compactionSummary(summary) = message {
-                appendTranscript(title: "Summary", body: summary, on: runtime)
+                appendTranscript(kind: .summary, body: summary, on: runtime)
                 NewPiLogger.info(
                     category: "agent",
                     message: "Context compacted",
@@ -1137,6 +1190,7 @@ final class NewPiViewModel: ObservableObject {
             // 正文已完整：气泡提前切完成态渲染（去 ✦ 光标），不等 agentEnd。
             if case .assistant = message {
                 runtime.streamingBubbleComplete = true
+                freezeStreamingThinking(on: runtime)
             }
             hasVisibleStateChange = false
         case let .textDelta(delta):
@@ -1149,11 +1203,14 @@ final class NewPiViewModel: ObservableObject {
             }
             hasVisibleStateChange = false
         case let .thinkingDelta(delta):
+            // 思考过程入转录：缓冲后按与正文相同的节流节奏合并进 thinking 条目。
+            enqueueThinkingDelta(delta, on: runtime)
             NewPiLogger.debug(
                 category: "app",
                 message: "UI: reasoning delta",
                 details: "length=\(delta.count)"
             )
+            hasVisibleStateChange = false
         case let .toolApprovalRequired(request):
             runtime.pendingToolApproval = request
             NewPiLogger.info(
@@ -1167,27 +1224,27 @@ final class NewPiViewModel: ObservableObject {
             )
         case let .toolExecutionStart(_, name, arguments):
             runtime.agentActivity = .runningTool(name)
-            appendTranscript(title: "Tool", body: "Running \(name)…", on: runtime)
+            freezeStreamingThinking(on: runtime)
+            appendTranscript(kind: .tool(name: name, state: .running), body: "", on: runtime)
             NewPiLogger.info(
                 category: "app",
                 message: "UI: tool execution started",
                 details: "\(name)\n\(NewPiLogFormat.describeJSONValue(arguments))"
             )
         case let .toolExecutionEnd(_, name, result):
-            let body = result.isError ? "Error: \(result.content)" : result.content
+            // isError 入 kind（结构化），body 只存原始输出，不再拼接 "Error: " 前缀。
             if let lastIndex = runtime.transcript.indices.last,
-               runtime.transcript[lastIndex].title == "Tool",
-               runtime.transcript[lastIndex].body.hasPrefix("Running ") {
+               case .tool(_, .running) = runtime.transcript[lastIndex].kind {
                 let running = runtime.transcript[lastIndex]
                 runtime.transcript[lastIndex] = NewPiTranscriptItem(
                     id: running.id,
-                    title: "Tool \(name)",
-                    body: body,
+                    kind: .tool(name: name, state: .completed(isError: result.isError)),
+                    body: result.content,
                     messageIndex: running.messageIndex,
                     sessionEntryID: running.sessionEntryID
                 )
             } else {
-                appendTranscript(title: "Tool \(name)", body: body, on: runtime)
+                appendTranscript(kind: .tool(name: name, state: .completed(isError: result.isError)), body: result.content, on: runtime)
             }
             NewPiLogger.info(
                 category: "app",
@@ -1199,6 +1256,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.isStreaming = false
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
+            freezeStreamingThinking(on: runtime)
             NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
                 await appendTruncatedOutputNoticeIfNeeded(on: runtime)
@@ -1207,10 +1265,11 @@ final class NewPiViewModel: ObservableObject {
                 await refreshSessionList()
             }
         case let .error(error):
-            appendTranscript(title: "Error", body: error.localizedDescription, on: runtime)
+            appendTranscript(kind: .error, body: error.localizedDescription, on: runtime)
             runtime.isStreaming = false
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
+            freezeStreamingThinking(on: runtime)
             NewPiLogger.error(
                 category: "app",
                 message: "UI: agent error shown to user",
@@ -1262,7 +1321,7 @@ final class NewPiViewModel: ObservableObject {
                 return (sessionEntryID, item.id)
             }
         )
-        let streamingAssistantID = runtime.transcript.last(where: { $0.title == "NewPi" && $0.messageIndex == nil })?.id
+        let streamingAssistantID = runtime.transcript.last(where: { $0.kind == .assistant && $0.messageIndex == nil })?.id
         let lastAssistantMessageIndex = messages.lastIndex(where: {
             if case .assistant = $0 { return true }
             return false
@@ -1284,15 +1343,23 @@ final class NewPiViewModel: ObservableObject {
             case let .user(user):
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
-                    title: "You",
+                    kind: .user,
                     body: user.content,
                     messageIndex: index,
                     sessionEntryID: entryID
                 ))
             case let .assistant(assistant):
+                // 与 makeTranscriptItems 一致：reasoningContent 非空时在正文前补 thinking 条目
+                //（fresh id，不占 messageIndex，避免与正文争抢 id 保留表）。
+                if !assistant.reasoningContent.isEmpty {
+                    runtime.transcript.append(NewPiTranscriptItem(
+                        kind: .thinking(isStreaming: false),
+                        body: assistant.reasoningContent
+                    ))
+                }
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
-                    title: "NewPi",
+                    kind: .assistant,
                     body: assistant.text,
                     messageIndex: index,
                     sessionEntryID: entryID
@@ -1300,15 +1367,15 @@ final class NewPiViewModel: ObservableObject {
             case let .toolResult(result):
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
-                    title: "Tool \(result.toolName)",
-                    body: result.isError ? "Error: \(result.content)" : result.content,
+                    kind: .tool(name: result.toolName, state: .completed(isError: result.isError)),
+                    body: result.content,
                     messageIndex: index,
                     sessionEntryID: entryID
                 ))
             case let .compactionSummary(summary):
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
-                    title: "Summary",
+                    kind: .summary,
                     body: summary,
                     messageIndex: index,
                     sessionEntryID: entryID
@@ -1428,7 +1495,7 @@ final class NewPiViewModel: ObservableObject {
         let notice = assistant.reasoningContent.isEmpty
             ? "模型输出达到长度上限且未返回内容。请新开 session 或简化请求后重试。"
             : "模型推理达到长度上限，未完成最终回答或工具调用。请新开 session 或简化请求后重试。"
-        appendTranscript(title: "System", body: notice, on: runtime)
+        appendTranscript(kind: .system, body: notice, on: runtime)
         NewPiLogger.info(
             category: "app",
             message: "UI: truncated empty assistant output notice shown",
@@ -1448,8 +1515,8 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
-        let item = NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
+        let item = NewPiTranscriptItem(kind: kind, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
         if let r = activeRuntime {
             r.transcript.append(item)
             transcript = r.transcript
@@ -1459,8 +1526,8 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
-    private func appendTranscript(title: String, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
-        runtime.transcript.append(NewPiTranscriptItem(title: title, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
+        runtime.transcript.append(NewPiTranscriptItem(kind: kind, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
@@ -1482,6 +1549,16 @@ final class NewPiViewModel: ObservableObject {
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
     private func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
         runtime.pendingStreamingDelta += delta
+        scheduleStreamingFlush(on: runtime)
+    }
+
+    /// 缓冲一个流式思考增量（与正文共用同一刷新任务与节流节奏）。
+    private func enqueueThinkingDelta(_ delta: String, on runtime: SessionRuntime) {
+        runtime.pendingThinkingDelta += delta
+        scheduleStreamingFlush(on: runtime)
+    }
+
+    private func scheduleStreamingFlush(on runtime: SessionRuntime) {
         guard runtime.streamingFlushTask == nil else { return }
         let intervalMS = streamingFlushIntervalMS(for: runtime)
         runtime.streamingFlushTask = Task { @MainActor [weak runtime] in
@@ -1500,6 +1577,12 @@ final class NewPiViewModel: ObservableObject {
     private func flushStreamingDelta(on runtime: SessionRuntime) {
         runtime.streamingFlushTask?.cancel()
         runtime.streamingFlushTask = nil
+        // 思考增量先于正文 flush：时序上 thinkingDelta 总是先于同轮 textDelta 到达。
+        if !runtime.pendingThinkingDelta.isEmpty {
+            let delta = runtime.pendingThinkingDelta
+            runtime.pendingThinkingDelta = ""
+            appendOrUpdateThinking(delta, on: runtime)
+        }
         guard !runtime.pendingStreamingDelta.isEmpty else { return }
         let delta = runtime.pendingStreamingDelta
         runtime.pendingStreamingDelta = ""
@@ -1512,18 +1595,48 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
-        if let last = runtime.transcript.last, last.title == "NewPi" {
+    private func appendOrUpdateThinking(_ delta: String, on runtime: SessionRuntime) {
+        if let last = runtime.transcript.last, case .thinking(true) = last.kind {
             let index = runtime.transcript.count - 1
             runtime.transcript[index] = NewPiTranscriptItem(
                 id: last.id,
-                title: "NewPi",
+                kind: .thinking(isStreaming: true),
                 body: last.body + delta,
                 messageIndex: last.messageIndex,
                 sessionEntryID: last.sessionEntryID
             )
         } else {
-            runtime.transcript.append(NewPiTranscriptItem(title: "NewPi", body: delta))
+            runtime.transcript.append(NewPiTranscriptItem(kind: .thinking(isStreaming: true), body: delta))
+        }
+    }
+
+    /// 思考阶段结束（正文开始 / 工具开始 / 消息或 run 结束）：把尾部流式 thinking 条目冻结为完成态。
+    private func freezeStreamingThinking(on runtime: SessionRuntime) {
+        guard let last = runtime.transcript.last, case .thinking(true) = last.kind else { return }
+        let index = runtime.transcript.count - 1
+        runtime.transcript[index] = NewPiTranscriptItem(
+            id: last.id,
+            kind: .thinking(isStreaming: false),
+            body: last.body,
+            messageIndex: last.messageIndex,
+            sessionEntryID: last.sessionEntryID
+        )
+    }
+
+    private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
+        // 正文开始 = 思考阶段结束。
+        freezeStreamingThinking(on: runtime)
+        if let last = runtime.transcript.last, last.kind == .assistant {
+            let index = runtime.transcript.count - 1
+            runtime.transcript[index] = NewPiTranscriptItem(
+                id: last.id,
+                kind: .assistant,
+                body: last.body + delta,
+                messageIndex: last.messageIndex,
+                sessionEntryID: last.sessionEntryID
+            )
+        } else {
+            runtime.transcript.append(NewPiTranscriptItem(kind: .assistant, body: delta))
         }
         // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
         // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着

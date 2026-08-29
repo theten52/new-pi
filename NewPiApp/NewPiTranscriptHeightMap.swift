@@ -153,22 +153,30 @@ final class TranscriptHeightMap: ObservableObject {
         if item.isToolTranscript {
             return Row(id: item.id, height: Self.toolRowCollapsedHeight, measured: false)
         }
-        if item.title == "NewPi" || item.title == "Summary" {
+        if item.isAssistantMarkdown {
             let contentHeight = MarkdownRenderingCache.shared.height(for: item.body) ?? 44
             return Row(id: item.id, height: Self.headerHeight + Self.headerBodyGap + contentHeight, measured: false)
         }
         // 文本类行：先查行高缓存（实测持久化），未命中再用字体×宽度纯函数估算。
-        let isBubble = item.title == "You"
+        // 流式中的 thinking 行内容持续增长，不写行高缓存（避免中间态高度污染持久化缓存）。
+        let isBubble = item.isUser
         let key = "rowh|\(item.title)|\(item.body)"
         let width = isBubble ? bubbleWidth : plainWidth
-        if let cached = MarkdownRenderingCache.shared.height(for: key, width: width) {
+        if !item.isStreamingThinking,
+           let cached = MarkdownRenderingCache.shared.height(for: key, width: width) {
             return Row(id: item.id, height: cached, measured: true, cacheKey: key, cacheWidth: width)
         }
         let textHeight = Self.measureTextHeight(item.body, maxWidth: width)
         let total = isBubble
             ? Self.bubbleVerticalPadding + Self.headerHeight + Self.headerBodyGap + textHeight
             : Self.headerHeight + Self.headerBodyGap + textHeight
-        return Row(id: item.id, height: total, measured: false, cacheKey: key, cacheWidth: width)
+        return Row(
+            id: item.id,
+            height: total,
+            measured: false,
+            cacheKey: item.isStreamingThinking ? nil : key,
+            cacheWidth: item.isStreamingThinking ? nil : width
+        )
     }
 
     /// 文本在给定宽度下的换行高度（与 SwiftUI Text(.body) 排版近似，
