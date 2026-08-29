@@ -9,17 +9,31 @@
 > 调研目标：逐个阅读 13 个 Swift 仓库源码，聚焦 NewPi 最关心的 UI 展现：流式 Markdown、消息列表、高度、滚动恢复、rail 定位、工具过程与代码块。
 >
 > 结论状态：13 个仓库均已克隆并阅读源码；本文不再依赖 README 推断。
+>
+> **核验状态（2026-08-30）**：本文已通过源码级核验，见
+> [`ui-architecture-research-verification.md`](./ui-architecture-research-verification.md)。
+> 13 个 commit 与外部源码引用核验通过；关于 NewPi 自身现状的描述发现实质偏差，已在本文就地修正。
+> 修正处均标注 `[已核验]` 或 `[核验修正]`。
+>
+> **后续提案（2026-08-30）**：本文的建议均以「保留当前 per-message WKWebView 架构」为前提。
+> 若允许调整架构前提，另有一份目标架构提案主张**收拢为单文档 transcript**：
+> [`ui-target-architecture.md`](./ui-target-architecture.md)。
+> 该提案在若干点上**与本文结论相反**（最明显的是工具卡该原生还是该进文档，见其 §6.4），
+> 分歧源于架构前提不同，不是本文有错。两文对照阅读。
 
 ---
 
 ## 0. 先说结论
 
+> **[核验修正]** 本节初版把三项 NewPi 已落地的能力同时写进了"待借鉴"，与 §4/§5/§7 自相矛盾。
+> 现按"已完成 / 待办"重新表述。净待办清单见 §4.0 与核验报告 §5。
+
 NewPi 当前方向是对的，而且比大多数参考项目更接近问题的核心：
 
-1. **不要放弃 WKWebView 路线**。NewPi 已经有本地资源、块级增量、render-once / replay-forever、高度预热和滚动转发；这比 OmniChat 的“每次重新 load HTML”和 markdown-webview 的“每次全量 innerHTML”更强。
-2. **继续把渲染粒度从 message 下沉到 block**。最值得借鉴的是 SwiftChat 的 `completedChunks + workingBuffer`，以及 osaurus 的稳定 block ID + 只更新变化 cell。
-3. **流式 Markdown 需要“尾部规范化”**。osaurus 的 `StreamingMarkdownBalancer` 比 SwiftStreamingMarkdown 当前默认路径更实用：只处理最后一个段落，避免未闭合 bold/code/list marker 造成视觉抖动。
-4. **高度表是 NewPi 的正确资产**。SwiftChat 的两级高度缓存和 osaurus 的 block 高度缓存都验证了这个方向；NewPi 应继续把高度缓存 key 细化到 `content + width + theme + renderer version`。
+1. **不要放弃 WKWebView 路线**。NewPi 已经有本地资源、块级增量、render-once / replay-forever、高度预热和滚动转发；这比 OmniChat 的“每次重新 load HTML”和 markdown-webview 的“每次全量 innerHTML”更强。**[已核验]**
+2. **渲染粒度已经在 block 级，缺的是显式 identity**。`renderStreaming()` 已实现公共前缀冻结对齐 + 只重渲染尾块 + 分叉时全量兜底（`markdown-renderer.js:405-462`）**[已核验]**。SwiftChat 的 `completedChunks + workingBuffer` 与 osaurus 的稳定 block ID 值得借鉴的**只剩显式 ID 这一层**——当前靠数组下标 + source 逐字节比对做隐式对齐，属可选加固而非缺口。
+3. **流式尾部规范化已经实现，且优于参考实现**。`repairTailSource()`（`markdown-renderer.js:237-297`）**[核验修正：初版误列为待办]** 处理未闭合围栏 / 行内代码 / `**` / `__` / `~~`，并且先剥离已闭合代码段、要求标记后紧跟非空白才修复——osaurus 的 `StreamingMarkdownBalancer` 自己的注释承认它的朴素 `**` 计数在这两种场景下会多补虚拟闭合符（`StreamingMarkdownBalancer.swift:87-89`）。此项无需再借鉴。
+4. **高度表是 NewPi 的正确资产，但 key 有实际隐患**。SwiftChat 的两级高度缓存和 osaurus 的 block 高度缓存都验证了这个方向。**[核验修正]** 真正的问题不是"引入 rendererVersion"——NewPi 已有更好的 `engineFingerprint()`（对整个 `MarkdownRenderer/` 目录 js/css 做 SHA256，无需手工维护版本号）；问题是**它只约束了 HTML 产物查询、没有约束高度查询**，改动渲染器后旧高度仍会命中。详见 §4 P0 与核验报告 §4.1。
 5. **滚动必须显式建模**。参考 osaurus 的规则：snapshot 前保存锚点，snapshot 后恢复；只有用户原本在底部才 pin-to-bottom；程序滚动要能取消用户滚动意图。
 6. **工具过程不要混进正文 Markdown**。MLXCode、osaurus、Agent 都把工具执行、diff、活动日志做成独立卡片 / timeline / activity log。NewPi 也应把“语义消息”和“过程事件”分层。
 7. **简单 SwiftUI chat 示例不能解决 NewPi 的问题**。ChatGPTSwiftUI、AICat 这类项目的历史规模、富文本复杂度和 rail 需求远低于 NewPi；它们只适合作为 baseline 和反面参照。
@@ -47,6 +61,14 @@ NewPi 当前方向是对的，而且比大多数参考项目更接近问题的�
 | 11 | Panl/AICat | `9f978cd` | SwiftUI multiplatform chat | 产品层结构、MarkdownUI/Splash、性能取舍 |
 | 12 | preternatural-explore/mlx-swift-chat | `b0763e6` | SwiftUI prompt/completion + model manager | 模型加载/生成进度状态，而非 chat 渲染 |
 | 13 | gonzalezreal/swift-markdown-ui | `8371aeb` | cmark AST → SwiftUI blocks | Markdown API、主题、代码块扩展点；维护模式 |
+
+**[核验修正] 路径约定**：下文 §2 各节的源码引用是「仓库内路径」，需拼在 `research-repos/<仓库名>/` 之后。
+其中 SwiftChat 与 Agent 两个仓库的源码在同名子目录下，引用时少写了一层，实际为：
+
+| 本文写法 | 实际路径 |
+|---|---|
+| `SwiftChat/Services/…`、`SwiftChat/Views/…` | `research-repos/SwiftChat/SwiftChat/…` |
+| `Agent/Views/ActivityLog/…` | `research-repos/Agent/Agent/Views/ActivityLog/…` |
 
 目录索引：
 
@@ -97,11 +119,27 @@ AsyncStream<String> complete snapshot
 - `MarkdownRenderable` 是 `Identifiable`，每个 paragraph/code/table/list 都有 id：`Sources/MarkdownText/Models/MarkdownRenderable.swift:16-61`
 - `BlockView` 用 `ForEach(renderables)` 渲染块：`Sources/MarkdownText/UI/BlockView.swift:19-24`
 
-需要注意：它的 id 来自 `Markup.id`，而 `Markup.id` 是从根节点到当前节点的 parent/index 路径，不是 parser 内置的持久 UUID：
+需要注意：它的 id 来自 `Markup.id`，不是 parser 内置的持久 UUID。
+**[核验修正]** 初版把它描述为"从根节点到当前节点的 parent/index 路径"，但实际实现比这更弱
+（`Sources/MarkdownText/Models/Markup+ID.swift:11-19`）：
 
-- `Sources/MarkdownText/Models/Markup+ID.swift:9-20`
+```swift
+var id: String {
+  var parentNode = self.parent
+  var path = [String]()
+  while parentNode != nil {
+    path.append(String(self.indexInParent))   // ← 始终是 self，从不推进到 parentNode
+    parentNode = parentNode?.parent
+  }
+  return path.joined(separator: "-")
+}
+```
 
-因此它适合“结构稳定的前缀”，不能盲目标榜为跨任意 re-parse 的永久身份。NewPi 应把 **ordinal + block kind + frozen content fingerprint** 组合起来，而不是只复制 path id。
+循环体内 append 的永远是 `self.indexInParent`，游标 `parentNode` 只用于控制循环次数。
+所以 id 实际是**同一个数字重复 depth 次**（深度 3、索引 2 的节点得到 `"2-2-2"`），并非真正的路径——
+同深度同 `indexInParent` 的不同子树节点会直接**碰撞**。
+
+因此它连“结构稳定的前缀”都不能可靠保证，更不能标榜为跨任意 re-parse 的永久身份。NewPi 应把 **ordinal + block kind + frozen content fingerprint** 组合起来，而不是只复制 path id。
 
 **② 推测性重写能力存在，但默认流式路径没有启用**
 
@@ -216,9 +254,15 @@ StreamingDocumentView(
 
 **② 代码块按语言路由**
 
-`markdownBlockStyle(\.codeBlock)` 中，如果语言是 `json/chart/chartjs/echarts/highcharts/vega-lite`，会尝试解析 chart spec 并渲染 `USpecChartView`；解析失败则回退普通代码块：
+`markdownBlockStyle(\.codeBlock)` 中，如果语言命中 chart 语言表，会尝试解析 chart spec 并渲染 `USpecChartView`；解析失败则回退普通代码块：
 
-- `Sources/StreamChatAI/StreamingMessageView.swift:34-55`
+- 语言表（**[核验修正]** 共 7 项，初版漏写末项 `vegalite`）：`Sources/StreamChatAI/StreamingMessageView.swift:22`
+
+  ```swift
+  ["json", "chart", "chartjs", "echarts", "highcharts", "vega-lite", "vegalite"]
+  ```
+
+- 路由实现：`Sources/StreamChatAI/StreamingMessageView.swift:34-55`
 
 NewPi 可以借鉴为：
 
@@ -685,14 +729,15 @@ topmost visible row + offset from row top
 
 pin-to-bottom：
 
-- bottom threshold 50pt
+- bottom threshold 50pt —— **[核验修正]** 该常量在 `ScrollAnchorManager.swift:30`（`var bottomThreshold: CGFloat = 50`），
+  初版误归到下面的 `120-162` 行段
 
 streaming 高频更新：
 
 - 目标已在 1pt 内则跳过
 - coalesce 到下一个 runloop
 
-见 `Packages/OsaurusCore/Views/Chat/ScrollAnchorManager.swift:120-162`。
+见 `Packages/OsaurusCore/Views/Chat/ScrollAnchorManager.swift:120-162`（1pt 跳过在 `:134`）。
 
 post-snapshot 规则：
 
@@ -1412,7 +1457,32 @@ New development is happening in Textual.
 
 ## 4. 对 NewPi 的落地建议
 
+### 4.0 现状台账 **[核验修正]**
+
+> 初版本节的建议是在**未核对 NewPi 实际代码**的前提下写的，其中三项已经落地。
+> 直接按 §5「实现顺序」执行会重做 `renderStreaming()` 与 `repairTailSource()`。
+> 下表为交叉验证后的净结论，逐条依据见
+> [核验报告 §3 / §4](./ui-architecture-research-verification.md)。
+
+| 建议项 | 状态 | 依据 |
+|---|---|---|
+| 块级增量渲染 + 冻结前缀对齐 | ✅ 已完成 | `markdown-renderer.js:405-462` |
+| 流式尾部规范化（tail-only normalization） | ✅ 已完成，优于参考实现 | `markdown-renderer.js:237-297` |
+| rail pending jump + 有界校正 | ✅ 已完成 | `NewPiChatView.swift:58-63,403-424` |
+| 本地资源 / render-once replay / ResizeObserver 高度桥 | ✅ 已完成 | `markdown-renderer.js:91,102,147,175` |
+| 高度预热 / 手动窗口化 + 高度表 | ✅ 已完成 | `NewPiMarkdownHeightPreheater.swift`、`NewPiChatView.swift:45-46,97` |
+| **显式滚动状态机** | ⬜ 待办 · 价值最高 | 4 个写入点 + 6 个 onChange 驱动，无统一意图状态 |
+| **engineFingerprint 接进高度查询** | ⬜ 待办 · 有实际隐患 | `height(for:)` 无引擎校验（`NewPiMarkdownWebRenderer.swift:60-78`） |
+| **高度表下沉到 block 级** | ⬜ 待办 | 当前按整条 `item.body` 算 SHA256；JS 高度上报不带 blockID |
+| 块的显式 `RenderBlockID` | ◻︎ 可选加固 | 现为下标 + source 比对的隐式 identity，分叉时有全量兜底 |
+
+以下 P0–P3 保留完整设计推导（对未完成项仍然有效，对已完成项可作为回溯依据），
+但**请先读上表再排期**。
+
 ### P0：建立稳定的 RenderBlock 模型
+
+> **[核验状态]** ◻︎ 可选加固，非缺口。`renderStreaming()` 已用「数组下标 + source 逐字节比对」
+> 做隐式对齐，并在冻结前缀分叉时退回全量重渲染。下面的显式 ID 方案是加固，不是从零补齐。
 
 不要让 UI 直接消费原始 transcript 字符串。建议分成：
 
@@ -1460,6 +1530,14 @@ complete 时: tail 冻结，生成最终 digest，下一帧从 tail 变成 froze
 
 ### P0：流式 Markdown 只更新 tail
 
+> **[核验修正]** ✅ 本项已完成，保留于此仅作设计回溯。
+> `renderStreaming()`（`markdown-renderer.js:405-462`）已实现下面整条管线；
+> `repairTailSource()`（`:237-297`）已实现下面的尾部规范化，且在两点上比 osaurus 更保守：
+> 先剥离已闭合的行内代码段再计数（避免把代码里的反引号当标记）、
+> 要求标记最后一次出现后紧跟非空白才补闭合（`2 ** 3` 不误判为加粗）。
+> osaurus 的注释自承其朴素 `**` 计数在这两种场景下会多补虚拟闭合符
+> （`StreamingMarkdownBalancer.swift:87-89`）。**此项不需要再借鉴 osaurus。**
+
 推荐管线：
 
 ```text
@@ -1484,16 +1562,33 @@ SwiftStreamingMarkdown 的 partial emphasis/table rewriter 可以作为第二阶
 
 ### P0：高度缓存 key
 
-建议：
+> **[核验修正]** ⬜ 待办，但**方案需要改**。初版建议引入手工维护的 `rendererVersion: Int`，
+> 而 NewPi 已有更好的机制：`NewPiMarkdownWebDocument.engineFingerprint()`
+> （`NewPiMarkdownWebRenderer.swift:313-333`）对整个 `MarkdownRenderer/` 目录的 js/css
+> 做内容 SHA256，渲染器或样式任何变化都会改变指纹，**无需手工维护版本号**。
+>
+> 真正的缺陷是它只接进了产物查询、没有接进高度查询：
+>
+> | 查询 | 引擎校验 | 位置 |
+> |---|---|---|
+> | `renderedHTML(for:engine:)` | ✅ `entry.engine == engine` | `NewPiMarkdownWebRenderer.swift:101-110` |
+> | `height(for:)` / `height(for:width:)` | ❌ 无 | `NewPiMarkdownWebRenderer.swift:60-78` |
+>
+> **后果**：改动渲染器 js/css 后，HTML 产物会正确失效重渲染，但**旧高度仍然命中**——
+> 高度表、窗口占位、rail y 坐标会全部基于过期几何。
+>
+> 因此正确动作是**把已有的 `engineFingerprint` 接进高度查询路径**，而不是新造版本号。
+> theme / fontScale 则确实完全不在 key 内（当前 key = 宽度桶 + 内容 SHA256），可一并纳入。
+
+建议（`rendererVersion` / `markdownEngineVersion` 两项以现有 `engineFingerprint` 替代）：
 
 ```swift
 struct MarkdownLayoutKey: Hashable {
-    let contentDigest: String
-    let width: CGFloat
-    let themeID: String
-    let fontScale: CGFloat
-    let rendererVersion: Int
-    let markdownEngineVersion: Int
+    let contentDigest: String     // 已有：内容 SHA256
+    let width: CGFloat            // 已有：宽度桶
+    let engineFingerprint: String // 已有机制，待接入高度查询
+    let themeID: String           // 缺失
+    let fontScale: CGFloat        // 缺失
 }
 
 struct MarkdownLayoutValue {
@@ -1516,9 +1611,26 @@ struct MarkdownLayoutValue {
 
 - SwiftChat：IndexPath cache + message id cache
 - osaurus：width/theme change 全量失效，block 级局部失效
-- NewPi：已有 NSCache + preheater，应继续保留 rendererVersion
+- NewPi：**[核验修正]** 初版写"已有 NSCache"不准。实际是嵌套字典 `buckets: [String: [String: Entry]]`
+  + `lastAccess` 做 LRU，并**持久化**到 `~/.new-pi/agent/markdown-height-cache.json`
+  （`NewPiMarkdownWebRenderer.swift:43-44,55-56`）。差异有实质意义：`NSCache` 在内存压力下自动驱逐
+  且不跨启动存活，而当前实现跨启动持久——这正是冷恢复预热能生效的前提。
 
 ### P1：显式滚动状态机
+
+> **[核验状态]** ⬜ 待办，**三项待办中价值最高**。
+> `NewPiChatScrollHelper.swift` 仅 101 行，实质是 per-session 锚点持久化（`Entry: rowID/delta/offset`）
+> 与两个 PreferenceKey，**不含滚动意图状态**。实际滚动写入分散在 `NewPiChatView.swift`：
+>
+> ```text
+> 写入点：:216 (rail jump)  :371 (冷启动恢复)  :423 (rail 有界校正)  :452 (钉底)
+> 驱动：  :283 transcript.map(\.id)   :286 geometry.size.width   :301 runtime.isStreaming
+>         :312 transcript.last?.id    :316 transcript.last?.body  :320 composerHeight
+> ```
+>
+> 代码注释本身已记录过这类竞争的症状：`:65`「自动钉底会在恢复 scrollTo 落地后把会话又拽回底部——
+> 原位恢复失效的根因」、`:364`「冷启动时内容布局/门控/钉底都在并发进行，单次 scrollTo 可能被时序吞掉」。
+> 下面的状态机与"同一时刻只有一个 writer"约束正是针对这一点。
 
 建议：
 
@@ -1561,12 +1673,16 @@ rail y = heightTable.prefixHeight(before: target)
 - ScrollViewReader id anchor
 - 延时 scrollTo
 
-需要补强：
+需要补强 **[核验修正：后两项已完成]**：
 
-- block 级高度表
-- preheat 完成度状态
-- rail jump 后的有限次数高度校正
-- 目标高度未 ready 时的 pending jump 状态
+- ⬜ block 级高度表 —— 待办，当前按整条 `item.body` 算 SHA256
+  （`NewPiMarkdownHeightPreheater.swift:49-52`、`NewPiMarkdownWebRenderer.swift:158`），
+  JS 侧也只上报 root 整体高度、不带 blockID
+- ⬜ preheat 完成度状态 —— 待办
+- ✅ rail jump 后的有限次数高度校正 —— 已完成：`applyPendingRailCorrection()`
+  （`NewPiChatView.swift:403-424`），且用户接管滚动时主动放弃不打断
+- ✅ 目标高度未 ready 时的 pending jump 状态 —— 已完成：`RailTarget` + `pendingRailTarget`
+  （`NewPiChatView.swift:58-63`）
 
 ### P1：过程事件与语义消息分层
 
@@ -1675,7 +1791,23 @@ sessionID
 
 ## 5. 建议的实现顺序
 
-### 第一步：抽出纯 Swift MarkdownBlockBuilder
+> **[核验修正] 本节顺序已作废，按下表执行。**
+> 初版第一、二步描述的能力已在 JS 侧落地（见 §4.0 台账），照原顺序执行会重做既有代码。
+> 修正后的顺序：
+>
+> | 顺序 | 事项 | 对应初版 |
+> |---|---|---|
+> | 1 | 滚动写入收敛为显式状态机（4 写入点 + 6 驱动） | 原第四步 |
+> | 2 | `engineFingerprint` 接进 `height(for:)`；theme/fontScale 纳入 key | 原第三步（部分） |
+> | 3 | 高度上报带 blockID，高度表下沉到 block 级 | 原第三步 |
+> | 4 | 工具过程卡片化 | 原第五步（不变） |
+> | — | ~~抽出 MarkdownBlockBuilder~~ | 原第一步：JS 侧 `splitBlocks` 已承担 |
+> | — | ~~JS API 改为 block patch~~ | 原第二步：`renderStreaming` 已是 block patch |
+>
+> 原第一步若要做，价值在于**把切块逻辑从 JS 挪到 Swift 以获得单元测试覆盖**
+> （当前 `splitBlocks` / `repairTailSource` 无 Swift 侧测试），而不是"补齐缺失能力"。
+
+### 第一步（已由 JS 侧承担）：抽出纯 Swift MarkdownBlockBuilder
 
 目标：
 
@@ -1694,9 +1826,15 @@ finish stream → 所有 block frozen，digest 稳定
 replay same text → block identity/digest 一致
 ```
 
-### 第二步：JS API 从 document render 改为 block patch
+### 第二步（已完成）：JS API 从 document render 改为 block patch
 
-建议接口：
+> **[核验修正]** ✅ `window.renderMarkdown(source, {streaming: true})` → `renderStreaming()`
+> 已经是 block patch：冻结前缀不重建 DOM、只替换尾块、分叉时全量兜底、源变短时裁尾节点。
+> 下面的 `upsertBlock`/`freezeBlock` 接口形态是另一种设计（Swift 侧持块），
+> 当前实现选择"传完整 source、JS 侧切块比对"，二者等效；**唯一真实差距是 height report 不带 blockID**
+> （见修正后的第 3 项）。
+
+建议接口（供参考，非待办）：
 
 ```js
 window.newPi.upsertBlock({
@@ -1721,7 +1859,7 @@ window.newPi.freezeBlock({
 - height report 带 blockID
 - rendererVersion 不匹配时拒绝 replay
 
-### 第三步：高度表接入 blockID
+### 第三步（修正后排第 2–3 位）：高度表接入 blockID
 
 ```text
 messageHeight = sum(blockHeights) + blockSpacing
@@ -1729,17 +1867,26 @@ messageHeight = sum(blockHeights) + blockSpacing
 
 rail 与恢复锚点都从这张表读取。
 
-### 第四步：完成滚动状态机
+> **[核验补充]** 本步实际含两件可拆分的事，优先级不同：
+>
+> - **先做**：把已有的 `engineFingerprint` 接进 `height(for:)`（当前无引擎校验，改渲染器后旧高度仍命中，
+>   有实际隐患）——见 §4 P0「高度缓存 key」
+> - **后做**：JS 高度上报带 blockID、高度表下沉到 block 级（当前按整条 `item.body` 算 SHA256）
+
+### 第四步（修正后排第 1 位）：完成滚动状态机
 
 先收敛 writer，再处理体验细节：
 
 1. 禁止 restore 期间 bottom follow
 2. streaming follow 只在原本 bottom 时生效
-3. rail jump pending until height ready
+3. ~~rail jump pending until height ready~~ —— **[核验修正]** ✅ 已完成，见 §4 P1「rail 继续基于高度表」
 4. programmatic scroll 差值 <1pt 跳过
 5. 高频 scroll coalesce
 
-### 第五步：工具过程卡片化
+> **[核验补充]** 这是三项待办中价值最高的一项：当前 4 个滚动写入点由 6 个 `onChange` 驱动，
+> 无统一意图状态，代码注释已记录过由此产生的"恢复被钉底覆盖""冷启动 scrollTo 被时序吞掉"两类症状。
+
+### 第五步（修正后排第 4 位）：工具过程卡片化
 
 从最痛的工具输出开始：
 
@@ -1819,10 +1966,59 @@ NewPi 最合理的路线不是推倒重来，而是：
 ```text
 保留 WKWebView document renderer
 保留高度表 + 手动窗口化
-补上稳定 block identity
-补上 tail-only normalization/update
-补上显式 scroll state machine
+保留已有的块级增量与 tail-only normalization（已优于参考实现）
+补上显式 scroll state machine          ← 价值最高
+把 engineFingerprint 接进高度查询       ← 有实际隐患
+把高度表下沉到 block 级
 把工具过程移出正文，做成轻量原生卡片
 ```
 
+> **[核验修正]** 初版此处写"补上稳定 block identity / 补上 tail-only normalization/update"，
+> 与 §0 第 1 条自相矛盾，且与代码不符：tail-only normalization 已完成
+> （`markdown-renderer.js:237-297`），block identity 为隐式但有全量兜底，属可选加固。
+> 完整台账见 §4.0 与 [核验报告 §5](./ui-architecture-research-verification.md)。
+
 这既符合 NewPi 已经付出的工程投入，也吸收了 13 个项目中真正经过源码验证的经验。
+
+---
+
+## 8. 核验记录
+
+本文已于 2026-08-30 通过源码级核验，核验范围、逐条比对结果与全部修正依据见：
+
+**[`ui-architecture-research-verification.md`](./ui-architecture-research-verification.md)**
+
+核验摘要：
+
+- 13 个 commit SHA 与 remote URL 全部精确匹配
+- 外部源码引用（路径 / 行号 / 数值）抽查覆盖 13 个仓库，基本准确；3 处小疏漏已在本文修正
+- 本文主动标注的 3 处"注释/README 与代码不符"的修正全部成立，其中 `Markup.id` 一处比初版写的更严重
+- **关于 NewPi 自身现状的描述发现实质偏差**：3 项已落地能力被列为待办，已在 §0 / §4.0 / §4 / §5 / §7 修正
+
+---
+
+## 9. 目标架构提案（架构前提不同）
+
+本文全部建议以**保留当前 per-message WKWebView 架构**为前提，
+在该前提下净待办为 §4.0 台账中的三项。
+
+若允许调整前提，另有一份提案主张把整条 transcript 收拢进**单个 WKWebView**，
+让 Web 引擎同时拥有布局权与滚动权：
+
+**[`ui-target-architecture.md`](./ui-target-architecture.md)**
+
+其核心论点是：本文 §4.0 的三项待办（滚动状态机、engineFingerprint、block 级高度表）
+**都是「原生持布局权、Web 持内容尺寸」这条异步边界的补偿工作**；
+移除该边界后其中两项直接消失，同时换来当前架构做不到的三项能力——
+跨消息文本选择、全文查找、诚实的滚动条。
+
+需注意该提案有两处与本文结论相反，分歧均源于架构前提：
+
+| 议题 | 本文（当前架构下） | 目标架构提案 |
+|---|---|---|
+| 工具卡的实现 | 原生轻量视图（避免再开 WebView） | 文档内组件（原生视图插进流会重造边界） |
+| osaurus 的借鉴地位 | 借鉴价值第 1 位 | 参考实现质量第 1，但不作为目标架构（其复杂度多在重新实现浏览器已有机制） |
+
+该提案已用本机 WebKit 实测了所依赖的平台能力（`content-visibility` ✅ / `overflow-anchor` ❌ 等），
+并明确标注其最大未验证假设为「单文档在 500 turn 规模下的性能」，
+建议以一次 spike 作为 go/no-go 闸门。
