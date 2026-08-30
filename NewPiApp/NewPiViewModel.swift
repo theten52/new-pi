@@ -817,9 +817,6 @@ final class NewPiViewModel: ObservableObject {
 
     func archiveSession(_ summary: SessionSummary) async {
         do {
-            try await Task.detached(priority: .userInitiated) {
-                try SessionManager.setArchived(true, for: summary.fileURL)
-            }.value
             let wasCurrent = summary.fileURL == currentSessionFileURL
             // 归档的是当前会话：结束后自动切到同项目的下一个会话——
             // 优先它在列表中的下一条；归档的是末条则回退到最新一条。
@@ -835,8 +832,15 @@ final class NewPiViewModel: ObservableObject {
                 if nextSummary == nil {
                     nextSummary = savedSessions.first(where: { $0.id != summary.id })
                 }
+                // 先关闭当前会话（shutdown 会把 pending 内容落盘，header.archived 仍为 false），
+                // 再打归档标记。否则 setArchived 之后 shutdown 的 persistIfNeeded 会用内存中
+                // 缓存的 header（archived=false）重新保存，把归档标记覆盖掉——
+                // 表现为「归档的会话不会立即从列表消失」（ARCHIVE-IMMEDIATE-REFRESH）。
                 await closeActiveSession()
             }
+            try await Task.detached(priority: .userInitiated) {
+                try SessionManager.setArchived(true, for: summary.fileURL)
+            }.value
             await refreshSessionList()
             if let nextSummary {
                 await resumeSession(nextSummary)
