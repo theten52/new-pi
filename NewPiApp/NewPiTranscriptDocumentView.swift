@@ -69,9 +69,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
-        context.coordinator.attach(webView)
+        // 顺序敏感：attach 会把 coordinator.sessionID 注入 controller（滚动锚点持久化依赖），
+        // 必须先赋值再 attach，否则 controller.sessionID 永远为 nil、位置不落盘（冷启动无法恢复）。
         context.coordinator.sessionID = runtime.sessionID
         context.coordinator.pendingRestoreEntry = restoreEntry
+        context.coordinator.attach(webView)
         context.coordinator.loadShell()
         return webView
     }

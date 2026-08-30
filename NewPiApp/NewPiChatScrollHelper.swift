@@ -54,6 +54,18 @@ final class ScrollPositionStore {
         fileURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".new-pi/agent/scroll-positions.json")
         load()
+        // 退出前强制落盘：滚动写入是 2s 防抖的，退出前最后一段滚动不刷盘，
+        // 冷启动恢复会拿到旧位置。
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.saveWorkItem?.cancel()
+                self?.saveNow()
+            }
+        }
     }
 
     func entry(for sessionID: UUID) -> Entry? {
