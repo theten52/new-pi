@@ -288,21 +288,20 @@
         return;
       }
       this.pending = true;
-      const ric = window.requestIdleCallback || function (cb) {
-        return setTimeout(function () {
-          cb({ timeRemaining: function () { return 10; } });
-        }, 50);
-      };
+      // 直接用 setTimeout(0) 连续推进：预热完成度决定滚动体感的下限，
+      // rIC 在 WebKit 可能迟迟不触发；chunk 之间的 0ms 让出已足够渲染线程呼吸。
       const self = this;
-      ric(function (deadline) {
+      setTimeout(function () {
         self.pending = false;
-        self.runChunk(deadline);
-      }, { timeout: 300 });
+        self.runChunk();
+      }, 0);
     },
 
     runChunk: function () {
-      // 用户滚动/跳转/恢复中让路（避免滚动中塞布局工作），稍后再试。
-      if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget" || Scroll.intent === "restoringAnchor") {
+      // 用户主动滚动/跳转中让路（避免滚动中塞布局工作），稍后再试。
+      // restoringAnchor 不让路：恢复 RAF 每帧都在校正锚点，预热的高度变化
+      // 会被同一纪律覆盖——否则会白等 3s 恢复窗口，用户恰在这几秒内开始滚动。
+      if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
         this.schedule();
         return;
       }
@@ -339,7 +338,7 @@
       const chunk = [kids[startIdx]];
       let up = startIdx - 1;
       let down = startIdx + 1;
-      const chunkSize = 6;
+      const chunkSize = 10;
       while (chunk.length < chunkSize && (up >= 0 || down < kids.length)) {
         if (down < kids.length) { chunk.push(kids[down]); down += 1; }
         if (chunk.length < chunkSize && up >= 0) { chunk.push(kids[up]); up -= 1; }
@@ -410,6 +409,11 @@
 
   window.addEventListener("scroll", function () {
     Poller.arm();
+    // scroll 事件在当帧布局后、绘制前分发：这里直接轮询一次，高度平移可同帧抵消，
+    // 避免 rAF（下一帧布局前才跑）晚一拍留下单帧闪动。
+    if (Scroll.intent === "userScrolling" || Scroll.intent === "idle") {
+      Poller.pollAboveViewport();
+    }
     if (scrollReportTimer === null) {
       scrollReportTimer = window.setTimeout(function () {
         scrollReportTimer = null;

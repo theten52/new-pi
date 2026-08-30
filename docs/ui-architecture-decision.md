@@ -179,8 +179,13 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > 占位高=真实高，平移从源头消失。
 > 教训：scroll 补偿的输入信号必须是「内容几何变化」本身，不能混入 scrollY 差分。
 > 验证指标：可见跳变帧 = 无滚动（dy=0）时锚定元素屏上位移 |dt| > 15px
-> （/tmp/pwtest/webkit-metric.cjs）；最终 Playwright WebKit 复测：上滚 2 帧 ≤24px、
-> 双向滚动 0 帧；对照组（关闭 CV）为 0。
+> （/tmp/pwtest/webkit-metric*.cjs）。
+> **第三轮（用户实测收尾）**：长会话打开头几秒的短暂跳动——原因是 restoreAnchor 的
+> 3s 校正窗口内 Warmer 让路（预热停摆）+ rIC 调度太慢 + rAF 轮询比当帧布局晚一拍。
+> 修正：恢复窗口内允许预热（恢复 RAF 每帧校正，与预热同纪律）；Warmer 改 setTimeout(0)
+> 连续推进（chunk 10）；scroll 事件处理器里直接轮询一次（scroll 事件在当帧布局后、
+> 绘制前分发，可同帧抵消）。复测三场景全零跳变：即时滚动（恢复窗口内）/ 延迟上滚 /
+> 双向混合；对照组（关闭 CV）为 0。
 
 沿用提案 §7 的四阶段，补充三点修正：
 
