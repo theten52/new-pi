@@ -165,16 +165,22 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > feature flag 本身。发送消息 = 显式钉底意图。
 > 顺带关闭 BACKLOG-SCROLL-LAG（多滚动机制叠加的痼疾随遗留路径整体消失）。
 >
-> **补充（2026-09）：布局锚定——Watchdog 帧级补偿 + 真实高度固化**。
+> **补充（2026-09）：布局锚定——三轮迭代记录**。
 > 用户实测往上滚时页面冷不丁跳位置：根因是 content-visibility 估算高 ↔ 真实高的
-> 切换；WebKit 无 scroll anchoring（`overflow-anchor` 不支持）。**第一版 ResizeObserver
-> 补偿方案在真机无效**——Playwright WebKit（26.5）实测：CV 占位高↔真实高切换
-> 完全不触发 RO（探针 30 次滚动 0 事件），Chromium 正常。最终方案（`transcript-document.js`）：
-> ① Watchdog：滚动活跃期（wheel/scroll 事件激活，停后延 500ms）逐帧比对视口顶部
-> 锚定条目的文档位置，不能被 scrollY 解释的部分 scrollBy 抵消；
-> ② 高度固化：已渲染条目真实高度写入 inline `contain-intrinsic-size`，滚出/滚入
-> 不再平移。Playwright WebKit 视觉位移指标复测：跳变事件 10 次 → 0（3 次运行稳定）。
-> 测试方法记录：/tmp/pwtest/webkit-repro.cjs（锚定元素屏上位移 − 同帧 scrollY 位移）。
+> 切换让文档在 scrollY 不变下整体平移（WebKit 无 scroll anchoring）。
+> **第一轮 ResizeObserver 补偿：WebKit 无效**——Playwright WebKit（26.5）实测 CV
+> 占位高↔真实高切换完全不触发 RO（探针 0 事件，Chromium 正常）。
+> **第二轮锚点−scrollY 差分看门狗：真机更糟**——macOS 异步滚动下 scrollY 读数与
+> 视觉位置有帧延迟，差分把滚动本身误判为平移，补偿-误判形成反馈振荡（小范围频繁
+> 跳动）；合成 wheel 事件走主线程同步滚动，测试中复现不出来。
+> **最终方案（`transcript-document.js`）**：① Poller——滚动活跃期逐帧轮询视口上方
+> 条目的高度，变了多少 scrollBy 多少（量自根源、与 scrollY 解耦，无反馈环）；
+> ② Warmer——空闲时按距视口由近及远把条目真实高度固化进 `contain-intrinsic-size`，
+> 占位高=真实高，平移从源头消失。
+> 教训：scroll 补偿的输入信号必须是「内容几何变化」本身，不能混入 scrollY 差分。
+> 验证指标：可见跳变帧 = 无滚动（dy=0）时锚定元素屏上位移 |dt| > 15px
+> （/tmp/pwtest/webkit-metric.cjs）；最终 Playwright WebKit 复测：上滚 2 帧 ≤24px、
+> 双向滚动 0 帧；对照组（关闭 CV）为 0。
 
 沿用提案 §7 的四阶段，补充三点修正：
 

@@ -10,9 +10,14 @@
 // - 内容变更时的视口稳定在同一同步块内完成（保存锚点→变更→恢复），
 //   不存在「高度还没回来」的中间态（对比：遗留路径跨原生↔Web 异步边界尽力而为）；
 // - 锚点（视口顶部条目 id + 条目内偏移）随滚动状态上报原生持久化，切换/冷启动恢复。
-// - 布局锚定（2026-09 修正）：WebKit 无 scroll anchoring，且实测 content-visibility
-//   占位高↔真实高切换不触发 ResizeObserver（Playwright WebKit 探针 0 事件）。
-//   改为 Watchdog 帧级锚定补偿 + 已渲染条目真实高度固化到 contain-intrinsic-size。
+// - 布局锚定（2026-09 两次修正）：
+//   ① ResizeObserver 补偿——WebKit 实测 content-visibility 占位高↔真实高切换
+//     不触发 RO（Playwright WebKit 探针 0 事件），方案无效；
+//   ② 锚点文档位置 − scrollY 差分看门狗——macOS 异步滚动下 scrollY 读数与视觉
+//     位置有帧延迟，差分把滚动本身误判为平移，补偿形成反馈振荡（小范围频繁跳动）。
+//   最终方案：Poller（滚动中直接轮询视口上方条目的高度变化，与 scrollY 解耦，
+//   无反馈环）+ Warmer（空闲时把全部条目真实高度固化进 contain-intrinsic-size，
+//   从源头消除占位高差）。
 (function () {
   "use strict";
 
@@ -179,14 +184,203 @@
     }
   };
 
-  // 用户输入信号：wheel / 触控板 / 滚动相关按键 → 用户接管 + 看门狗进入活跃期。
-  window.addEventListener("wheel", function () { Scroll.onUserScrollInput(); Watchdog.arm(); }, { passive: true, capture: true });
-  window.addEventListener("touchmove", function () { Scroll.onUserScrollInput(); Watchdog.arm(); }, { passive: true, capture: true });
+  // ===== 布局锚定：Poller（滚动中轮询补偿）+ Warmer（空闲高度固化） =====
+
+  // 把条目当前真实高度固化为其离屏占位高（仅可见/已渲染条目的 offsetHeight 是真实高；
+  // 离屏条目读到的是当前占位高，写入同值无害）。
+  function lockIntrinsicHeight(el) {
+    const h = el.offsetHeight;
+    if (h > 0) {
+      const v = "auto " + h + "px";
+      if (el.style.containIntrinsicSize !== v) {
+        el.style.containIntrinsicSize = v;
+      }
+    }
+  }
+
+  // Poller：滚动活跃期逐帧轮询「视口上方 3 屏内」条目的高度。
+  // 占位高→真实高（或反向）会让视口内容平移，变化量 = 补偿量（scrollBy 抵消）。
+  // 关键：补偿量直接量自高度变化这个根源，与 scrollY 完全解耦——
+  // 高度没变就不产生任何滚动写入，不存在反馈环。
+  // 低于视口的条目高度变化不影响可见内容，不轮询。
+  const Poller = {
+    raf: null,
+    activeUntil: 0,
+    heights: new Map(), // 轮询窗口内条目 id -> 最近一次高度
+
+    arm: function () {
+      // 滚动停后再守 500ms（惯性收尾与停后落地的 CV 解析）。
+      this.activeUntil = performance.now() + 500;
+      if (this.raf === null) {
+        const self = this;
+        this.raf = requestAnimationFrame(function () { self.step(); });
+      }
+    },
+
+    step: function () {
+      this.raf = null;
+      if (performance.now() > this.activeUntil) {
+        this.heights.clear();
+        return;
+      }
+      // pinnedBottom / jumpingToTarget / restoringAnchor 由各自意图逻辑持滚动权，不补偿。
+      if (Scroll.intent === "userScrolling" || Scroll.intent === "idle") {
+        this.pollAboveViewport();
+      }
+      const self = this;
+      this.raf = requestAnimationFrame(function () { self.step(); });
+    },
+
+    pollAboveViewport: function () {
+      const y = window.scrollY;
+      const lo = y - 3 * window.innerHeight;
+      const kids = main.children;
+      // 视口顶部锚点下标（第一个底边越过视口顶的条目）。
+      let anchorIdx = -1;
+      for (let i = 0; i < kids.length; i += 1) {
+        const el = kids[i];
+        const top = el.getBoundingClientRect().top + y;
+        if (top + el.offsetHeight > y) { anchorIdx = i; break; }
+        if (top > y) { break; }
+      }
+      if (anchorIdx <= 0) {
+        return;
+      }
+      let delta = 0;
+      const seen = new Set();
+      for (let i = anchorIdx - 1; i >= 0; i--) {
+        const el = kids[i];
+        const top = el.getBoundingClientRect().top + y;
+        if (top + el.offsetHeight < lo) { break; }
+        const id = el.getAttribute("data-iid");
+        const h = el.offsetHeight;
+        const old = id === null ? undefined : this.heights.get(id);
+        if (id) {
+          this.heights.set(id, h);
+          seen.add(id);
+        }
+        if (old !== undefined && old !== h) {
+          delta += h - old;
+        }
+      }
+      // 离开轮询窗口的条目清除基线（重进窗口重新取样，防 Map 膨胀）。
+      for (const id of this.heights.keys()) {
+        if (!seen.has(id)) {
+          this.heights.delete(id);
+        }
+      }
+      if (Math.abs(delta) >= 1) {
+        window.scrollBy(0, delta);
+      }
+    }
+  };
+
+  // Warmer：空闲时把尚未固化的条目按「距视口由近及远」逐个强制渲染一次，
+  // 真实高度写进 contain-intrinsic-size——之后滚出/滚入视口时占位高=真实高，
+  // 布局平移从源头消失（渲染过的条目永不再跳）。每个 chunk 用批次锚定纪律
+  // 保护视口（高度变化与锚点恢复在同一同步块内，不可见）。
+  const Warmer = {
+    warmed: new Set(),  // 已固化真实高度的条目 id
+    pending: false,
+
+    schedule: function () {
+      if (this.pending) {
+        return;
+      }
+      this.pending = true;
+      const ric = window.requestIdleCallback || function (cb) {
+        return setTimeout(function () {
+          cb({ timeRemaining: function () { return 10; } });
+        }, 50);
+      };
+      const self = this;
+      ric(function (deadline) {
+        self.pending = false;
+        self.runChunk(deadline);
+      }, { timeout: 300 });
+    },
+
+    runChunk: function () {
+      // 用户滚动/跳转/恢复中让路（避免滚动中塞布局工作），稍后再试。
+      if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget" || Scroll.intent === "restoringAnchor") {
+        this.schedule();
+        return;
+      }
+      const kids = main.children;
+      if (kids.length === 0) {
+        return;
+      }
+      const y = window.scrollY;
+      // 距视口最近的未预热条目（流式中的条目不预热——高度还在变，流结束后自然入选）。
+      let startIdx = -1;
+      let startDist = Infinity;
+      for (let i = 0; i < kids.length; i += 1) {
+        const el = kids[i];
+        const id = el.getAttribute("data-iid");
+        if (id === null || this.warmed.has(id)) {
+          continue;
+        }
+        const st = items.get(id);
+        if (st && st.streaming) {
+          continue;
+        }
+        const top = el.getBoundingClientRect().top + y;
+        const dist = Math.abs(top - y);
+        if (dist < startDist) {
+          startDist = dist;
+          startIdx = i;
+        }
+      }
+      if (startIdx < 0) {
+        return; // 全部预热完
+      }
+      // 从最近点向上下扩展取一个 chunk；批次锚定纪律保护视口（同一同步块内恢复）。
+      const plan = Scroll.beginBatch();
+      const chunk = [kids[startIdx]];
+      let up = startIdx - 1;
+      let down = startIdx + 1;
+      const chunkSize = 6;
+      while (chunk.length < chunkSize && (up >= 0 || down < kids.length)) {
+        if (down < kids.length) { chunk.push(kids[down]); down += 1; }
+        if (chunk.length < chunkSize && up >= 0) { chunk.push(kids[up]); up -= 1; }
+      }
+      const chunkItems = [];
+      for (const el of chunk) {
+        const id = el.getAttribute("data-iid");
+        if (id === null || this.warmed.has(id)) {
+          continue;
+        }
+        const st = items.get(id);
+        if (st && st.streaming) {
+          continue;
+        }
+        el.style.contentVisibility = "visible"; // 强制渲染
+        chunkItems.push({ el: el, id: id });
+      }
+      for (const c of chunkItems) {
+        lockIntrinsicHeight(c.el); // 首次读取触发布局（整 chunk 一次 flush）
+      }
+      for (const c of chunkItems) {
+        c.el.style.contentVisibility = ""; // 归还 CV 调度；离屏后占位高=固化的真实高
+        this.warmed.add(c.id);
+      }
+      Scroll.endBatch(plan);
+      this.schedule();
+    },
+
+    reset: function () {
+      this.warmed.clear();
+    }
+  };
+
+  // 用户输入信号：wheel / 触控板 / 滚动相关按键 → 用户接管 + Poller 进入活跃期。
+  window.addEventListener("wheel", function () { Scroll.onUserScrollInput(); Poller.arm(); }, { passive: true, capture: true });
+  window.addEventListener("touchmove", function () { Scroll.onUserScrollInput(); Poller.arm(); }, { passive: true, capture: true });
   window.addEventListener("keydown", function (event) {
     const keys = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "];
     if (keys.indexOf(event.key) >= 0) {
       Scroll.onUserScrollInput();
-      Watchdog.arm();
+      Poller.arm();
     }
   });
 
@@ -215,7 +409,7 @@
   }
 
   window.addEventListener("scroll", function () {
-    Watchdog.arm();
+    Poller.arm();
     if (scrollReportTimer === null) {
       scrollReportTimer = window.setTimeout(function () {
         scrollReportTimer = null;
@@ -230,6 +424,8 @@
       scrollSettleTimer = null;
       Scroll.onScrollSettled();
       reportScrollState();
+      // 滚动停下来了，让 Warmer 继续追上进度的固化。
+      Warmer.schedule();
     }, 200);
   }, { passive: true });
   window.addEventListener("scrollend", function () {
@@ -239,116 +435,8 @@
     }
     Scroll.onScrollSettled();
     reportScrollState();
+    Warmer.schedule();
   });
-
-  // ===== 布局锚定：帧级看门狗 + 真实高度固化 =====
-  // 背景：WebKit 无 scroll anchoring（overflow-anchor 不支持）；且实测其
-  // content-visibility 占位高↔真实高切换不触发 ResizeObserver（0 事件），
-  // 无法基于 RO 补偿。占位高与真实高的差值会让文档在 scrollY 不变下整体平移，
-  // 用户滚动时表现为「冷不丁跳一下」。两部分配合：
-  // ① Watchdog：滚动活跃期（含惯性尾段）逐帧比对视口顶部锚定条目的文档位置，
-  //    不能被 scrollY 变化解释的位移 = 视口外布局平移 → scrollBy 抵消。
-  // ② 高度固化：已渲染条目的真实高度写入 inline contain-intrinsic-size，
-  //    之后滚出/滚入视口时占位高=真实高，从源头消除平移（渲染过的条目不再跳）。
-
-  // 把条目当前真实高度固化为其离屏占位高（仅可见/已渲染条目的 offsetHeight 是真实高；
-  // 离屏条目读到的是当前占位高，写入同值无害）。
-  function lockIntrinsicHeight(el) {
-    const h = el.offsetHeight;
-    if (h > 0) {
-      const v = "auto " + h + "px";
-      if (el.style.containIntrinsicSize !== v) {
-        el.style.containIntrinsicSize = v;
-      }
-    }
-  }
-
-  const Watchdog = {
-    raf: null,
-    activeUntil: 0,
-    frameCount: 0,
-    lastY: 0,
-    lastAnchorID: null,
-    lastAnchorTop: 0,
-
-    // 视口顶部锚定条目：{id, top}（top 为文档坐标）。
-    anchorInfo: function () {
-      const y = window.scrollY;
-      const kids = main.children;
-      for (let i = 0; i < kids.length; i += 1) {
-        const el = kids[i];
-        const top = el.getBoundingClientRect().top + y;
-        if (top + el.offsetHeight > y) {
-          return { id: el.getAttribute("data-iid"), top: top };
-        }
-      }
-      return null;
-    },
-
-    arm: function () {
-      // 滚动停后再守 500ms（惯性收尾与停后落地的 CV 解析）。
-      this.activeUntil = performance.now() + 500;
-      if (this.raf === null) {
-        this.lastY = window.scrollY;
-        const a = this.anchorInfo();
-        this.lastAnchorID = a ? a.id : null;
-        this.lastAnchorTop = a ? a.top : 0;
-        const self = this;
-        this.raf = requestAnimationFrame(function () { self.step(); });
-      }
-    },
-
-    step: function () {
-      this.raf = null;
-      if (performance.now() > this.activeUntil) {
-        return;
-      }
-      const y = window.scrollY;
-      const a = this.anchorInfo();
-      // pinnedBottom / jumpingToTarget / restoringAnchor 由各自意图逻辑持滚动权，不补偿。
-      const mayCompensate = Scroll.intent === "userScrolling" || Scroll.intent === "idle";
-      if (a && this.lastAnchorID === a.id && mayCompensate) {
-        // 锚定条目屏上位移中不能被滚动解释的部分 = 视口外布局平移，绘制前抵消。
-        const drift = (a.top - this.lastAnchorTop) - (y - this.lastY);
-        if (Math.abs(drift) >= 1) {
-          window.scrollBy(0, drift);
-        }
-      }
-      if (a) {
-        this.lastAnchorID = a.id;
-        this.lastAnchorTop = a.top;
-      } else {
-        this.lastAnchorID = null;
-      }
-      this.lastY = window.scrollY;
-
-      // 每 10 帧固化一次视口附近条目的真实高度（限频控制布局读取开销）。
-      this.frameCount += 1;
-      if (this.frameCount % 10 === 0) {
-        this.lockNearbyHeights();
-      }
-      const self = this;
-      this.raf = requestAnimationFrame(function () { self.step(); });
-    },
-
-    // 固化视口附近（上 2 屏～下 3 屏）已渲染条目的高度。
-    lockNearbyHeights: function () {
-      const y = window.scrollY;
-      const lo = y - 2 * window.innerHeight;
-      const hi = y + 3 * window.innerHeight;
-      const kids = main.children;
-      for (let i = 0; i < kids.length; i += 1) {
-        const el = kids[i];
-        const top = el.getBoundingClientRect().top + y;
-        if (top > hi) {
-          break; // 文档有序，越过窗口即停
-        }
-        if (top + el.offsetHeight >= lo) {
-          lockIntrinsicHeight(el);
-        }
-      }
-    }
-  };
 
   // ===== turn offsets 上报（rail minimap 数据源）：user 条目的文档内相对位置 =====
   let turnOffsetsTimer = null;
@@ -392,6 +480,13 @@
       const plan = Scroll.beginBatch();
       Scroll.endBatch(plan);
       scheduleTurnOffsetsReport();
+      // 展开态高度变了，已固化的占位高过时——重新预热该条目。
+      const ti = card.closest(".ti");
+      const id = ti ? ti.getAttribute("data-iid") : null;
+      if (id) {
+        Warmer.warmed.delete(id);
+        Warmer.schedule();
+      }
     }
   });
 
@@ -614,6 +709,7 @@
       if (op.op === "reset") {
         main.textContent = "";
         items.clear();
+        Warmer.reset();
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));
       } else if (op.op === "remove") {
@@ -621,6 +717,7 @@
         if (state) {
           state.el.remove();
           items.delete(op.id);
+          Warmer.warmed.delete(op.id);
         }
       } else if (op.op === "jumpTo") {
         explicitScroll = true;
@@ -650,6 +747,10 @@
     // 批次结束后固化触达条目的真实高度（可见条目是真实高；离屏条目读到占位高，同值无害）。
     for (const el of touchedEls) {
       lockIntrinsicHeight(el);
+    }
+    // 新内容入场后安排空闲预热。
+    if (touchedEls.length > 0) {
+      Warmer.schedule();
     }
     reportScrollState();
     scheduleTurnOffsetsReport();
