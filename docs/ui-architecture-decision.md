@@ -165,12 +165,16 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > feature flag 本身。发送消息 = 显式钉底意图。
 > 顺带关闭 BACKLOG-SCROLL-LAG（多滚动机制叠加的痼疾随遗留路径整体消失）。
 >
-> **补充（2026-09）：布局锚定补偿**。用户实测发现往上滚时页面冷不丁跳位置：
-> 根因是 content-visibility 估算高 → 真实高的切换发生在浏览器异步渲染时，
-> ops 批次保锚管不到；WebKit 又无 scroll anchoring（`overflow-anchor` 不支持），
-> 文档在 scrollY 不变下整体平移。修复：`transcript-document.js` 新增 ResizeObserver
-> 补偿——视口上方条目高度变化时同步 scrollBy 抵消（仅 userScrolling / idle 非底部；
-> ops 触达条目在批次内同步高度账簿，防与批次保锚双重补偿）。
+> **补充（2026-09）：布局锚定——Watchdog 帧级补偿 + 真实高度固化**。
+> 用户实测往上滚时页面冷不丁跳位置：根因是 content-visibility 估算高 ↔ 真实高的
+> 切换；WebKit 无 scroll anchoring（`overflow-anchor` 不支持）。**第一版 ResizeObserver
+> 补偿方案在真机无效**——Playwright WebKit（26.5）实测：CV 占位高↔真实高切换
+> 完全不触发 RO（探针 30 次滚动 0 事件），Chromium 正常。最终方案（`transcript-document.js`）：
+> ① Watchdog：滚动活跃期（wheel/scroll 事件激活，停后延 500ms）逐帧比对视口顶部
+> 锚定条目的文档位置，不能被 scrollY 解释的部分 scrollBy 抵消；
+> ② 高度固化：已渲染条目真实高度写入 inline `contain-intrinsic-size`，滚出/滚入
+> 不再平移。Playwright WebKit 视觉位移指标复测：跳变事件 10 次 → 0（3 次运行稳定）。
+> 测试方法记录：/tmp/pwtest/webkit-repro.cjs（锚定元素屏上位移 − 同帧 scrollY 位移）。
 
 沿用提案 §7 的四阶段，补充三点修正：
 
