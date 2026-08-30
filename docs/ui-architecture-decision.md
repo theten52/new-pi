@@ -10,6 +10,10 @@
 > [`ui-target-architecture.md`](./ui-target-architecture.md)（单文档提案）
 >
 > 本文是**决策记录（ADR）**，不是第三份提案。结论、理由、执行方案、证伪条件各就各位。
+>
+> **执行状态（2026-08-30 收官）：已完成**。Spike GO → Phase 1（文档外壳+渲染迁移，flag 并行）
+> → Phase 2（滚动收敛入文档）→ dogfood 全绿 → 遗留路径整体删除（净减 2834 行，commit `3e890a4`）。
+> 单文档 transcript 现为唯一渲染路径，迁移期 flag 已移除。详细过程见 §4.3 进度记录。
 
 ---
 

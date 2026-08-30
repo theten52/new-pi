@@ -13,6 +13,10 @@
 > **核验状态（2026-08-30）**：本文已通过源码级核验，见
 > [`ui-architecture-research-verification.md`](./ui-architecture-research-verification.md)。
 > 13 个 commit 与外部源码引用核验通过；关于 NewPi 自身现状的描述发现实质偏差，已在本文就地修正。
+>
+> **后续状态（2026-08-30）**：本调研驱动的单文档迁移已完成（Spike GO → Phase 1/2 →
+> dogfood 验收 → 遗留路径删除）。本文中关于 NewPi「现状」的描述均为迁移前状态，
+> 仅作历史记录；现行架构见 [`ui-architecture-decision.md`](./ui-architecture-decision.md)。
 > 修正处均标注 `[已核验]` 或 `[核验修正]`。
 >
 > **后续提案（2026-08-30）**：本文的建议均以「保留当前 per-message WKWebView 架构」为前提。
@@ -1459,6 +1463,13 @@ New development is happening in Textual.
 
 ### 4.0 现状台账 **[核验修正]**
 
+> **🗑 2026-08-30 归档声明**：下表中标注「✅ 已完成」的遗留路径能力（预热 / 窗口化 /
+> 高度表 / replay / 高度桥 / rail pending jump）已随单文档 transcript 迁移**整体删除**
+> （commit `3e890a4`，净减 2834 行）；「⬜ 待办」中的显式滚动状态机以更彻底的形式落地
+> （文档内单 writer，见 `transcript-document.js` 的 Scroll 模块），engineFingerprint /
+> block 级高度表随高度表机制本身消亡而失去对象。本表仅作历史决策记录留存；
+> 现行实现见 CLAUDE.md 与 [`ui-architecture-decision.md`](./ui-architecture-decision.md) §4.3。
+>
 > 初版本节的建议是在**未核对 NewPi 实际代码**的前提下写的，其中三项已经落地。
 > 直接按 §5「实现顺序」执行会重做 `renderStreaming()` 与 `repairTailSource()`。
 > 下表为交叉验证后的净结论，逐条依据见
