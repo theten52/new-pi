@@ -223,28 +223,6 @@ struct NewPiRootView: View {
                     sessionDisplayLimit = recentSessionLimit
                 }
 
-                // Provider 选择已移到输入框上方状态栏的模型菜单
-                //（BACKLOG-STATUSBAR-MODEL-PICKER）；这里只保留只读状态摘要。
-                Section("Provider") {
-                    Text(viewModel.activeProviderName)
-                        .font(.subheadline)
-                    if !viewModel.activeProviderModel.isEmpty {
-                        Text(viewModel.activeProviderModel)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    if viewModel.activeProviderReady {
-                        Label("Ready", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    } else {
-                        Label("Key missing", systemImage: "key.slash")
-                            .foregroundStyle(.orange)
-                    }
-                    Text("在状态栏切换模型 · Settings 管理 Provider")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 Section("Debug") {
                     Button("View Logs") {
                         showLogs = true
