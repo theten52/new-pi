@@ -665,7 +665,11 @@
   // ===== 消息级操作按钮（复制 / 分叉）：hover 显示在 user / assistant 条目右上角 =====
   // 复制走 copyText（复用代码块复制通道）；分叉走 fork（回传 messageIndex，原生触发 forkFromMessage）。
   function attachActions(el, op) {
-    // 幂等：流式状态变化（streaming → final）时复用已有按钮，仅同步 fork 的禁用态。
+    // 幂等：wrap（含复制按钮）只建一次；fork 按钮独立按 op 元数据双向同步（建/删/禁用）。
+    // 注意 fork 创建不能锁在 wrap 的一次性创建块里：直播期首个 upsert 必然无 canFork
+    //（messageIndex 在 agentEnd 才补），若那时就把 wrap 定型，后续补 index 的 upsert
+    // 再也加不进 fork 按钮（FORK-BUTTON-META-DIFF 的真正根因，恢复会话首 op 带
+    // canFork 才侥幸正常，直播路径必现缺失）。
     let wrap = el.querySelector(":scope > .ti-actions");
     if (!wrap) {
       wrap = document.createElement("div");
@@ -682,32 +686,34 @@
         '<path d="M10.5 3.5h-6a1 1 0 0 0-1 1v6" stroke="currentColor" stroke-width="1.3" fill="none"/>' +
         "</svg>";
       wrap.appendChild(copy);
-
-      if (op.canFork && typeof op.messageIndex === "number") {
-        const fork = document.createElement("button");
-        fork.type = "button";
-        fork.className = "ti-action ti-action-fork";
-        fork.title = "从这里分叉";
-        fork.setAttribute("aria-label", "从这里分叉");
-        fork.dataset.forkIndex = String(op.messageIndex);
-        fork.innerHTML =
-          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
-          '<circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
-          '<circle cx="12" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
-          '<circle cx="12" cy="12" r="2" stroke="currentColor" stroke-width="1.3"/>' +
-          '<path d="M4 6v2a2 2 0 0 0 2 2h6" stroke="currentColor" stroke-width="1.3" fill="none"/>' +
-          "</svg>";
-        fork.disabled = !!op.streaming || forkLocked;
-        wrap.appendChild(fork);
-      }
-
       el.appendChild(wrap);
     }
 
-    // 同步禁用态：本条目流式中或全局流式（会话正在生成）时 fork 都不可用。
-    const forkBtn = wrap.querySelector(".ti-action-fork");
+    // fork 按钮双向同步：有元数据→建/更新；无→摘除（compaction 置空 messageIndex 后
+    // 不留死索引）。禁用态 = 本条目流式中或全局流式锁。
+    const canFork = op.canFork === true && typeof op.messageIndex === "number";
+    let forkBtn = wrap.querySelector(".ti-action-fork");
+    if (canFork && !forkBtn) {
+      forkBtn = document.createElement("button");
+      forkBtn.type = "button";
+      forkBtn.className = "ti-action ti-action-fork";
+      forkBtn.title = "从这里分叉";
+      forkBtn.setAttribute("aria-label", "从这里分叉");
+      forkBtn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+        '<circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+        '<circle cx="12" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+        '<circle cx="12" cy="12" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+        '<path d="M4 6v2a2 2 0 0 0 2 2h6" stroke="currentColor" stroke-width="1.3" fill="none"/>' +
+        "</svg>";
+      wrap.appendChild(forkBtn);
+    } else if (!canFork && forkBtn) {
+      forkBtn.remove();
+      forkBtn = null;
+    }
     if (forkBtn) {
       forkBtn.disabled = !!op.streaming || forkLocked;
+      forkBtn.dataset.forkIndex = String(op.messageIndex);
     }
   }
 
@@ -818,11 +824,14 @@
       }
       state.source = op.body;
       state.streaming = op.streaming;
-      // 流式结束（streaming → final）时 fork 按钮解除禁用。
-      const cardEl = el.querySelector(".card.answer");
-      if (cardEl) {
-        attachActions(cardEl, op);
-      }
+    }
+    // fork 元数据（canFork/messageIndex）不依赖 body/streaming 变化：agentEnd 补 index 的
+    // upsert 到达时 body/streaming 均已 final，若把 attachActions 关在上方门控里，
+    // 该 upsert 会被静默忽略、Fork 按钮永远缺失（FORK-BUTTON-META-DIFF 的 JS 侧半边）。
+    // attachActions 幂等（复用已有按钮），每次 upsert 都同步，成本可忽略。
+    const cardEl = el.querySelector(".card.answer");
+    if (cardEl) {
+      attachActions(cardEl, op);
     }
   }
 
@@ -864,6 +873,14 @@
         state.streaming = op.streaming;
         state.toolRunning = op.toolRunning;
         state.toolError = op.toolError;
+      }
+      // fork 元数据与渲染门控解耦：user 气泡的按钮也要在「只有 canFork 变化」的
+      // upsert 里同步（compaction 撤回时移除按钮），不能只依赖 renderUser 重渲染。
+      if (op.kind === "user") {
+        const bubble = el.querySelector(":scope > .bubble");
+        if (bubble) {
+          attachActions(bubble, op);
+        }
       }
     }
 
