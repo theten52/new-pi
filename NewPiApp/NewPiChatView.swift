@@ -261,6 +261,13 @@ struct NewPiSessionPanel: View {
 private struct NewPiDraftAttachmentStrip: View {
     @Binding var drafts: [DraftImageAttachment]
 
+    /// 真实像素宽高比（宽/高）。用 cgImage 取值，绕过 NSImage.size 的 DPI 偏差。
+    static func pixelAspectRatio(of image: NSImage) -> CGFloat? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              cg.height > 0 else { return nil }
+        return CGFloat(cg.width) / CGFloat(cg.height)
+    }
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -268,15 +275,19 @@ private struct NewPiDraftAttachmentStrip: View {
                     ZStack(alignment: .topTrailing) {
                         Group {
                             if let image = NSImage(data: draft.data) {
+                                // 用真实像素宽高比，避免依赖 NSImage.size（其可能因 DPI
+                                // 元数据与像素不一致，导致 scaledToFill 用了错误比例而变形）。
+                                let aspect = Self.pixelAspectRatio(of: image) ?? 1
                                 Image(nsImage: image)
                                     .resizable()
-                                    .scaledToFill()
+                                    .aspectRatio(aspect, contentMode: .fill)
                             } else {
                                 Color.gray.opacity(0.2)
                             }
                         }
                         .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .clipped()
 
                         Button {
                             drafts.removeAll { $0.id == draft.id }
@@ -325,8 +336,9 @@ struct NewPiComposerTextView: NSViewRepresentable {
         // NSTextView() 便利构造会创建完整 TextKit 链（textStorage/layoutManager/container）；
         // designated init(frame:textContainer: nil) 不会（见 NSTextView.h），别用。
         let textView = NewPiComposerInnerTextView()
-        // 图片文件拖拽注册（追加注册，不影响既有文本拖拽类型；任意时机调用均合法）。
-        textView.registerForDraggedTypes([.fileURL])
+        // 图片采集拖拽注册（追加注册，不影响既有文本拖拽类型；任意时机调用均合法）：
+        // .fileURL 覆盖「图片文件」，.tiff/.png 覆盖「位图图片数据」（浏览器/预览直接拖图片）。
+        textView.registerForDraggedTypes([.fileURL, .tiff, .png])
         textView.delegate = context.coordinator
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
@@ -435,22 +447,41 @@ final class NewPiComposerInnerTextView: NSTextView {
     /// 图片采集回调（拖拽文件 / ⌘V 粘贴截图）：由外层汇入草稿附件条。
     var onImagesPicked: (([DraftImageAttachment]) -> Void)?
 
-    // ⌘V 粘贴：剪贴板有图片（截图 / 复制的位图）→ 采集为草稿；否则走默认文本粘贴。
+    // ⌘V 粘贴：剪贴板有图片（截图 / 复制的位图 / 复制的图片文件）→ 采集为草稿；否则走默认文本粘贴。
     override func paste(_ sender: Any?) {
-        if let data = PasteboardImageReader.readImageData(),
-           let draft = ImageAttachmentProcessor.makeDraft(
-               from: data,
-               displayName: "pasted-image-\(UUID().uuidString.prefix(8))"
-           ) {
-            onImagesPicked?([draft])
+        let pasteboard = NSPasteboard.general
+        guard let data = PasteboardImageReader.readImageData() else {
+            super.paste(sender)
             return
         }
-        super.paste(sender)
+        // 有图片数据：解码/缩放/压缩可能较耗时，放后台避免阻塞主线程，
+        // 完成后回主线程回调外层汇入附件条（失败时明确提示，而非静默 beep）。
+        let displayName = Self.pastedDisplayName(from: pasteboard)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let draft = ImageAttachmentProcessor.makeDraft(from: data, displayName: displayName)
+            DispatchQueue.main.async {
+                guard let draft else {
+                    NSSound.beep()
+                    return
+                }
+                self?.onImagesPicked?([draft])
+            }
+        }
     }
 
-    // 拖拽图片文件进输入框 → 采集为草稿；非图片文件保持默认行为（插入路径文本）。
+    /// 粘贴来源的展示名：优先用剪贴板里图片文件的真实文件名，否则用随机名。
+    private static func pastedDisplayName(from pasteboard: NSPasteboard) -> String {
+        if let url = pasteboard.readObjects(forClasses: [NSURL.self], options: nil)?.first as? URL {
+            return url.lastPathComponent
+        }
+        return "pasted-image-\(UUID().uuidString.prefix(8))"
+    }
+
+    // 拖拽图片（文件 URL 或位图数据）进输入框 → 采集为草稿；否则保持默认行为。
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if !Self.imageFileURLs(from: sender).isEmpty { return .copy }
+        if !Self.imageFileURLs(from: sender).isEmpty || Self.draggedImageData(from: sender) != nil {
+            return .copy
+        }
         return super.draggingEntered(sender)
     }
 
@@ -458,6 +489,12 @@ final class NewPiComposerInnerTextView: NSTextView {
         let urls = Self.imageFileURLs(from: sender)
         if !urls.isEmpty {
             onImagesPicked?(urls.compactMap { ImageAttachmentProcessor.makeDraft(fromFileURL: $0) })
+            return true
+        }
+        // 位图数据（非文件）拖拽。
+        if let data = Self.draggedImageData(from: sender),
+           let draft = ImageAttachmentProcessor.makeDraft(from: data, displayName: "dropped-image-\(UUID().uuidString.prefix(8))") {
+            onImagesPicked?([draft])
             return true
         }
         return super.performDragOperation(sender)
@@ -473,6 +510,28 @@ final class NewPiComposerInnerTextView: NSTextView {
             guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
             return type.conforms(to: .image)
         }
+    }
+
+    /// 拖拽信息里的位图图片数据（非文件；如从浏览器/预览直接拖出的图片）。
+    private static func draggedImageData(from sender: NSDraggingInfo) -> Data? {
+        let pasteboard = sender.draggingPasteboard
+        let types: [NSPasteboard.PasteboardType] = [.tiff, .png]
+        for type in types {
+            if let data = pasteboard.data(forType: type) {
+                return data
+            }
+        }
+        return nil
+    }
+
+    // 始终允许粘贴图片（即使 isEditable=false）。
+    // 不重写时，NSTextView 默认在 isEditable=false 或 responder chain 异常时返回 false，
+    // 导致 Cmd+V 被拒绝（beep）而 paste() 永远不被调用（Snipaste 粘贴问题的根因）。
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
     }
 
     override func keyDown(with event: NSEvent) {

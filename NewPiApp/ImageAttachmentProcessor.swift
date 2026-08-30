@@ -207,18 +207,80 @@ enum ImageAttachmentProcessor {
 /// 从剪贴板读取图片数据（Cmd+V 粘贴路径）。
 enum PasteboardImageReader {
     /// 按优先级读取剪贴板中的图片数据。返回 nil 表示剪贴板无图片。
+    ///
+    /// 优先读 `.png`（截图工具的原始格式、体积小、魔数可识别），其后再读 `.tiff`。
+    /// 若优先读 `.tiff`，Snipaste 等截图常会同时放一份 **17MB 级**的 TIFF 到剪贴板，
+    /// 导致 `paste()` 在主线程同步解码/重编码时明显卡顿，甚至被感知为「粘贴不生效」；
+    /// 且 `inferMediaType` 的魔数表不识别 TIFF，会错走默认 mediaType 分支。
     static func readImageData() -> Data? {
         let pasteboard = NSPasteboard.general
-        let types: [NSPasteboard.PasteboardType] = [.tiff, .png]
+        
+        // 常见图片 pasteboard 类型（按优先级排列）：
+        // 1. 标准 UTI 类型（public.png 等）
+        // 2. 非标准但广泛支持的类型（image/png 等 MIME 类型）
+        // 3. 应用自定义类型（Qt、Snipaste 等）
+        let types: [NSPasteboard.PasteboardType] = [
+            .png,                                                          // public.png
+            .tiff,                                                         // public.tiff
+            NSPasteboard.PasteboardType("public.jpeg"),                   // JPEG UTI
+            NSPasteboard.PasteboardType("image/png"),                     // MIME 类型（某些应用使用）
+            NSPasteboard.PasteboardType("image/tiff"),                    // MIME 类型
+            NSPasteboard.PasteboardType("image/jpeg"),                    // MIME 类型
+            NSPasteboard.PasteboardType("Apple PNG pasteboard type"),     // 旧版 macOS / 某些工具
+            NSPasteboard.PasteboardType("com.trolltech.anymime.image--png"),  // Qt/Snipaste
+            NSPasteboard.PasteboardType("NeXT TIFF v4.0 pasteboard type"),   // 旧版 NeXT
+            NSPasteboard.PasteboardType("com.apple.pasteboard.tiff"),    // Apple TIFF 变体
+        ]
+        
         for type in types {
-            if let data = pasteboard.data(forType: type) {
-                return data
+            if let data = pasteboard.data(forType: type), !data.isEmpty {
+                // 验证数据是否为有效图片（通过魔数检查）
+                if Self.isValidImageData(data) {
+                    return data
+                }
             }
         }
-        // 兜底：读取任意可读文件 URL 指向图片的场景（拖拽文件后的剪贴板）。
-        if let url = pasteboard.readObjects(forClasses: [NSURL.self], options: nil)?.first as? URL {
+        
+        // 兜底 1：尝试用 NSImage(pasteboard:) 读取（处理非标准格式）
+        if let image = NSImage(pasteboard: pasteboard),
+           let tiffData = image.tiffRepresentation {
+            // NSImage 成功读取，返回 TIFF 数据（后续会被 ImageAttachmentProcessor 处理）
+            return tiffData
+        }
+        
+        // 兜底 2：读取任意可读文件 URL 指向图片的场景（拖拽文件后的剪贴板）。
+        if let url = pasteboard.readObjects(forClasses: [NSURL.self], options: nil)?.first as? URL,
+           url.pathExtension.lowercased().isImageExtension {
             return try? Data(contentsOf: url)
         }
+        
         return nil
+    }
+    
+    /// 检查数据是否为有效图片（通过魔数嗅探）。
+    private static func isValidImageData(_ data: Data) -> Bool {
+        let bytes = [UInt8](data.prefix(12))
+        // PNG: 89 50 4E 47 0D 0A 1A 0A
+        if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return true }
+        // JPEG: FF D8 FF
+        if bytes.starts(with: [0xFF, 0xD8, 0xFF]) { return true }
+        // GIF: 47 49 46 38
+        if bytes.starts(with: [0x47, 0x49, 0x46, 0x38]) { return true }
+        // TIFF: 49 49 2A 00 (little-endian) 或 4D 4D 00 2A (big-endian)
+        if bytes.starts(with: [0x49, 0x49, 0x2A, 0x00]) || bytes.starts(with: [0x4D, 0x4D, 0x00, 0x2A]) { return true }
+        // BMP: 42 4D
+        if bytes.starts(with: [0x42, 0x4D]) { return true }
+        // WebP: 52 49 46 46 ... 57 45 42 50
+        if bytes.count >= 12, bytes[0...3] == [0x52, 0x49, 0x46, 0x46], bytes[8...11] == [0x57, 0x45, 0x42, 0x50] { return true }
+        return false
+    }
+}
+
+// MARK: - String 扩展
+private extension String {
+    /// 检查文件扩展名是否为常见图片格式。
+    var isImageExtension: Bool {
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif"]
+        return imageExtensions.contains(self.lowercased())
     }
 }
