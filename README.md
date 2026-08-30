@@ -120,4 +120,4 @@ The app subscribes to `AgentSession.events()` and renders your custom UI. No ter
 
 ## License
 
-MIT (scaffold only; confirm before release)
+MIT. See [LICENSE](LICENSE) for details.
