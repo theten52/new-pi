@@ -10,6 +10,7 @@ DerivedData/
 # Build & packaging artifacts produced by scripts/package.sh
 build/
 dist/
+dist-backup/
 
 # Agent/editor tooling (local only)
 .understand-anything/

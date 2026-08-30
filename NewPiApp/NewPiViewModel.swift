@@ -1441,9 +1441,27 @@ final class NewPiViewModel: ObservableObject {
         return try providerConfig.defaultProfile()
     }
 
-    private func rebuildTranscript(from messages: [AgentMessage], entryIDs: [String] = [], on runtime: SessionRuntime) {
+    /// 全量重建 transcript（fork / 无 compaction 的 agentEnd 场景）。
+    /// `preservedPrefixCount`：需保留在前的 transcript 条目数（方案 A —— compaction 后
+    /// agentEnd 就地校准时，被压缩的完整历史要原样保留，只重建 summary 及其后的尾巴）。
+    /// 为 0（默认）时等价旧行为：`removeAll()` 后全量重建。
+    private func rebuildTranscript(
+        from messages: [AgentMessage],
+        entryIDs: [String] = [],
+        on runtime: SessionRuntime,
+        preservedPrefixCount: Int = 0
+    ) {
+        // 方案 A（compaction 后）保留前缀时，index 空间会重叠：被压缩旧历史的 messageIndex
+        // 是压缩前原始 position（0..N-1），而重建的 summary+尾巴在 messages 里从 0 重新排。
+        // 若用整个 transcript 构建 existingByMessageIndex，重建 summary（index=0）会误命中
+        // 旧历史第一条（index=0）的 id。因此保留前缀场景下，index 保留表只基于被重建的
+        // 后半段（transcript[preservedPrefixCount...]）构建，避免跨段误命中。
+        // entryID 是全局唯一短 id（不复用），existingByEntryID 可安全基于整个 transcript。
+        let idSourceRange = preservedPrefixCount > 0
+            ? runtime.transcript[preservedPrefixCount...]
+            : runtime.transcript[...]
         let existingByMessageIndex = Dictionary(
-            uniqueKeysWithValues: runtime.transcript.compactMap { item -> (Int, UUID)? in
+            uniqueKeysWithValues: idSourceRange.compactMap { item -> (Int, UUID)? in
                 guard let messageIndex = item.messageIndex else { return nil }
                 return (messageIndex, item.id)
             }
@@ -1460,7 +1478,12 @@ final class NewPiViewModel: ObservableObject {
             return false
         })
 
-        runtime.transcript.removeAll()
+        // 方案 A：保留前缀（被压缩的完整旧历史）时，撤掉 removeAll，改为截断到前缀末尾。
+        if preservedPrefixCount > 0 {
+            runtime.transcript.removeSubrange(preservedPrefixCount...)
+        } else {
+            runtime.transcript.removeAll()
+        }
         // 同 makeTranscriptItems：toolResult 只有结果没有参数，用 toolCallID 回查上一条
         // assistant 消息的工具调用表，恢复命令摘要。
         var lastToolCalls: [String: ToolCallContent] = [:]
@@ -1687,13 +1710,65 @@ final class NewPiViewModel: ObservableObject {
     private func syncTranscriptMessageIndices(on runtime: SessionRuntime) async {
         let messages = await runtime.session.context.messages
         let entryIDs = await runtime.session.branchEntryIDs()
-        rebuildTranscript(from: messages, entryIDs: entryIDs, on: runtime)
+        // 方案 A：agentEnd 后不再全量 rebuild（那会 removeAll 后用截断的 context.messages
+        // 覆盖完整 transcript，compaction 被压缩的历史就此丢失）。改为就地校准：保留
+        // runtime.transcript 完整内容，只把刚结束的 streaming assistant 补上 messageIndex /
+        // sessionEntryID（fork 锚点 + id 稳定所需），并校准 liveMessageCount。
+        calibrateTranscriptAfterAgentEnd(from: messages, entryIDs: entryIDs, on: runtime)
         runtime.branchPointCount = await runtime.session.branchPointCount()
         runtime.isForkedBranch = runtime.branchPointCount > 0
         if runtime === activeRuntime {
             branchPointCount = runtime.branchPointCount
             isForkedBranch = runtime.isForkedBranch
         }
+    }
+
+    /// 方案 A（agentEnd 就地校准）：compaction 后保留被压缩的完整历史，只重建 summary 及其后的尾巴。
+    ///
+    /// 背景：live 期间所有内容已通过 appendTranscript / appendOrUpdateAssistant /
+    /// appendOrUpdateThinking / tool 事件逐条累积进 transcript，被压缩前的完整历史天然保留在
+    /// transcript 里。compaction 一旦触发，`context.messages` 和落盘 JSONL 不可逆地变成
+    /// `[summary] + 最近8条`，旧历史只能从 UI 的 runtime.transcript 里找。因此 agentEnd 不能
+    /// 再用截断后的 messages 全量 rebuild（否则被压缩历史被擦除）。
+    ///
+    /// 精确策略（区分有无 compaction）：
+    ///   - 无 compaction（messages.first ≠ .compactionSummary）：走原 rebuildTranscript 全量重建
+    ///     （安全，不会丢历史，且能正确重建带 toolCalls 的中间 assistant、补 messageIndex）。
+    ///   - 有 compaction：保留 transcript 里 summary 之前的完整旧历史，只重建 summary 及之后的
+    ///     尾巴（最近8条里的中间 assistant / toolResult / 最终答复能正确重建 + 补 index）。
+    ///
+    /// 为什么不能纯「就地校准只补 streaming assistant index」：带 toolCalls 的中间 assistant
+    /// 在 live 期不产生 textDelta，因此不会进 transcript，只能靠重建 context.messages 补出。
+    /// 所以必须重建尾部（含 compaction summary 之后的所有消息），而非只补 index。
+    private func calibrateTranscriptAfterAgentEnd(
+        from messages: [AgentMessage],
+        entryIDs: [String],
+        on runtime: SessionRuntime
+    ) {
+        // 判断是否发生了 compaction：messages 首条是 .compactionSummary。
+        guard case .compactionSummary = messages.first else {
+            // 无 compaction：保持原行为（全量重建，可正确补中间 assistant 与 index）。
+            rebuildTranscript(from: messages, entryIDs: entryIDs, on: runtime)
+            return
+        }
+
+        // 有 compaction：找到 transcript 里最后一个 .summary 条目（live 期 messageStart
+        // (.compactionSummary) append 的那个，它是「被压缩历史」与「压缩后新内容」的分界）。
+        // 保留它之前的完整旧历史，删除它及其后，再用 messages 重建尾巴。
+        guard let summaryTranscriptIndex = runtime.transcript.lastIndex(where: { $0.kind == .summary }) else {
+            // 理论上不应发生（compaction summary 必已 append），防御性回退全量重建。
+            rebuildTranscript(from: messages, entryIDs: entryIDs, on: runtime)
+            return
+        }
+
+        // 保留 summary 之前的完整旧历史（preservedPrefixCount = summary 下标），
+        // rebuild 会撤掉 removeAll、截断到该前缀末尾，再 append 重建的 summary+尾巴。
+        rebuildTranscript(
+            from: messages,
+            entryIDs: entryIDs,
+            on: runtime,
+            preservedPrefixCount: summaryTranscriptIndex
+        )
     }
 
     private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil) {

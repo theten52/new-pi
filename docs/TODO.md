@@ -78,6 +78,7 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 | BACKLOG-SESSION-RELOAD-SCROLL-JUMP | 重新加载 Session 时 loading 结束后滚动条跳动 | open | P2 | 重新加载 Session 时，loading 页面结束后，页面仍在加载，导致滚动条跳动。需确保内容完全加载并稳定后再结束 loading / 稳定滚动位置，避免结束后滚动条抖动。目标文件：`NewPiChatView.swift`、`NewPiViewModel.swift` 的 session 切换 / loading / 滚动相关逻辑。 |
 | BACKLOG-SESSION-MANUAL-CREATE | 新 Session 只能由用户手动点击 New Session 按钮创建，系统不自动创建 Session | done | P1 | 已移除 `openProject` / `reloadProviders` / `setDefaultProvider` / `saveProfile` / `deleteProfile` 中的自动建会话；`archiveSession` 归档当前会话改为 `closeActiveSession()`（结束当前会话、回到无活跃会话状态）而非新建。`startNewSession`（按钮 / ⇧⌘N）与 `resetSession` 保留为手动入口。 |
 | BACKLOG-DEFAULT-PROVIDER | 新增默认 Provider 设置，新建 Session 默认使用该 Provider | done | P1 | 已实现：Settings「Default Provider」picker 语义改为「Default for new sessions」并加说明（只影响新建会话）；侧边栏 Provider 区新增「Set as Default」快捷入口（当前会话 provider ≠ 默认时显示）；默认 provider 不影响已有会话，会话内切换随 header 逐会话记忆并立即落盘。 |
+| BACKLOG-FORK-COMPACT-HISTORY | fork + compaction 叠加时，被压缩历史无法在 fork 后恢复 | open | P2 | **已知限制（方案 A 已接受）**：对话先触发 compaction（历史被 summary 取代，`context.messages` 只剩 `[summary] + 最近8条`），随后用户 fork。fork 路径保留 `rebuildTranscript` 全量重建，但此时 `context.messages` 已不含被压缩的完整历史，重建后那段历史只剩 summary 占位、无法恢复。根治需把完整 transcript 独立落盘（不依赖 `context.messages`），或 fork 时合并 `runtime.transcript` 的存量完整历史。当前主流程（单分支长对话）已由方案 A 修复（agentEnd 就地校准、不再清空重建），本条仅针对罕见的 fork+compaction 叠加。 |
 
 ## Backlog — 对话流滚动
 
