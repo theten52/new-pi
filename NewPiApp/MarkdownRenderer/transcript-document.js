@@ -10,6 +10,9 @@
 // - 内容变更时的视口稳定在同一同步块内完成（保存锚点→变更→恢复），
 //   不存在「高度还没回来」的中间态（对比：遗留路径跨原生↔Web 异步边界尽力而为）；
 // - 锚点（视口顶部条目 id + 条目内偏移）随滚动状态上报原生持久化，切换/冷启动恢复。
+// - 布局锚定补偿：WebKit 无 scroll anchoring，content-visibility 估算高→真实高
+//   的切换会让文档整体平移（上滚时“跳一下”）；ResizeObserver 捕获视口上方条目的
+//   高度变化并 scrollBy 抵消（ResizeObserver 模块见下）。
 (function () {
   "use strict";
 
@@ -234,6 +237,75 @@
     }
     Scroll.onScrollSettled();
     reportScrollState();
+  });
+
+  // ===== 布局锚定补偿：WebKit 无 scroll anchoring（overflow-anchor 不支持） =====
+  // content-visibility: auto 的视口外条目以估算高占位，滚动接近时渲染出真实高度，
+  // 估算与真实的差值会让文档在 scrollY 不变的情况下整体平移——用户往上滚时
+  // 表现为「冷不丁跳到另一个位置」。这里用 ResizeObserver 捕获视口上方条目的
+  // 高度变化并 scrollBy 抵消（ops 批次触达的条目已由 beginBatch/endBatch 保锚，
+  // 在批次内同步账簿避免双重补偿）。
+  const knownHeights = new Map(); // iid -> number
+
+  function syncKnownHeight(el) {
+    const id = el.getAttribute("data-iid");
+    if (id) {
+      knownHeights.set(id, el.offsetHeight);
+    }
+  }
+
+  const layoutObserver = new ResizeObserver(function (entries) {
+    // pinnedBottom / jumpingToTarget / restoringAnchor：滚动权在意图逻辑手里，只记账不补偿。
+    if (Scroll.intent !== "userScrolling" && Scroll.intent !== "idle") {
+      for (const entry of entries) {
+        syncKnownHeight(entry.target);
+      }
+      return;
+    }
+    if (Scroll.intent === "idle" && Scroll.isNearBottom()) {
+      for (const entry of entries) {
+        syncKnownHeight(entry.target);
+      }
+      return;
+    }
+    // 先收集本帧发生高度变化的条目（RO 回调时布局已完成，拿到的都是变化后几何）。
+    const changed = [];
+    for (const entry of entries) {
+      const el = entry.target;
+      const id = el.getAttribute("data-iid");
+      const newHeight = el.offsetHeight;
+      const oldHeight = id === null ? undefined : knownHeights.get(id);
+      if (id) {
+        knownHeights.set(id, newHeight);
+      }
+      if (oldHeight === undefined || oldHeight === newHeight) {
+        continue;
+      }
+      changed.push({ el: el, delta: newHeight - oldHeight });
+    }
+    if (changed.length === 0) {
+      return;
+    }
+    // 按文档顺序排序：上方条目的变化会把下方条目一起推下去，
+    // 用累计 delta 还原每个条目在「本帧变化之前」的底边位置（假设条目顶边不动、向下生长）。
+    changed.sort(function (a, b) {
+      return (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+    });
+    let compensate = 0;
+    let cumulative = 0;
+    for (const c of changed) {
+      const preBottom = c.el.getBoundingClientRect().bottom - cumulative - c.delta;
+      // 只补偿变化前完全位于视口上方的条目（锚定第一可见条目，同 Chrome 规则）；
+      // 不能用变化后的 bottom 判断——条目向下生长可能跨入视口（估算高→真实高恰好
+      // 横跨视口顶就是上滚跳变的主场景）；可见条目自身生长不补偿（用户正在看它）。
+      if (preBottom <= 0) {
+        compensate += c.delta;
+      }
+      cumulative += c.delta;
+    }
+    if (Math.abs(compensate) >= 1) {
+      window.scrollBy(0, compensate);
+    }
   });
 
   // ===== turn offsets 上报（rail minimap 数据源）：user 条目的文档内相对位置 =====
@@ -461,6 +533,7 @@
       state = { el: el, kind: null, source: null, streaming: null, renderer: null };
       items.set(op.id, state);
       main.appendChild(el);
+      layoutObserver.observe(el);
     }
 
     if (op.kind === "assistant" || op.kind === "summary") {
@@ -486,6 +559,7 @@
       }
     }
     state.kind = op.kind;
+    return el;
   }
 
   function applyOps(ops) {
@@ -494,15 +568,20 @@
     // 显式滚动 op（jumpTo/scrollToBottom/restoreAnchor）优先于批次策略。
     const plan = Scroll.beginBatch();
     let explicitScroll = false;
+    const touchedEls = []; // 本批 ops 触达的条目（批次保锚已含其高度变化，需同步账簿防 RO 双重补偿）
     for (const op of ops) {
       if (op.op === "reset") {
         main.textContent = "";
         items.clear();
+        layoutObserver.disconnect();
+        knownHeights.clear();
       } else if (op.op === "upsert") {
-        upsert(op);
+        touchedEls.push(upsert(op));
       } else if (op.op === "remove") {
         const state = items.get(op.id);
         if (state) {
+          layoutObserver.unobserve(state.el);
+          knownHeights.delete(op.id);
           state.el.remove();
           items.delete(op.id);
         }
@@ -530,6 +609,11 @@
     }
     if (!explicitScroll) {
       Scroll.endBatch(plan);
+    }
+    // 批次结束后同步触达条目的高度账簿：本批的高度变化已被批次保锚（或显式滚动）覆盖，
+    // 稍后到达的 ResizeObserver 回调对这批条目应视为零差值。
+    for (const el of touchedEls) {
+      syncKnownHeight(el);
     }
     reportScrollState();
     scheduleTurnOffsetsReport();

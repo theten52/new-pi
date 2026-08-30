@@ -164,6 +164,13 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > `NewPiTranscriptRow`、面板 legacyBody 及全部 pin/恢复/门控辅助、ViewModel 就绪门控与预热调用、
 > feature flag 本身。发送消息 = 显式钉底意图。
 > 顺带关闭 BACKLOG-SCROLL-LAG（多滚动机制叠加的痼疾随遗留路径整体消失）。
+>
+> **补充（2026-09）：布局锚定补偿**。用户实测发现往上滚时页面冷不丁跳位置：
+> 根因是 content-visibility 估算高 → 真实高的切换发生在浏览器异步渲染时，
+> ops 批次保锚管不到；WebKit 又无 scroll anchoring（`overflow-anchor` 不支持），
+> 文档在 scrollY 不变下整体平移。修复：`transcript-document.js` 新增 ResizeObserver
+> 补偿——视口上方条目高度变化时同步 scrollBy 抵消（仅 userScrolling / idle 非底部；
+> ops 触达条目在批次内同步高度账簿，防与批次保锚双重补偿）。
 
 沿用提案 §7 的四阶段，补充三点修正：
 
