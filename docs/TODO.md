@@ -89,7 +89,7 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 
 | ID | Item | Status | Priority | Notes |
 |---|---|---|---|---|
-| BACKLOG-STATUS-READY-LAG | 状态栏从 working/writing 翻回 ready 比正文完成晚数秒 | open | P2 | 现象：正文输出完毕、气泡光标已提前消失（streamingBubbleComplete）后，状态栏仍等 `agentEnd` 才翻回 ready；agentEnd 排在流式积压与收尾事件（messageStart/messageEnd/contextSnapshot×2/persist）之后，每一步主线程渲染提交 ~1s，累计晚 2-6s。方向：状态是否可跟 messageEnd/最后 textDelta 走（如「正文完成即 finishing」，工具调用/多轮场景需区分）；或压缩收尾事件的渲染提交次数。注意与 streamingBubbleComplete 的语义区分（气泡完成 ≠ run 完成，后续可能还有 turn/工具）。涉及 `NewPiViewModel.handle`、`agentStatusPresentation`。 |
+| BACKLOG-STATUS-READY-LAG | 状态栏从 working/writing 翻回 ready 比正文完成晚数秒 | done | P2 | 现象：正文输出完毕、气泡光标已提前消失（streamingBubbleComplete）后，状态栏仍等 `agentEnd` 才翻回 ready；agentEnd 排在流式积压与收尾事件（messageStart/messageEnd/contextSnapshot×2/persist）之后，每一步主线程渲染提交 ~1s，累计晚 2-6s。**已实现（feat/agent-output-optimization）**：`SessionRuntime.finalAnswerComplete` —— messageEnd 且该 assistant 消息无工具调用时置位（有工具调用则后续还有 turn，不置位；textDelta/toolExecutionStart/agentStart 复位），`agentStatusPresentation` 在 `isStreaming && !finalAnswerComplete` 时才展示进行态。保守边界：只影响状态栏展示，isStreaming（Stop/composer/钉底）仍跟 agentEnd，无并发风险。原分析：方向：状态跟 messageEnd 走（「正文完成即 finishing」，工具调用/多轮场景需区分）。涉及 `NewPiViewModel.handle`、`agentStatusPresentation`。 |
 
 ## Backlog — 输入框
 
@@ -106,7 +106,7 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 
 | ID | Item | Priority | Notes |
 |---|---|---|---|
-| BACKLOG-FOLD-THINKING-TOOL | 思考过程与工具输出统一折叠，折叠后显示执行过程预览 | P1 | 当前状态：工具输出已在 `NewPiToolTranscriptView` 里有 `isExpanded` 折叠（摘要见 `collapsedSummary`）；但**思考过程（thinking/reasoning）并未真实渲染到 transcript**，`NewPiViewModel.handle` 对 `thinkingDelta` 仅打日志（`UI: reasoning delta`）。目标：把 thinking 与工具输出都用统一的折叠组件呈现，默认收起，折叠态展示执行过程预览（如 "Thinking… N steps" / 工具摘要），点击展开查看全文。涉及 `NewPiToolTranscriptView.swift`、`NewPiTranscriptRow.swift`、`NewPiMarkdownText.swift` 以及 `NewPiViewModel` 的 thinking 增量处理（需先让 thinking 进 transcript / 持久化）。 |
+| BACKLOG-FOLD-THINKING-TOOL | 思考过程与工具输出统一折叠，折叠后显示执行过程预览 | done | P1 | 当前状态：工具输出已在 `NewPiToolTranscriptView` 里有 `isExpanded` 折叠（摘要见 `collapsedSummary`）；但**思考过程（thinking/reasoning）并未真实渲染到 transcript**，`NewPiViewModel.handle` 对 `thinkingDelta` 仅打日志（`UI: reasoning delta`）。目标：把 thinking 与工具输出都用统一的折叠组件呈现，默认收起，折叠态展示执行过程预览（如 "Thinking… N steps" / 工具摘要），点击展开查看全文。涉及 `NewPiToolTranscriptView.swift`、`NewPiTranscriptRow.swift`、`NewPiMarkdownText.swift` 以及 `NewPiViewModel` 的 thinking 增量处理（需先让 thinking 进 transcript / 持久化）。**实现现状（单文档迁移后已全部满足）**：thinking 经 `pendingThinkingDelta` 节流管线进 transcript（流式 isStreaming:true + 冷恢复 reasoningContent 重建）；单文档 JS 侧 thinking/工具共用折叠卡组件，默认收起，折叠态预览（thinking=最新一行、工具=结果首行，Running 时回退显示命令）；工具卡展开区分色展示命令+结果。 |
 
 ## Code review 2026-08-27 — 待修复问题
 

@@ -245,6 +245,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 case .running: kindTag = "tool"; extra = "run|" + name
                 case .completed(let isError): kindTag = "tool"; extra = (isError ? "err|" : "ok|") + name
                 }
+                extra += "|" + (item.toolCommand ?? "")
             }
             return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.body)"
         }
@@ -257,6 +258,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 "streaming": streaming,
             ]
             if let tint { op["tint"] = tint }
+            if let command = item.toolCommand { op["command"] = command }
             switch item.kind {
             case .user: op["kind"] = "user"
             case .assistant: op["kind"] = "assistant"

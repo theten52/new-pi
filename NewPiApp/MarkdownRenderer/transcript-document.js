@@ -378,16 +378,36 @@
 
     const preview = document.createElement("span");
     preview.className = "card-preview";
-    // 思考展示最新一行（流式追加在尾部）；工具输出展示首行摘要
-    preview.textContent = isThinking ? lastNonEmptyLine(op.body) : firstNonEmptyLine(op.body);
+    // 思考展示最新一行（流式追加在尾部）；工具展示结果首行摘要，
+    // 结果为空（Running 中）时回退展示命令本身——折叠态也能看到正在跑什么。
+    preview.textContent = isThinking
+      ? lastNonEmptyLine(op.body)
+      : (firstNonEmptyLine(op.body) || (op.command ? firstNonEmptyLine(op.command) : ""));
     header.appendChild(preview);
 
     card.appendChild(header);
 
-    const bodyEl = document.createElement("pre");
-    bodyEl.className = "card-body";
-    bodyEl.textContent = op.body;
-    card.appendChild(bodyEl);
+    // 工具卡展开区：命令（高亮色）与结果用分隔线分开（BACKLOG：工具卡展开展示命令+结果）。
+    if (!isThinking && op.command) {
+      const cmdEl = document.createElement("pre");
+      cmdEl.className = "card-cmd";
+      cmdEl.textContent = op.command;
+      card.appendChild(cmdEl);
+      if (op.body) {
+        const sep = document.createElement("div");
+        sep.className = "card-sep";
+        card.appendChild(sep);
+      }
+    }
+
+    // 结果为空且已有命令块（Running 中的工具）时不挂空 body，避免展开区出现多余分隔线；
+    // 结果到达后结构性重渲染会自然补上。
+    if (op.body || isThinking) {
+      const bodyEl = document.createElement("pre");
+      bodyEl.className = "card-body";
+      bodyEl.textContent = op.body;
+      card.appendChild(bodyEl);
+    }
 
     el.appendChild(card);
   }

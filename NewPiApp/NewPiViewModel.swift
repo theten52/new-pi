@@ -29,6 +29,9 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let id: UUID
     let kind: NewPiTranscriptItemKind
     let body: String
+    /// 工具条目的调用摘要（bash 命令本体 / 文件路径 / 紧凑 JSON），展开卡里与结果分开展示；
+    /// 非工具条目为 nil。
+    let toolCommand: String?
     let messageIndex: Int?
     let sessionEntryID: String?
 
@@ -36,12 +39,14 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         id: UUID = UUID(),
         kind: NewPiTranscriptItemKind,
         body: String,
+        toolCommand: String? = nil,
         messageIndex: Int? = nil,
         sessionEntryID: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.body = body
+        self.toolCommand = toolCommand
         self.messageIndex = messageIndex
         self.sessionEntryID = sessionEntryID
     }
@@ -109,6 +114,13 @@ final class SessionRuntime: ObservableObject {
     /// 用于让流式气泡提前切换到完成态渲染（去 ✦ 光标、上 hljs 高亮），
     /// 不必等 agentEnd（它排在流式积压与收尾事件之后，实测会晚数秒）。
     @Published var streamingBubbleComplete = false
+    /// 最终答复的正文已落定（messageEnd 且该消息无工具调用）：状态栏可提前翻回 ready，
+    /// 不等排在收尾事件之后的 agentEnd（实测晚 2-6s，BACKLOG-STATUS-READY-LAG）。
+    /// 保守原则：仅影响状态展示；isStreaming（Stop 按钮 / composer 禁用 / 钉底判定）不变。
+    @Published var finalAnswerComplete = false
+    /// 进行/已完成工具调用的命令摘要（toolCallID → 摘要）：start 时提取，end 时回填入条目，
+    /// 覆盖「end 找不到 running 条目」的兜底分支。
+    var toolCommands: [String: String] = [:]
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
@@ -163,12 +175,16 @@ private func makeTranscriptItems(
 ) -> [NewPiTranscriptItem] {
     var items: [NewPiTranscriptItem] = []
     items.reserveCapacity(messages.count)
+    // 上一条 assistant 消息的工具调用表：toolResult 只有结果没有参数，
+    // 用 toolCallID 回查拿命令摘要（恢复会话后工具卡仍能展示命令）。
+    var lastToolCalls: [String: ToolCallContent] = [:]
     for (index, message) in messages.enumerated() {
         let entryID = index < entryIDs.count ? entryIDs[index] : nil
         switch message {
         case let .user(user):
             items.append(NewPiTranscriptItem(kind: .user, body: user.content, messageIndex: index, sessionEntryID: entryID))
         case let .assistant(assistant):
+            lastToolCalls = Dictionary(uniqueKeysWithValues: assistant.toolCalls.map { ($0.id, $0) })
             // 思考过程入转录（BACKLOG-TYPED-TRANSCRIPT）：reasoningContent 非空时
             // 在正文前补一条 thinking 条目。不带 messageIndex——它跟随正文条目进退，
             // 不参与 fork 锚点，也避免与正文条目争抢 id 保留表的同一 messageIndex。
@@ -177,9 +193,12 @@ private func makeTranscriptItems(
             }
             items.append(NewPiTranscriptItem(kind: .assistant, body: assistant.text, messageIndex: index, sessionEntryID: entryID))
         case let .toolResult(result):
+            let command = lastToolCalls[result.toolCallID]
+                .flatMap { newPiToolCommandSummary(name: $0.name, arguments: $0.arguments) }
             items.append(NewPiTranscriptItem(
                 kind: .tool(name: result.toolName, state: .completed(isError: result.isError)),
                 body: result.content,
+                toolCommand: command,
                 messageIndex: index,
                 sessionEntryID: entryID
             ))
@@ -188,6 +207,30 @@ private func makeTranscriptItems(
         }
     }
     return items
+}
+
+/// 工具调用参数 → 展示用命令摘要：bash 给命令本体，文件类工具给路径，
+/// 其余给紧凑单行 JSON（截断防超长）。返回 nil 表示无可展示参数。
+private func newPiToolCommandSummary(name: String, arguments: JSONValue) -> String? {
+    guard let object = arguments.objectValue, !object.isEmpty else { return nil }
+    switch name {
+    case "bash", "shell":
+        if let command = object["command"]?.stringValue, !command.isEmpty {
+            return command
+        }
+    case "read", "write", "edit", "str_replace":
+        if let path = object["path"]?.stringValue ?? object["file_path"]?.stringValue, !path.isEmpty {
+            return path
+        }
+    default:
+        break
+    }
+    guard let data = try? JSONEncoder().encode(arguments),
+          var compact = String(data: data, encoding: .utf8) else { return nil }
+    if compact.count > 300 {
+        compact = String(compact.prefix(300)) + "…"
+    }
+    return compact
 }
 
 enum NewPiAgentActivity: Equatable {
@@ -204,6 +247,8 @@ final class NewPiViewModel: ObservableObject {
     @Published var isStreaming = false
     @Published var agentActivity: NewPiAgentActivity = .idle
     @Published var pendingToolApproval: ToolApprovalRequest?
+    /// 见 SessionRuntime.finalAnswerComplete（状态栏提前翻 ready）。
+    @Published var finalAnswerComplete = false
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
     @Published var savedSessions: [SessionSummary] = []
@@ -242,7 +287,7 @@ final class NewPiViewModel: ObservableObject {
                 isActive: true
             )
         }
-        if isStreaming {
+        if isStreaming && !finalAnswerComplete {
             switch agentActivity {
             case .idle:
                 return NewPiAgentStatusPresentation(
@@ -1058,6 +1103,7 @@ final class NewPiViewModel: ObservableObject {
         isStreaming = r.isStreaming
         agentActivity = r.agentActivity
         pendingToolApproval = r.pendingToolApproval
+        finalAnswerComplete = r.finalAnswerComplete
         branchPointCount = r.branchPointCount
         isForkedBranch = r.isForkedBranch
     }
@@ -1077,6 +1123,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.isStreaming = true
             runtime.agentActivity = .thinking
             runtime.streamingBubbleComplete = false
+            runtime.finalAnswerComplete = false
             NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
@@ -1096,15 +1143,22 @@ final class NewPiViewModel: ObservableObject {
                 runtime.lastTurnUsage = assistant.usage
             }
             // 正文已完整：气泡提前切完成态渲染（去 ✦ 光标），不等 agentEnd。
-            if case .assistant = message {
+            if case let .assistant(assistant) = message {
                 runtime.streamingBubbleComplete = true
                 freezeStreamingThinking(on: runtime)
+                // 状态栏提前翻 ready（BACKLOG-STATUS-READY-LAG）：仅当这是最终答复
+                //（无工具调用 → 不会再来新一轮）；有工具调用则后面还有 turn，不翻。
+                if assistant.toolCalls.isEmpty {
+                    runtime.finalAnswerComplete = true
+                }
             }
-            hasVisibleStateChange = false
+            // messageEnd 默认不触发镜像刷新；最终答复落定（状态栏翻 ready）时除外。
+            hasVisibleStateChange = runtime.finalAnswerComplete
         case let .textDelta(delta):
             runtime.agentActivity = .writing
             // 新一轮正文开始（多轮 run 的后续 turn）：气泡切回流式渲染。
             runtime.streamingBubbleComplete = false
+            runtime.finalAnswerComplete = false
             enqueueStreamingDelta(delta, on: runtime)
             if runtime === activeRuntime, agentActivity != .writing {
                 agentActivity = .writing
@@ -1130,17 +1184,23 @@ final class NewPiViewModel: ObservableObject {
                 summary=\(request.summary)
                 """
             )
-        case let .toolExecutionStart(_, name, arguments):
+        case let .toolExecutionStart(id, name, arguments):
             runtime.agentActivity = .runningTool(name)
+            runtime.finalAnswerComplete = false
             freezeStreamingThinking(on: runtime)
-            appendTranscript(kind: .tool(name: name, state: .running), body: "", on: runtime)
+            let commandSummary = newPiToolCommandSummary(name: name, arguments: arguments)
+            if let commandSummary {
+                runtime.toolCommands[id] = commandSummary
+            }
+            appendTranscript(kind: .tool(name: name, state: .running), body: "", toolCommand: commandSummary, on: runtime)
             NewPiLogger.info(
                 category: "app",
                 message: "UI: tool execution started",
                 details: "\(name)\n\(NewPiLogFormat.describeJSONValue(arguments))"
             )
-        case let .toolExecutionEnd(_, name, result):
+        case let .toolExecutionEnd(id, name, result):
             // isError 入 kind（结构化），body 只存原始输出，不再拼接 "Error: " 前缀。
+            let command = runtime.toolCommands.removeValue(forKey: id)
             if let lastIndex = runtime.transcript.indices.last,
                case .tool(_, .running) = runtime.transcript[lastIndex].kind {
                 let running = runtime.transcript[lastIndex]
@@ -1148,11 +1208,17 @@ final class NewPiViewModel: ObservableObject {
                     id: running.id,
                     kind: .tool(name: name, state: .completed(isError: result.isError)),
                     body: result.content,
+                    toolCommand: command ?? running.toolCommand,
                     messageIndex: running.messageIndex,
                     sessionEntryID: running.sessionEntryID
                 )
             } else {
-                appendTranscript(kind: .tool(name: name, state: .completed(isError: result.isError)), body: result.content, on: runtime)
+                appendTranscript(
+                    kind: .tool(name: name, state: .completed(isError: result.isError)),
+                    body: result.content,
+                    toolCommand: command,
+                    on: runtime
+                )
             }
             NewPiLogger.info(
                 category: "app",
@@ -1236,6 +1302,9 @@ final class NewPiViewModel: ObservableObject {
         })
 
         runtime.transcript.removeAll()
+        // 同 makeTranscriptItems：toolResult 只有结果没有参数，用 toolCallID 回查上一条
+        // assistant 消息的工具调用表，恢复命令摘要。
+        var lastToolCalls: [String: ToolCallContent] = [:]
         for (index, message) in messages.enumerated() {
             let entryID = index < entryIDs.count ? entryIDs[index] : nil
             let preservedID = preservedTranscriptID(
@@ -1257,6 +1326,7 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: entryID
                 ))
             case let .assistant(assistant):
+                lastToolCalls = Dictionary(uniqueKeysWithValues: assistant.toolCalls.map { ($0.id, $0) })
                 // 与 makeTranscriptItems 一致：reasoningContent 非空时在正文前补 thinking 条目
                 //（fresh id，不占 messageIndex，避免与正文争抢 id 保留表）。
                 if !assistant.reasoningContent.isEmpty {
@@ -1273,10 +1343,13 @@ final class NewPiViewModel: ObservableObject {
                     sessionEntryID: entryID
                 ))
             case let .toolResult(result):
+                let command = lastToolCalls[result.toolCallID]
+                    .flatMap { newPiToolCommandSummary(name: $0.name, arguments: $0.arguments) }
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     kind: .tool(name: result.toolName, state: .completed(isError: result.isError)),
                     body: result.content,
+                    toolCommand: command,
                     messageIndex: index,
                     sessionEntryID: entryID
                 ))
@@ -1423,8 +1496,8 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
-        let item = NewPiTranscriptItem(kind: kind, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
         if let r = activeRuntime {
             r.transcript.append(item)
             transcript = r.transcript
@@ -1434,8 +1507,8 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
-        runtime.transcript.append(NewPiTranscriptItem(kind: kind, body: body, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
+        runtime.transcript.append(NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
