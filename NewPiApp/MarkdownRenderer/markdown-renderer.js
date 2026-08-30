@@ -251,7 +251,9 @@
     options = options || {};
     const reportHeight = options.reportHeight !== false;
     const postSnapshot = options.postSnapshot !== false;
-    const enableCaret = options.caret !== false;
+    // 需求：移除助手消息末尾的 ✦ 小星星（流式/终态光标）。此处恒为 false，
+    // 使任何调用方都不再生成该光标；相关渲染/高度上报逻辑保留不动，便于后续恢复。
+    const enableCaret = false;
 
     let renderedBlocks = [];
     let hasStreamed = false;

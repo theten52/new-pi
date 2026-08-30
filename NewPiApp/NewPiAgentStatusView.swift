@@ -78,14 +78,15 @@ struct NewPiAgentStatusIcon: View {
 
     private var backgroundColor: Color {
         if presentation.isActive {
-            return Color.accentColor.opacity(0.12)
+            // 需求：激活（working/thinking/running tool）时给绿色背景，使其更显眼。
+            return Color.green.opacity(0.16)
         }
         return Color(nsColor: .controlBackgroundColor)
     }
 
     private var borderColor: Color {
         if presentation.isActive {
-            return Color.accentColor.opacity(0.28)
+            return Color.green.opacity(0.35)
         }
         return Color.primary.opacity(0.08)
     }
@@ -183,10 +184,7 @@ struct NewPiAgentStatusBar: View {
         //（宽度由调用方 .padding(.horizontal) 控制，与输入框对齐）。
         HStack(spacing: 8) {
             NewPiAgentStatusIcon(presentation: presentation, size: .compact)
-            Text(presentation.label)
-                .font(.subheadline)
-                .foregroundStyle(presentation.isActive ? Color.primary : Color.secondary)
-                .lineLimit(1)
+            NewPiStatusBreathingLabel(text: presentation.label, isActive: presentation.isActive)
             Spacer(minLength: 0)
             if let modelPicker {
                 modelPicker
@@ -221,6 +219,45 @@ struct NewPiAgentStatusBar: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(presentation.label)
+    }
+}
+
+/// 状态栏文字标签：激活（working / thinking / running tool / 待审批）时，
+/// 以绿色做「呼吸灯」脉动闪烁（透明度随时间往复变化），使其更显眼。
+struct NewPiStatusBreathingLabel: View {
+    let text: String
+    let isActive: Bool
+
+    /// 呼吸灯相位：true → 亮，false → 暗。用 repeatForever(autoreverses:) 让其往复，
+    /// 形成连续呼吸效果。
+    @State private var phase: Bool = false
+
+    var body: some View {
+        Text(text)
+            .font(.subheadline)
+            .lineLimit(1)
+            .foregroundStyle(textColor)
+            .opacity(isActive ? (phase ? 1.0 : 0.35) : 1.0)
+            .animation(breathingAnimation, value: phase)
+            .onAppear {
+                if isActive { phase = true }
+            }
+            .onChange(of: isActive) { newValue in
+                if newValue {
+                    phase = true
+                } else {
+                    phase = false
+                }
+            }
+    }
+
+    private var textColor: Color {
+        isActive ? Color.green : Color.secondary
+    }
+
+    private var breathingAnimation: Animation? {
+        guard isActive else { return nil }
+        return .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
     }
 }
 
