@@ -114,6 +114,7 @@ NewPiChatView.swift  → chat layout, scroll pinning, composer + status bar
 - **Streaming:** native `Text` / `AttributedString` (intrinsic height, no WebView mount jump)
 - **Completed:** WKWebView markdown-it + highlight.js (`flushRendering: true` on agentEnd)
 - **Chat scroll/layout:** see [`docs/dev-notes/chat-scroll-layout.md`](dev-notes/chat-scroll-layout.md) (Agent 必读)
+- **Multi-modal (图片) 支持:** see [`docs/multi-modal-vision-plan.md`](multi-modal-vision-plan.md) (规划中，未执行)
 
 ## MCP plugins (Phase 7a)
 

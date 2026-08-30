@@ -79,7 +79,7 @@ scrollToBottom / restoreAnchor），**不消费任何内容高度**。遗留的 
 
 其他：`architecture.md`、`TODO.md`、`approval-permissions-design.md`、
 `multi-model-collaboration-plan.md`、`session-switch-instant-resume-plan.md`、
-`rendered-result-replay-plan.md`
+`rendered-result-replay-plan.md`、`multi-modal-vision-plan.md`（图片支持，规划未执行）
 
 ## 工作约定
 
