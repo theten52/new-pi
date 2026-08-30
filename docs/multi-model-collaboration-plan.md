@@ -144,7 +144,7 @@ review 结论必须先实读相关代码与决策文档，引用原文位置（�
 
 ### 工作目录约定
 
-三个 CLI 的会话都绑定工作目录（cwd）。**Hermes 发起任何调用前，必须显式 `cd` 到同一项目目录**（`.`），否则各 Agent 的会话历史和上下文会错乱。kimi 路径还需 `export PATH`（见"路径准备"）。
+三个 CLI 的会话都绑定工作目录（cwd）。**Hermes 发起任何调用前，必须显式 `cd` 到同一项目目录**（仓库根 `.`，即包含 `NewPi.xcodeproj` 的目录），否则各 Agent 的会话历史和上下文会错乱。kimi 路径还需 `export PATH`（见"路径准备"）。
 
 ### 沟通机制
 
@@ -204,7 +204,7 @@ CLI 默认输出为自然语言文本，**不要假设返回是结构化 JSON**�
 任务ID: TASK-001
 类型: implement | review | design
 描述: 实现消息搜索功能
-上下文文件: ./.hermes/tasks/TASK-001/context.md
+上下文文件: `./.hermes/tasks/TASK-001/context.md`
   （Hermes 预先将相关限制、背景、K3 方案摘要等写入该文件，被调用方用文件工具读取，
    不受 prompt 长度限制，避免大上下文被截断）
 涉及文件: NewPiApp/SearchView.swift
