@@ -644,6 +644,11 @@ struct NewPiSessionPanel: View {
               !runtime.isStreaming else { return }
         input = ""
         viewModel.send(text)
+        // 发送 = 明确要看最新内容的意图（聊天应用惯例）：文档路径显式钉底，
+        // 否则用户停在中部时，流式输出按保锚纪律不跟随（看起来像没反应）。
+        if useDocumentTranscript {
+            docController.scrollToBottom()
+        }
     }
 }
 

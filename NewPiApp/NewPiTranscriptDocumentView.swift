@@ -75,6 +75,12 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.attach(webView)
         context.coordinator.loadShell()
+        // TEMP-DEBUG（BACKLOG-SINGLE-DOC Phase 2 验收后移除）：冷启动恢复链路排查
+        NewPiLogger.debug(
+            category: "app",
+            message: "Transcript doc makeNSView",
+            details: "session=\(runtime.sessionID.uuidString.prefix(8)) restoreEntry=\(restoreEntry.map { "row=\($0.rowID?.prefix(8) ?? "nil") delta=\($0.delta) offset=\($0.offset)" } ?? "nil")"
+        )
         return webView
     }
 
@@ -207,8 +213,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                     var restore: [String: Any] = ["op": "restoreAnchor", "delta": entry.delta, "offset": entry.offset]
                     if let rowID = entry.rowID { restore["id"] = rowID }
                     ops.append(restore)
+                    NewPiLogger.debug(category: "app", message: "Transcript doc restoreAnchor sent", details: "row=\(entry.rowID?.prefix(8) ?? "nil") delta=\(entry.delta) offset=\(entry.offset) items=\(snapshot.items.count)") // TEMP-DEBUG
                 } else {
                     ops.append(["op": "scrollToBottom", "smooth": false])
+                    NewPiLogger.debug(category: "app", message: "Transcript doc no restore entry, scrollToBottom", details: "items=\(snapshot.items.count)") // TEMP-DEBUG
                 }
                 pendingRestoreEntry = nil
             }
