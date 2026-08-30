@@ -1,6 +1,6 @@
 # NewPi 权限管理设计文档
 
-> 状态：设计评审中
+> 状态：已实施（2026-09 更新：整类工具授权记忆 + 危险评估降噪 + Sheet UI 重做）
 > 目标：实现三档允许粒度（一次/本对话/一直）的权限管理，并引入危险等级评估与持久化。
 
 ---
@@ -62,7 +62,8 @@ public enum ToolDangerLevel: Int, Sendable, Equatable, Comparable, Codable {
 
 | 层 | 作用 | 判定 | 是否调 LLM |
 |---|---|---|---|
-| ① 本地高危规则 | `rm -rf`、`sudo`、`git push --force`、`curl|sh`、磁盘/设备操作 | 命中 → **HIGH**（确定） | 否 |
+| ① 本地高危规则 | `rm -rf`（危险目标）、`sudo`、`git push --force`、`curl|sh`、磁盘/设备操作 | 命中 → 规则等级（确定） | 否 |
+| ①.5 只读 bash 识别 | 整段命令均由已知只读命令组成（ls/find/cat/grep/git status…），无写入重定向、无命令替换、find 无 -exec/-delete、git 为只读子命令 | → **LOW** | 否 |
 | ② 工具类型基线 | `read`=low，`write`/`edit`/`bash`/`subagent`=medium，MCP=medium | 返回基线等级 | 否 |
 | ③ LLM 补充（可选） | 对 ①② 未覆盖/需语义判断的命令做补充评估 | 返回等级+原因 | 是（可配置开关） |
 | ④ 缓存 | 按 `工具名 + 参数指纹` 缓存评估结果 | 命中直接返回 | 否 |
@@ -73,32 +74,30 @@ public enum ToolDangerLevel: Int, Sendable, Equatable, Comparable, Codable {
 
 ### 4.2 本地危险规则（bash 重点）
 
-```swift
-struct RiskPattern {
-    let regex: NSRegularExpression
-    let reason: String
-}
+规则匹配前先**剥离 shell 字符串字面量**（单/双引号内容），避免仅「提及」危险词
+的命令被误判高危（如 `grep "sudo"`、`git commit -m "rm -rf 用法"`）。
 
-static let highRiskPatterns: [RiskPattern] = [
-    .init(#"\brm\s+(-rf|-fr|-r\s+-f|-f\s+-r)\b"#, "递归强制删除文件"),
-    .init(#"\brm\s+-[a-z]*[rR][a-z]*\s+/\b"#, "删除根目录"),
-    .init(#"\bsudo\b"#, "提权执行"),
-    .init(#"\b(mkfs|diskutil|dd)\b"#, "磁盘/设备操作"),
-    .init(#"\bgit\s+push\s+--force"#, "强制推送"),
-    .init(#"curl\s+.*\|\s*(sh|bash)"#, "下载并执行脚本"),
-    .init(#"\bchmod\s+777"#, "权限放宽"),
-    .init(#">\s*/etc/passwd|>/dev/(disk|[a-z]+)"#, "写入系统/设备"),
-]
-```
+`rm` 递归强制删除**按目标分级**：目标是 home/根/上级/绝对路径 → 高危（每次强制
+确认）；项目内相对路径（如 `rm -rf build/`）→ 中危，可被授权记忆。
+`docker rm/rmi` 为中危，`docker system prune` 为高危。
+当前规则集以代码为准：`ApprovalPolicy.defaultRiskRules`。
 
 ### 4.3 参数指纹
 
 ```swift
 struct ToolApprovalFingerprint {
     static func make(arguments: JSONValue) -> String
-    // 对 JSON 做稳定排序后 SHA256，作为缓存 key / 永久允许记录 key
+    // 对 JSON 做稳定排序后 SHA256，作为危险评估缓存 key
 }
 ```
+
+> 注：指纹不再用于授权记录匹配——session/forever 授权按整类工具记忆（见 §5）。
+
+### 4.4 参数别名共用解析
+
+bash 执行端接受 `cmd`/`script` 别名，read/write/edit 接受 `file_path`/`filePath`
+别名。`DangerEvaluator` 与 `ToolApprovalSummary` 通过 `ToolArguments.optionalString`
+与执行端共用同一份别名表，避免别名绕过评估或审批摘要显示 `?`。
 
 ---
 
@@ -122,6 +121,10 @@ public actor ToolApprovalTracker {
     public func record(scope: ApprovalScope, tool: String, args: JSONValue, danger: DangerAssessment)
 }
 ```
+
+**授权粒度**：`session`/`forever` 记录按**整类工具**记忆（`parametersFingerprint = nil`）
+——用户选择「本对话一直允许 bash」后，本对话内 bash 的非高危调用不再弹窗。
+早期版本按精确参数指纹记忆，每条新命令都重新弹窗，等同失效，已废弃。
 
 **授权判定流程**（`isAuthorized`）：
 
@@ -203,43 +206,44 @@ public func respondToToolApproval(
 ### 7.3 AgentLoop 授权逻辑
 
 ```
-requiresApproval?
-  ├─ 是 → isAuthorized(tool, args)?
-  │        ├─ true  → 直接执行
-  │        └─ false → yield(.toolApprovalRequired(request 含危险信息))
-  │                    → await requestToolApproval(request)
-  │                    → 用户返回 (approved, scope)
-  │                    → 写 tracker（high 则仅本次）
-  └─ 否 → 直接执行
+toolPolicy.requiresApproval(tool)?
+  ├─ 否 → 直接执行
+  └─ 是 → danger = DangerEvaluator.evaluate(tool, args)
+           ├─ danger.level == .low（只读）→ 直接执行，不弹审批（与 read 工具一致）
+           └─ 否则 → isAuthorized(tool, args)?
+                      ├─ true  → 直接执行
+                      └─ false → yield(.toolApprovalRequired(request 含危险信息))
+                                  → await requestToolApproval(request)
+                                  → 用户返回 (approved, scope)
+                                  → 写 tracker（high 则仅本次）
 ```
 
 ---
 
-## 8. UI 改造：NewPiToolApprovalSheet
+## 8. UI：NewPiToolApprovalSheet
 
 ```
-┌────────────────────────────────────────────────┐
-│  ⚠️  高风险操作需要确认                         │
-│  BASH                                           │
-│                                                 │
-│  Run command:                                   │
-│  rm -rf ~/important                             │
-│                                                 │
-│  ───────────────────────────────────────────    │
-│  🔴 高危险 · 递归强制删除文件                   │  ← 危险图标+提示
-│                                                 │
-│  [ Deny ]       [ 一次允许 ]                     │
-│                 [ 本对话一直允许 ]               │
-│                 [ 一直允许 ]                     │
-└────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  [图标] 高风险操作 · 需再次确认                     │
+│         [BASH] [高风险]                            │
+│  ┌────────────────────────────────────────────┐  │
+│  │ Run command:                               │  │
+│  │ rm -rf ~/important                         │  │  ← 等宽内容块
+│  └────────────────────────────────────────────┘  │
+│  ⚠ 递归强制删除 home/根/上级目录                  │  ← 危险横幅
+│                                                  │
+│  ────────────────────────────────────────────    │
+│  [拒绝]          [不再询问…▾] [允许一次(默认)]     │
+└──────────────────────────────────────────────────┘
 ```
 
-- **危险图标**：`exclamationmark.triangle.fill`（红，high）/ `exclamationmark.triangle`（橙，medium）/ `checkmark.circle`（灰绿，low）。
-- **危险提示**：显示 `dangerReason`。
-- **三个允许按钮 + Deny**：
-  - `一次允许`：**默认高亮主按钮**（borderedProminent，Enter 快捷）。
-  - `本对话一直允许` / `一直允许`：次级按钮。
-- **高风险**：三个允许按钮仍可选，但文案附加提示「本次将允许，该操作每次执行仍会再次确认」；点击任意允许后若为 high，本次放行但不写 tracker/持久化。
+- **头部**：危险图标（彩色圆角底）+ 标题 + 工具名 chip + 危险等级胶囊（红/橙/绿）。
+- **内容块**：等宽、圆角描边、可选中复制，超高滚动。
+- **危险横幅**：显示 `dangerReason`（浅色危险色底）。
+- **操作行**：`拒绝`（Esc）／`允许一次`（主按钮，Enter）／`不再询问…` 菜单
+  （`本对话中不再询问 {tool}` = session、`一直允许 {tool}` = forever，按整类工具记忆）。
+- **高风险**：不显示「不再询问」菜单，并提示「后续每次执行仍会再次确认」；
+  点击允许后本次放行但不写 tracker/持久化。
 
 ---
 
@@ -286,3 +290,29 @@ requiresApproval?
 - **HIGH 不可被持久化跳过**：即使「一直允许」，HIGH 每次仍强制提示。
 - **MCP 工具**：默认 medium，命中危险关键词升为高；MCP 工具名带 server 前缀，`DangerEvaluator` 需解析。
 - **并发**：`ToolApprovalTracker`/`PersistentApprovalStore` 为 actor/lock 保护，`DangerAssessmentCache` 用 actor（LRU 上限 512）。
+
+---
+
+## 12. 审批审计日志（ToolApprovalAuditLogger）
+
+每次工具调用（无论是否弹窗）记录一条 JSONL，供事后 review 权限设计是否合理：
+
+- **存储**：`~/.new-pi/agent/approval-audit.jsonl`；超过 10MB 轮转为 `.1`（保留一代）。
+- **接线**：`AgentLoopConfig.auditLogger`（`AgentSession` 默认启用）→ `ToolContext`
+  透传 → `SubAgentTool` 子代理同样记录。
+- **字段**：
+
+| 字段 | 含义 |
+|---|---|
+| `timestamp` / `workingDirectory` / `callID` / `toolName` | 调用定位 |
+| `arguments` / `argumentsTruncated` | 原始参数 JSON（超 16KB 截断） |
+| `summary` / `fingerprint` | 审批摘要 / 参数指纹 |
+| `dangerLevel` / `dangerReason` / `matchedRules` | 危险评估结果 |
+| `policyRequiresApproval` | 工具策略是否要求审批 |
+| `approvalPrompted` | 实际是否弹窗 |
+| `authorization` | `not-required` / `low-risk` / `session` / `forever` / `prompted` |
+| `decisionApproved` / `decisionScope` | 弹窗时用户的决定（未弹窗为 null） |
+
+- 写日志失败不阻塞工具执行；审计在审批决议后、工具执行前落盘（拒绝也记录）。
+
+---

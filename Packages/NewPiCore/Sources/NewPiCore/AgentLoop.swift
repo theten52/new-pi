@@ -253,7 +253,8 @@ public struct AgentLoop: Sendable {
             requestToolApproval: config.requestToolApproval,
             toolApprovalTracker: config.toolApprovalTracker,
             dangerEvaluator: config.dangerEvaluator,
-            dangerCache: config.dangerCache
+            dangerCache: config.dangerCache,
+            auditLogger: config.auditLogger
         )
 
         NewPiLogger.info(
@@ -274,7 +275,7 @@ public struct AgentLoop: Sendable {
                 details: NewPiLogFormat.describeToolCall(call)
             )
 
-            let requiresApproval = config.toolPolicy.requiresApproval(toolName: call.name)
+            let policyRequiresApproval = config.toolPolicy.requiresApproval(toolName: call.name)
             let fingerprint = ToolApprovalFingerprint.make(arguments: call.arguments)
 
             // 危险评估（缓存优先）。
@@ -285,18 +286,61 @@ public struct AgentLoop: Sendable {
                 cache: config.dangerCache
             )
 
+            // 低风险（只读）调用不弹审批，与 read 工具的处理保持一致。
+            let requiresApproval = policyRequiresApproval && assessment.level != .low
+            if policyRequiresApproval && !requiresApproval {
+                NewPiLogger.debug(
+                    category: "tool-approval",
+                    message: "Low-risk call auto-approved",
+                    details: "tool=\(call.name) reason=\(assessment.reason ?? "none")"
+                )
+            }
+
+            // 审批审计：记录原始参数、危险评估、审批路径与用户决定，供事后 review。
+            var authorization: ToolApprovalAuditEntry.Authorization = policyRequiresApproval ? .lowRisk : .notRequired
+            var approvalDecision: ApprovalDecision?
+
+            // 审计记录闭包：捕获 authorization/approvalDecision 的当前值。
+            let recordAudit = {
+                let (argsText, argsTruncated) = ToolApprovalAuditLogger.serializeArguments(call.arguments)
+                config.auditLogger?.record(
+                    ToolApprovalAuditEntry(
+                        workingDirectory: context.workingDirectory.path,
+                        callID: call.id,
+                        toolName: call.name,
+                        arguments: argsText,
+                        argumentsTruncated: argsTruncated,
+                        summary: ToolApprovalSummary.make(toolName: call.name, arguments: call.arguments),
+                        fingerprint: fingerprint,
+                        dangerLevel: assessment.level,
+                        dangerReason: assessment.reason,
+                        matchedRules: assessment.matchedRules,
+                        policyRequiresApproval: policyRequiresApproval,
+                        approvalPrompted: authorization == .prompted,
+                        authorization: authorization,
+                        decisionApproved: approvalDecision?.approved,
+                        decisionScope: approvalDecision?.scope
+                    )
+                )
+            }
+
             let alreadyApproved: Bool
             if requiresApproval, let tracker = config.toolApprovalTracker {
-                alreadyApproved = await tracker.isAuthorized(
+                let source = await tracker.authorizationSource(
                     toolName: call.name,
                     fingerprint: fingerprint,
                     dangerLevel: assessment.level
                 )
+                alreadyApproved = source != nil
+                if let source {
+                    authorization = source
+                }
             } else {
                 alreadyApproved = false
             }
 
             if requiresApproval && !alreadyApproved {
+                authorization = .prompted
                 let request = ToolApprovalRequest(
                     id: call.id,
                     toolName: call.name,
@@ -328,6 +372,8 @@ public struct AgentLoop: Sendable {
                     )
                     let reason = "Tool execution denied: approval handler not configured"
                     let result = ToolResult(content: reason, isError: true)
+                    approvalDecision = .deny
+                    recordAudit()
                     continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
                     return ToolResultMessage(
                         toolCallID: call.id,
@@ -338,6 +384,7 @@ public struct AgentLoop: Sendable {
                 }
 
                 let decision = await requestToolApproval(request)
+                approvalDecision = decision
                 NewPiLogger.info(
                     category: "tool-approval",
                     message: decision.approved ? "Tool approved" : "Tool denied",
@@ -346,6 +393,7 @@ public struct AgentLoop: Sendable {
                 if !decision.approved {
                     let reason = "Tool execution denied by policy"
                     let result = ToolResult(content: reason, isError: true)
+                    recordAudit()
                     continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
                     return ToolResultMessage(
                         toolCallID: call.id,
@@ -364,6 +412,8 @@ public struct AgentLoop: Sendable {
                     )
                 }
             }
+
+            recordAudit()
 
             // 审批等待期间任务可能已被取消：执行有副作用的工具前最后检查一次。
             try Task.checkCancellation()

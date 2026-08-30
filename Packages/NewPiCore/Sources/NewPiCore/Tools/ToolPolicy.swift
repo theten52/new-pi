@@ -58,15 +58,15 @@ public enum ToolApprovalSummary {
     public static func make(toolName: String, arguments: JSONValue) -> String {
         switch toolName {
         case "read":
-            let path = arguments.objectValue?["path"]?.stringValue ?? "?"
+            let path = ToolArguments.optionalString(arguments, key: "path", aliases: ["file_path", "filePath"]) ?? "?"
             return "Read file: \(path)"
         case "write":
-            let path = arguments.objectValue?["path"]?.stringValue ?? "?"
+            let path = ToolArguments.optionalString(arguments, key: "path", aliases: ["file_path", "filePath"]) ?? "?"
             let content = arguments.objectValue?["content"]?.stringValue ?? ""
             let preview = String(content.prefix(120))
             return "Write file: \(path)\n\(preview)\(content.count > 120 ? "…" : "")"
         case "edit":
-            let path = arguments.objectValue?["path"]?.stringValue ?? "?"
+            let path = ToolArguments.optionalString(arguments, key: "path", aliases: ["file_path", "filePath"]) ?? "?"
             let oldText = arguments.objectValue?["old_string"]?.stringValue ?? ""
             let newText = arguments.objectValue?["new_string"]?.stringValue ?? ""
             return """
@@ -75,7 +75,7 @@ public enum ToolApprovalSummary {
             + \(newText.prefix(80))\(newText.count > 80 ? "…" : "")
             """
         case "bash":
-            let command = arguments.objectValue?["command"]?.stringValue ?? "?"
+            let command = ToolArguments.optionalString(arguments, key: "command", aliases: ["cmd", "script"]) ?? "?"
             return "Run command:\n\(command)"
         case SubAgentTool.toolName:
             let task = arguments.objectValue?["task"]?.stringValue ?? "?"
@@ -104,18 +104,33 @@ public actor ToolApprovalTracker {
     /// 判定是否被已有授权覆盖（含 session / forever）。
     /// 高危调用永远返回 false，即必须重新提示。
     public func isAuthorized(toolName: String, fingerprint: String, dangerLevel: ToolDangerLevel) -> Bool {
+        authorizationSource(toolName: toolName, fingerprint: fingerprint, dangerLevel: dangerLevel) != nil
+    }
+
+    /// 命中已有授权时返回来源（session / forever），供审计日志记录。
+    /// 高危调用永远返回 nil，即必须重新提示。
+    public func authorizationSource(
+        toolName: String,
+        fingerprint: String,
+        dangerLevel: ToolDangerLevel
+    ) -> ToolApprovalAuditEntry.Authorization? {
         if dangerLevel == .high {
-            return false
+            return nil
         }
         if let record = sessionRecords[toolName],
            record.matches(toolName: toolName, fingerprint: fingerprint) {
-            return true
+            return .sessionRecord
         }
-        return persistentStore.isForeverApproved(toolName: toolName, fingerprint: fingerprint)
+        if persistentStore.isForeverApproved(toolName: toolName, fingerprint: fingerprint) {
+            return .foreverRecord
+        }
+        return nil
     }
 
     /// 记录一次授权。scope 决定写入哪一层。
     /// - 若为 `once`，仅返回（不写入任何记录，只放行本次）。
+    /// - 若为 `session`/`forever`，按**整类工具**记忆（不绑定参数指纹）：用户选择
+    ///  「本对话一直允许 bash」后，本对话内 bash 的非高危调用都不再弹窗。
     /// - 若危险等级为 high，也不写入任何记录（强制下次继续提示）。
     public func record(
         scope: ApprovalScope,
@@ -126,9 +141,10 @@ public actor ToolApprovalTracker {
         guard scope != .once else { return }
         guard dangerLevel != .high else { return }
 
+        // 整类工具授权：fingerprint 置 nil，ApprovalRecord.matches 对任意指纹生效。
         let record = ApprovalRecord(
             toolName: toolName,
-            parametersFingerprint: fingerprint,
+            parametersFingerprint: nil,
             scope: scope
         )
         switch scope {

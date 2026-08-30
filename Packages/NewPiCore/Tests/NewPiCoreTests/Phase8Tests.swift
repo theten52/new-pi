@@ -105,7 +105,7 @@ struct SubAgentToolTests {
     func subAgentBashRequiresApproval() async throws {
         let llm = MockLLMProviderBox(scripts: [
             [
-                .toolCall(ToolCallContent(id: "call_1", name: "bash", arguments: .object(["command": .string("echo hi")]))),
+                .toolCall(ToolCallContent(id: "call_1", name: "bash", arguments: .object(["command": .string("mkdir -p build")]))),
                 .completed(stopReason: .toolUse, usage: UsageStats()),
             ],
             [

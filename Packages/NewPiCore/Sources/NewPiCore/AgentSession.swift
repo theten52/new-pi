@@ -32,6 +32,7 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
     }
 
@@ -201,6 +202,7 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
         NewPiLogger.info(
             category: "agent-session",
@@ -359,7 +361,8 @@ public enum AgentSessionFactory {
                 policy: approvalPolicy,
                 llmSupplementEnabled: approvalPolicy.llmSupplementEnabled
             ),
-            dangerCache: DangerAssessmentCache()
+            dangerCache: DangerAssessmentCache(),
+            auditLogger: ToolApprovalAuditLogger()
         )
         let context = AgentContext(
             systemPrompt: SystemPromptComposer.compose(for: workingDirectory).text,

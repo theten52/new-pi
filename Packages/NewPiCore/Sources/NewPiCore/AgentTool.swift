@@ -12,6 +12,8 @@ public struct ToolContext: Sendable {
     public var toolApprovalTracker: ToolApprovalTracker?
     public var dangerEvaluator: DangerEvaluator?
     public var dangerCache: DangerAssessmentCache?
+    /// 审批审计日志：每次工具调用记录原始参数/危险评估/审批路径与结果。
+    public var auditLogger: ToolApprovalAuditLogger?
 
     public init(
         workingDirectory: URL,
@@ -21,7 +23,8 @@ public struct ToolContext: Sendable {
         requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)? = nil,
         toolApprovalTracker: ToolApprovalTracker? = nil,
         dangerEvaluator: DangerEvaluator? = nil,
-        dangerCache: DangerAssessmentCache? = nil
+        dangerCache: DangerAssessmentCache? = nil,
+        auditLogger: ToolApprovalAuditLogger? = nil
     ) {
         self.workingDirectory = workingDirectory
         self.environment = environment
@@ -31,6 +34,7 @@ public struct ToolContext: Sendable {
         self.toolApprovalTracker = toolApprovalTracker
         self.dangerEvaluator = dangerEvaluator
         self.dangerCache = dangerCache
+        self.auditLogger = auditLogger
     }
 }
 
@@ -82,6 +86,8 @@ public struct AgentLoopConfig: Sendable {
     public var dangerEvaluator: DangerEvaluator?
     /// 危险评估结果缓存（跨调用复用）。
     public var dangerCache: DangerAssessmentCache?
+    /// 审批审计日志：每次工具调用记录原始参数/危险评估/审批路径与结果。
+    public var auditLogger: ToolApprovalAuditLogger?
 
     public init(
         model: ModelConfig,
@@ -95,7 +101,8 @@ public struct AgentLoopConfig: Sendable {
         requestToolApproval: (@Sendable (ToolApprovalRequest) async -> ApprovalDecision)? = nil,
         toolApprovalTracker: ToolApprovalTracker? = nil,
         dangerEvaluator: DangerEvaluator? = nil,
-        dangerCache: DangerAssessmentCache? = nil
+        dangerCache: DangerAssessmentCache? = nil,
+        auditLogger: ToolApprovalAuditLogger? = nil
     ) {
         self.model = model
         self.llm = llm
@@ -109,6 +116,7 @@ public struct AgentLoopConfig: Sendable {
         self.toolApprovalTracker = toolApprovalTracker
         self.dangerEvaluator = dangerEvaluator
         self.dangerCache = dangerCache
+        self.auditLogger = auditLogger
     }
 }
 

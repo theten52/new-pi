@@ -87,7 +87,8 @@ public struct SubAgentTool: AgentTool {
             requestToolApproval: context.requestToolApproval,
             toolApprovalTracker: context.toolApprovalTracker,
             dangerEvaluator: context.dangerEvaluator,
-            dangerCache: context.dangerCache
+            dangerCache: context.dangerCache,
+            auditLogger: context.auditLogger
         )
 
         let loop = AgentLoop()

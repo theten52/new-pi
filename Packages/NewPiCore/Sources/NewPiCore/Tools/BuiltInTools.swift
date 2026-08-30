@@ -1,6 +1,16 @@
 import Foundation
 
 enum ToolArguments {
+    /// 非抛错版本：供危险评估、审批摘要等旁路读取参数，与执行端共用别名表。
+    static func optionalString(_ arguments: JSONValue, key: String, aliases: [String] = []) -> String? {
+        for candidate in [key] + aliases {
+            if let value = arguments.objectValue?[candidate]?.stringValue, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
     static func requiredString(_ arguments: JSONValue, key: String, aliases: [String] = []) throws -> String {
         for candidate in [key] + aliases {
             if let value = arguments.objectValue?[candidate]?.stringValue,
