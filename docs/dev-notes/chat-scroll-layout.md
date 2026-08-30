@@ -1,5 +1,11 @@
 # NewPi 聊天滚动与布局：Agent 参考手册
 
+> **🗑 2026-08-30 归档声明**：本文描述的整条遗留渲染路径（手动窗口化 / 高度表 /
+> scrollPosition / scrollTo / 预热 / 渲染缓存）已随单文档 transcript 迁移**整体删除**。
+> 现架构：整条会话一个 WKWebView，布局/滚动/虚拟化由文档内浏览器引擎自持，
+> 原生只发滚动意图（见 `docs/ui-architecture-decision.md` §4.3 与 CLAUDE.md）。
+> 本文仅作历史决策记录留存，不再描述现行实现。
+>
 > **⚠️ 2026-08-29 重大更新**：LazyVStack 已退役，聊天列表改为**手动窗口化**——可见区外的行用
 > `TranscriptHeightMap` 精确高度的占位视图填充，布局几何与 rail 定位共用同一张表。
 > 本文 §2/§3.10/§3.11 中 LazyVStack 相关描述已过时，以 `docs/rendered-result-replay-plan.md`

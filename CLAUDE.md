@@ -45,20 +45,27 @@ research-repos/        13 个第三方仓库克隆，仅供参考 —— 只读�
 
 ## UI 渲染架构（改动前必读）
 
-正文 Markdown 走 WKWebView，当前**每条消息一个 WebView**。相关文件：
+正文 Markdown 走 **单文档 transcript**（BACKLOG-SINGLE-DOC，2026-08-30 迁移完成）：
+整条会话渲染进一个 WKWebView，布局/滚动/虚拟化（content-visibility）由文档内
+浏览器引擎自持；原生侧只做 transcript diff → ops → JS，只发滚动意图（jumpTo /
+scrollToBottom / restoreAnchor），**不消费任何内容高度**。遗留的 per-message
+路径（高度表/预热/窗口化/滚轮转发/渲染缓存）已整体删除，不存在双路径。相关文件：
 
 | 文件 | 职责 |
 |---|---|
-| `NewPiApp/MarkdownRenderer/markdown-renderer.js` | 块级增量渲染、尾部规范化、产物快照/重放 |
-| `NewPiApp/NewPiMarkdownWebRenderer.swift` | WebView 宿主 + `MarkdownRenderingCache`（宽度桶 + 内容 SHA256，持久化） |
-| `NewPiApp/NewPiMarkdownHeightPreheater.swift` | 冷恢复离屏探针测高 |
-| `NewPiApp/NewPiChatView.swift` | 手动窗口化（用 `VStack` 不是 `LazyVStack`）、rail、滚动 |
-| `NewPiApp/NewPiTranscriptHeightMap.swift` | 高度表（rail 定位与占位的共同数据源） |
+| `NewPiApp/MarkdownRenderer/markdown-renderer.js` | 块级增量渲染、尾部规范化（per-root 实例） |
+| `NewPiApp/MarkdownRenderer/transcript-document.js` | 条目 DOM 管理 + 滚动状态机（文档内唯一 scroll writer） |
+| `NewPiApp/MarkdownRenderer/transcript-document.css` | 单文档样式 + content-visibility 估算高 |
+| `NewPiApp/NewPiMarkdownWebRenderer.swift` | 文档 HTML 外壳工厂（`NewPiMarkdownWebDocument`） |
+| `NewPiApp/NewPiTranscriptDocumentView.swift` | 单文档 WebView 宿主：diff → ops、滚动锚点持久化 |
+| `NewPiApp/NewPiChatView.swift` | 会话面板、composer、rail 浮层 |
+| `NewPiApp/NewPiUserMessageRail.swift` | minimap rail（JS 实测位置比例分布） |
+| `NewPiApp/NewPiChatScrollHelper.swift` | `ScrollPositionStore`（滚动锚点持久化） |
 
 已实现、**不要重做**：块级增量 + 冻结前缀对齐、尾部未闭合标记修复、
-rail pending jump + 有界校正、render-once/replay、ResizeObserver 高度桥。
+文档内滚动状态机（意图驱动 + 同批同步保锚）、锚点恢复（RAF 逐帧校正）、rail minimap。
 
-已知待办与目标架构见 `docs/`（下节）。
+已知待办见 `docs/`（下节）。
 
 ## 文档
 

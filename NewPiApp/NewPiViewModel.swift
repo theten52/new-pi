@@ -119,61 +119,11 @@ final class SessionRuntime: ObservableObject {
     /// 流式思考增量缓冲：与 pendingStreamingDelta 同管线同节流，flush 时先入 thinking 条目。
     var pendingThinkingDelta = ""
     var streamingFlushTask: Task<Void, Never>?
-    /// 冷加载就绪门控：false 时面板隐藏内容、显示 Loading，等尾部 markdown 行上报首次高度
-    /// （或超时）后才揭示。默认 true（新会话/保活命中零开销）。
-    @Published var initialRenderReady = true
-    /// 待就绪的 markdown 行 id（冷恢复时只纳入「高度缓存 miss」的行，GLM review 意见3）。
-    private var pendingInitialRenderIDs: Set<UUID> = []
-    private var initialRenderGateTask: Task<Void, Never>?
 
     init(session: AgentSession, fileURL: URL, sessionID: UUID) {
         self.session = session
         self.fileURL = fileURL
         self.sessionID = sessionID
-    }
-
-    /// 开启就绪门：rowIDs 为待就绪的 markdown 行。rowIDs 空则保持就绪并当作已完成。
-    /// 超时强制就绪，防止 LazyVStack 惰性只实例化视口行、其余 pending 行永不发信号导致超时常态化。
-    @MainActor
-    func beginInitialRenderGate(rowIDs: Set<UUID>) {
-        cancelInitialRenderGate()
-        guard !rowIDs.isEmpty else { return }
-        pendingInitialRenderIDs = rowIDs
-        initialRenderReady = false
-        initialRenderGateTask = Task { [weak self] in
-            do {
-                // 窗口化 + 产物重放后，占位高度已精确、揭示不再伴随布局跳动；
-                // 超时压到 0.6s：超时即揭示，结构先行、内容陆续填入（浏览器式渐进呈现）。
-                try await Task.sleep(nanoseconds: 600_000_000)
-            } catch {
-                return // 取消：不再强制揭示，避免旧 task 提前揭示新 gate（K3 review minor）
-            }
-            self?.forceInitialRenderReady()
-        }
-    }
-
-    /// 某 markdown 行首次高度已上报（= 初始渲染完成）。pending 清空即揭示。
-    @MainActor
-    func markInitialRowRendered(_ id: UUID) {
-        guard pendingInitialRenderIDs.remove(id) != nil else { return }
-        if pendingInitialRenderIDs.isEmpty {
-            forceInitialRenderReady()
-        }
-    }
-
-    @MainActor
-    private func forceInitialRenderReady() {
-        initialRenderGateTask?.cancel()
-        initialRenderGateTask = nil
-        pendingInitialRenderIDs.removeAll()
-        initialRenderReady = true
-    }
-
-    @MainActor
-    private func cancelInitialRenderGate() {
-        initialRenderGateTask?.cancel()
-        initialRenderGateTask = nil
-        pendingInitialRenderIDs.removeAll()
     }
 }
 
@@ -373,10 +323,6 @@ final class NewPiViewModel: ObservableObject {
         // 让「启动自动恢复上次会话」退化为全量 cache-miss（预热 9-13s、滚动条频繁跳动）。
         if let current = projectURL, newURL != current {
             await stopAllLiveSessions()
-            // 跨项目时高度缓存里的内容不再适用，清空避免残留。
-            MarkdownRenderingCache.shared.clear()
-            // 换项目时取消在飞的离屏预测高，避免向已清空的缓存写跨项目高度（GLM #1）。
-            MarkdownHeightPreheater.shared.cancel()
         }
         projectURL = newURL
         NewPiLastProjectStore.save(url)
@@ -946,16 +892,6 @@ final class NewPiViewModel: ObservableObject {
             runtime.lastTurnUsage = payload.lastTurnUsage
             runtime.lastUsedAt = Date()
 
-            // 冷恢复：开启就绪门控——只纳入「高度缓存 miss」的 markdown 行，避免 LazyVStack 惰性
-            // 只实例化视口行、其余 pending 行永不发信号导致超时常态化（GLM review 意见3）。
-            if restoredContext != nil {
-                // 变体 B（K3 方案，review 建议先做）：门控放面板内——activeRuntime 立即切换，
-                // 面板挂载即 active，内容 opacity(0) + Loading 遮罩，等尾部 markdown 行首次高度
-                //（或 1.2s 超时）后一次揭示。不依赖 opacity-0 面板预渲染（较稳妥，GLM review 意见8 风险点）。
-                // 两段式（保留旧会话 + opacity-0 预渲染再激活）留待实测确认隐面板渲染后再上。
-                runtime.beginInitialRenderGate(rowIDs: Self.initialRenderGateRowIDs(from: payload.transcriptItems))
-            }
-
             // 竞态防护（下层 :744 只防跨项目换项目；这里再防同项目内「冷 A 慢构建 → 热 B 先切 → A 覆盖 B」——
             // GLM review 意见2，现状已有问题）：只有「最后发起」的那次才允许激活。
             guard self.projectURL == projectURL,
@@ -967,13 +903,6 @@ final class NewPiViewModel: ObservableObject {
             activeRuntime = runtime
             activeSessionID = payload.header.id
             rememberActiveSession(fileURL: payload.fileURL)
-
-            // 冷恢复：启动离屏预测高（GLM #5：仅在真正激活的会话上启动，避免为被放弃的会话白跑）。
-            // 只对 cache-miss 行串行测高填缓存；用户滚动到某行时"实例化即命中真实高度"→ 滚动条稳定。
-            // 单文档模式下布局由文档自持，预热是纯浪费，跳过。
-            if restoredContext != nil, !NewPiFeatureFlags.singleDocumentTranscript {
-                MarkdownHeightPreheater.shared.preheat(items: payload.transcriptItems)
-            }
 
             await setActiveProviderState(profile)
 
@@ -1000,28 +929,6 @@ final class NewPiViewModel: ObservableObject {
             appendTranscript(kind: .error, body: error.localizedDescription)
             activeProviderReady = false
         }
-    }
-
-    /// 冷恢复就绪门控的目标行：transcript 尾部（钉底后视口 ≈ 尾屏）最多 maxCount 条
-    /// 「高度缓存 miss」的 markdown 行 id。缓存命中行首帧已是真实高度、无需门控；
-    /// 只纳入 miss 行可大幅缩小 pending 集合，避免末条超高（长代码块）时 LazyVStack
-    /// 只实例化 1-2 行、其余 pending 行永不发信号 → 超时常态化（GLM review 意见3）。
-    /// 只扫尾部 scanLimit 条：miss 凑不满 maxCount 时不会一路扫到 transcript 头，
-    /// 避免长会话全命中场景在主线程对每行做 SHA256（K3 review minor）。
-    private static func initialRenderGateRowIDs(
-        from items: [NewPiTranscriptItem],
-        maxCount: Int = 8,
-        scanLimit: Int = 40
-    ) -> Set<UUID> {
-        guard !items.isEmpty else { return [] }
-        var ids: Set<UUID> = []
-        for item in items.suffix(scanLimit).reversed() {
-            guard item.isAssistantMarkdown else { continue }
-            guard MarkdownRenderingCache.shared.height(for: item.body) == nil else { continue }
-            ids.insert(item.id)
-            if ids.count >= maxCount { break }
-        }
-        return ids
     }
 
     /// 把当前 provider 状态同步到 @Published（供两个分支复用）。

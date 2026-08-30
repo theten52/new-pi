@@ -10,8 +10,6 @@
 		AA0000010000000000000001 /* NewPiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000010000000000000001 /* NewPiApp.swift */; };
 		AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000110000000000000001 /* NewPiLastProjectStore.swift */; };
 		AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000100000000000000001 /* NewPiChatScrollHelper.swift */; };
-		AA0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */; };
-		AA0000190000000000000001 /* NewPiTranscriptHeightMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */; };
 		AA0000140000000000000001 /* NewPiChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000140000000000000001 /* NewPiChatView.swift */; };
 		AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000150000000000000001 /* NewPiUserMessageRail.swift */; };
 		AA0000020000000000000001 /* NewPiViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000020000000000000001 /* NewPiViewModel.swift */; };
@@ -19,13 +17,11 @@
 		AA0000160000000000000001 /* ApprovalPolicySettingsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */; };
 		AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */; };
 		AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000060000000000000001 /* NewPiMarkdownText.swift */; };
-		AA0000120000000000000001 /* NewPiToolTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000120000000000000001 /* NewPiToolTranscriptView.swift */; };
 		AA0000130000000000000001 /* NewPiAgentStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000130000000000000001 /* NewPiAgentStatusView.swift */; };
 		AA0000070000000000000001 /* NewPiLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000070000000000000001 /* NewPiLogStore.swift */; };
 		AA0000080000000000000001 /* NewPiLogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000080000000000000001 /* NewPiLogsView.swift */; };
 		AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000090000000000000001 /* NewPiMCPSettingsView.swift */; };
 		AA0000200000000000000001 /* NewPiSpikeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */; };
-		AA0000210000000000000001 /* NewPiFeatureFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000210000000000000001 /* NewPiFeatureFlags.swift */; };
 		AA0000220000000000000001 /* NewPiTranscriptDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000220000000000000001 /* NewPiTranscriptDocumentView.swift */; };
 		AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */; };
 		AA00000B0000000000000001 /* MarkdownRenderer in Resources */ = {isa = PBXBuildFile; fileRef = BB00000B0000000000000001 /* MarkdownRenderer */; };
@@ -38,8 +34,6 @@
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
-		BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownHeightPreheater.swift; sourceTree = "<group>"; };
-		BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiTranscriptHeightMap.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
 		BB0000150000000000000001 /* NewPiUserMessageRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiUserMessageRail.swift; sourceTree = "<group>"; };
 		BB0000020000000000000001 /* NewPiViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiViewModel.swift; sourceTree = "<group>"; };
@@ -47,13 +41,11 @@
 		BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalPolicySettingsBridge.swift; sourceTree = "<group>"; };
 		BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiToolApprovalSheet.swift; sourceTree = "<group>"; };
 		BB0000060000000000000001 /* NewPiMarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownText.swift; sourceTree = "<group>"; };
-		BB0000120000000000000001 /* NewPiToolTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiToolTranscriptView.swift; sourceTree = "<group>"; };
 		BB0000130000000000000001 /* NewPiAgentStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiAgentStatusView.swift; sourceTree = "<group>"; };
 		BB0000070000000000000001 /* NewPiLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogStore.swift; sourceTree = "<group>"; };
 		BB0000080000000000000001 /* NewPiLogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLogsView.swift; sourceTree = "<group>"; };
 		BB0000090000000000000001 /* NewPiMCPSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMCPSettingsView.swift; sourceTree = "<group>"; };
 		BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSpikeTranscriptView.swift; sourceTree = "<group>"; };
-		BB0000210000000000000001 /* NewPiFeatureFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiFeatureFlags.swift; sourceTree = "<group>"; };
 		BB0000220000000000000001 /* NewPiTranscriptDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiTranscriptDocumentView.swift; sourceTree = "<group>"; };
 		BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownWebRenderer.swift; sourceTree = "<group>"; };
 		BB00000B0000000000000001 /* MarkdownRenderer */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MarkdownRenderer; sourceTree = "<group>"; };
@@ -91,22 +83,18 @@
 				BB0000140000000000000001 /* NewPiChatView.swift */,
 				BB0000150000000000000001 /* NewPiUserMessageRail.swift */,
 				BB0000100000000000000001 /* NewPiChatScrollHelper.swift */,
-				BB0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift */,
-				BB0000190000000000000001 /* NewPiTranscriptHeightMap.swift */,
 				BB0000110000000000000001 /* NewPiLastProjectStore.swift */,
 				BB0000020000000000000001 /* NewPiViewModel.swift */,
 				BB0000030000000000000001 /* NewPiSettingsView.swift */,
 				BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */,
 				BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */,
 				BB0000060000000000000001 /* NewPiMarkdownText.swift */,
-				BB0000120000000000000001 /* NewPiToolTranscriptView.swift */,
 				BB0000130000000000000001 /* NewPiAgentStatusView.swift */,
 				BB00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift */,
 				BB0000070000000000000001 /* NewPiLogStore.swift */,
 				BB0000080000000000000001 /* NewPiLogsView.swift */,
 				BB0000090000000000000001 /* NewPiMCPSettingsView.swift */,
 				BB0000200000000000000001 /* NewPiSpikeTranscriptView.swift */,
-				BB0000210000000000000001 /* NewPiFeatureFlags.swift */,
 				BB0000220000000000000001 /* NewPiTranscriptDocumentView.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
 				BB00000C0000000000000001 /* Assets.xcassets */,
@@ -206,22 +194,18 @@
 				AA0000140000000000000001 /* NewPiChatView.swift in Sources */,
 				AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */,
 				AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */,
-				AA0000180000000000000001 /* NewPiMarkdownHeightPreheater.swift in Sources */,
-				AA0000190000000000000001 /* NewPiTranscriptHeightMap.swift in Sources */,
 				AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */,
 				AA0000020000000000000001 /* NewPiViewModel.swift in Sources */,
 				AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */,
 				AA0000160000000000000001 /* ApprovalPolicySettingsBridge.swift in Sources */,
 				AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */,
 				AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */,
-				AA0000120000000000000001 /* NewPiToolTranscriptView.swift in Sources */,
 				AA0000130000000000000001 /* NewPiAgentStatusView.swift in Sources */,
 				AA00000A0000000000000001 /* NewPiMarkdownWebRenderer.swift in Sources */,
 				AA0000070000000000000001 /* NewPiLogStore.swift in Sources */,
 				AA0000080000000000000001 /* NewPiLogsView.swift in Sources */,
 				AA0000090000000000000001 /* NewPiMCPSettingsView.swift in Sources */,
 				AA0000200000000000000001 /* NewPiSpikeTranscriptView.swift in Sources */,
-				AA0000210000000000000001 /* NewPiFeatureFlags.swift in Sources */,
 				AA0000220000000000000001 /* NewPiTranscriptDocumentView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

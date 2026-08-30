@@ -83,7 +83,7 @@ See [`dev-notes/2026-08-26-streaming-markdown-scroll-ux.md`](dev-notes/2026-08-2
 
 | ID | Item | Priority | Notes |
 |---|---|---|---|
-| BACKLOG-SCROLL-LAG | 对话流滑动不跟手 | P1 | 聊天列表滚动有滞后/不跟手手感。当前实现为「手动窗口化 + 高度表占位」（`TranscriptHeightMap`）+ `ScrollView` + `scrollPosition($jumpPosition)` + `ScrollViewReader.scrollTo` 多机制叠加，见 `docs/dev-notes/chat-scroll-layout.md`。需要：① 排查多种滚动机制是否互相干扰（dev-notes 明确警告「一种 scroll 机制」）；② 检查手动窗口化下滚动跟随全由 `onGeometryChange` 写回 `scrollOffset` 驱动是否造成每帧重算/卡顿；③ 优化滚动顺滑度（惯性、跟手度、无跳变）。涉及 `NewPiChatView.swift`、`NewPiChatScrollHelper.swift`、`NewPiTranscriptHeightMap.swift`。改前先读 `docs/dev-notes/chat-scroll-layout.md` 与 `2026-08-28-streaming-markdown-rendering-context.md`。 |
+| BACKLOG-SCROLL-LAG | 对话流滑动不跟手 | done | **已随单文档迁移作废**：本条描述的多机制叠加（窗口化+高度表+scrollPosition+scrollTo）已整体删除，滚动由文档内浏览器引擎自持（native compositor 滚动，无原生介入）。原分析备查： 聊天列表滚动有滞后/不跟手手感。当前实现为「手动窗口化 + 高度表占位」（`TranscriptHeightMap`）+ `ScrollView` + `scrollPosition($jumpPosition)` + `ScrollViewReader.scrollTo` 多机制叠加，见 `docs/dev-notes/chat-scroll-layout.md`。需要：① 排查多种滚动机制是否互相干扰（dev-notes 明确警告「一种 scroll 机制」）；② 检查手动窗口化下滚动跟随全由 `onGeometryChange` 写回 `scrollOffset` 驱动是否造成每帧重算/卡顿；③ 优化滚动顺滑度（惯性、跟手度、无跳变）。涉及 `NewPiChatView.swift`、`NewPiChatScrollHelper.swift`、`NewPiTranscriptHeightMap.swift`。改前先读 `docs/dev-notes/chat-scroll-layout.md` 与 `2026-08-28-streaming-markdown-rendering-context.md`。 |
 
 ## Backlog — 状态栏
 

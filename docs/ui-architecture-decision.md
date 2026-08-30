@@ -151,6 +151,15 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > （实测冷恢复锚点精度 -60.0px 精确收敛，用户滚轮即时接管不抢）。
 > 修复记录：单文档滚轮失效的根因是共享 markdown-renderer.css 的 `html,body{overflow:hidden}`
 > （遗留路径禁止内部滚动的设定被单文档页继承）——transcript-document.css 已覆盖回 visible。
+>
+> **迁移完成（同日，dogfood 验收通过后执行）**：用户实测全绿（滚轮 / 切会话恢复 /
+> 冷启动恢复 / 流式跟随 / 发送即钉底 / rail minimap 跳转），**遗留路径已删除**——
+> 净减约 2800 行：`NewPiTranscriptHeightMap`、`NewPiMarkdownHeightPreheater`、
+> `NewPiMarkdownWebRendererView`（per-message 宿主）+ 看门狗、`MarkdownScrollWheelForwarder`、
+> `MarkdownRenderingCache`、`NewPiToolTranscriptView`/`NewPiThinkingTranscriptView`/
+> `NewPiTranscriptRow`、面板 legacyBody 及全部 pin/恢复/门控辅助、ViewModel 就绪门控与预热调用、
+> feature flag 本身。发送消息 = 显式钉底意图。
+> 顺带关闭 BACKLOG-SCROLL-LAG（多滚动机制叠加的痼疾随遗留路径整体消失）。
 
 沿用提案 §7 的四阶段，补充三点修正：
 

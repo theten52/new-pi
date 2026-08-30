@@ -46,15 +46,6 @@ struct NewPiApp: App {
                 Button("UI Architecture Spike") {
                     NotificationCenter.default.post(name: .newPiShowSpike, object: nil)
                 }
-                // 单文档 transcript 迁移期开关（BACKLOG-SINGLE-DOC）。
-                // 切换后新打开的面板生效；已有面板下次刷新 transcript 时切换。
-                Toggle(
-                    "Single-Document Transcript (Beta)",
-                    isOn: Binding(
-                        get: { NewPiFeatureFlags.singleDocumentTranscript },
-                        set: { NewPiFeatureFlags.singleDocumentTranscript = $0 }
-                    )
-                )
             }
         }
     }
