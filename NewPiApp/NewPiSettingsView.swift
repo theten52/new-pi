@@ -8,6 +8,7 @@ struct NewPiSettingsView: View {
     @StateObject private var approvalBridge = ApprovalPolicySettingsBridge()
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
+    @State private var showLogs = false
 
     var body: some View {
         Form {
@@ -78,6 +79,12 @@ struct NewPiSettingsView: View {
             }
 
             NewPiMCPSettingsView(bridge: mcpBridge)
+
+            Section("Debug") {
+                Button("View Logs") {
+                    showLogs = true
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -91,6 +98,9 @@ struct NewPiSettingsView: View {
         }
         .sheet(item: $editingProfile) { profile in
             NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
+        }
+        .sheet(isPresented: $showLogs) {
+            NewPiLogsView(store: NewPiLogStore.shared)
         }
     }
 

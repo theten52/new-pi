@@ -222,12 +222,6 @@ struct NewPiRootView: View {
                 .onChange(of: viewModel.projectURL) { _, _ in
                     sessionDisplayLimit = recentSessionLimit
                 }
-
-                Section("Debug") {
-                    Button("View Logs") {
-                        showLogs = true
-                    }
-                }
             }
             .navigationTitle("NewPi")
         } detail: {
