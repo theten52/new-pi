@@ -38,10 +38,83 @@ html, body {
   max-width: 640px;
   margin-left: auto;
   padding: 12px;
+  /* 右侧预留按钮空间：hover 浮现的复制/分叉按钮绝对定位在右上角，
+     避免遮挡首行长文本尾部（pre-wrap 正文会占满宽度）。 */
+  padding-right: 40px;
   border-radius: 14px;
   background: hsl(var(--tint, 212) 55% 60% / 0.18);
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  position: relative;
+}
+
+/* ===== 消息级操作按钮（复制 / 分叉）：hover 浮现在气泡 / 卡片右上角 ===== */
+
+.ti-answer .card.answer {
+  position: relative;
+}
+
+.ti-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.ti:hover .ti-actions,
+.ti-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ti-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: rgba(60, 60, 67, 0.55);
+  /* 实底背景（非半透明叠加）：避免悬浮在正文上时透出底层文字。 */
+  background: rgba(242, 242, 247, 0.92);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+
+.ti-action:hover {
+  color: rgba(60, 60, 67, 0.9);
+  background: rgba(255, 255, 255, 1);
+}
+
+.ti-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* 复制成功反馈：短暂切勾图标 + 高亮（复用代码块 .copied 的视觉语义）。 */
+.ti-action-copy.copied {
+  color: rgba(52, 199, 89, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ti-action {
+    color: rgba(235, 235, 245, 0.6);
+    background: rgba(44, 44, 46, 0.92);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  .ti-action:hover {
+    color: rgba(235, 235, 245, 0.95);
+    background: rgba(58, 58, 60, 1);
+  }
+  .ti-action-copy.copied {
+    color: rgba(48, 209, 88, 1);
+  }
 }
 
 /* ===== 助手回答卡片（左对齐，同轮色调） ===== */

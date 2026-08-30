@@ -52,6 +52,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     var tintHues: [UUID: Int] = [:]
     /// 冷启动/切回时要恢复的滚动锚点（nil = 落底）。仅首个内容批次应用一次。
     var restoreEntry: ScrollPositionStore.Entry?
+    /// 分叉意图回传（点击某条消息的 Fork 按钮时触发，参数为 messageIndex）。
+    var onFork: ((Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller)
@@ -62,6 +64,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "copyText")
+        configuration.userContentController.add(context.coordinator, name: "fork")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
@@ -73,12 +76,14 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         // 必须先赋值再 attach，否则 controller.sessionID 永远为 nil、位置不落盘（冷启动无法恢复）。
         context.coordinator.sessionID = runtime.sessionID
         context.coordinator.pendingRestoreEntry = restoreEntry
+        context.coordinator.onFork = onFork
         context.coordinator.attach(webView)
         context.coordinator.loadShell()
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onFork = onFork
         context.coordinator.apply(
             transcript: runtime.transcript,
             isStreaming: runtime.isStreaming,
@@ -89,6 +94,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "fork")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
@@ -109,7 +115,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         var sessionID: UUID?
         /// 待恢复的滚动锚点：首个内容批次应用后随批下发一次（nil = 落底）。
         var pendingRestoreEntry: ScrollPositionStore.Entry?
+        /// 分叉意图回传（由视图在 make/update 时注入）。
+        var onFork: ((Int) -> Void)?
         private var didApplyRestore = false
+        /// 上一次下发的全局 fork 锁状态（会话是否正在流式），变化时才发 forkLock op。
+        private var lastForkLocked: Bool?
 
         init(controller: TranscriptDocumentController) {
             self.controller = controller
@@ -198,6 +208,13 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             lastSignatures = newSignatures
             lastOrder = newOrder
 
+            // 全局 fork 锁：会话正在流式时，forkFromMessage 有 guard !isStreaming 会静默丢弃，
+            // 历史条目的 Fork 按钮应在流式期间一并禁用，避免点了无反馈（FORK-LOCK-GLOBAL）。
+            if lastForkLocked != snapshot.isStreaming {
+                lastForkLocked = snapshot.isStreaming
+                ops.append(["op": "forkLock", "locked": snapshot.isStreaming])
+            }
+
             guard !ops.isEmpty else { return }
             // 首个内容批次末尾附带滚动位置恢复（同批同步执行：upsert 完即锚定，
             // 无「高度未回」中间态）；无保存位置则落底。
@@ -250,7 +267,13 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             }
             // detailTurnID 纳入签名：分组归属变化（最终答复移出组 / 条目入组）必须触发再 upsert，
             // 否则 lastSignatures 判等为相等会跳过更新（BACKLOG-DETAIL-GROUP，文档 D 强调的 diff 感知）。
-            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(item.body)"
+            // fork 元数据也纳入签名：messageIndex 在 agentEnd 才补（messageEnd 时仍为 nil），
+            // 若不参与签名，补上 index 后 body/streaming/tint/detailTurnID 全不变会被判等跳过，
+            // 导致 assistant 答复的 Fork 按钮永远缺失（FORK-BUTTON-META-DIFF）。
+            let forkMeta = item.canFork && item.messageIndex != nil
+                ? item.messageIndex.map(String.init) ?? "-"
+                : "-"
+            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(forkMeta)|\(item.body)"
         }
 
         private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> [String: Any] {
@@ -263,6 +286,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let tint { op["tint"] = tint }
             if let command = item.toolCommand { op["command"] = command }
             if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
+            // 可 fork 条目的分叉能力元数据（JS 侧据此显示 Fork 按钮）。
+            if item.canFork, let messageIndex = item.messageIndex {
+                op["canFork"] = true
+                op["messageIndex"] = messageIndex
+            }
             switch item.kind {
             case .user: op["kind"] = "user"
             case .assistant: op["kind"] = "assistant"
@@ -319,6 +347,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             NewPiLogger.error(category: "app", message: "Transcript document process terminated, rebuilding")
             lastSignatures = [:]
             lastOrder = []
+            // JS 侧 forkLocked 随页面重建归零，这里也必须重置，否则流式锁态丢失（FORK-LOCK-GLOBAL）。
+            lastForkLocked = nil
             // 重建后按当前会话的保存位置再恢复一次（白屏重建前刚存下的位置）。
             if let sessionID {
                 pendingRestoreEntry = ScrollPositionStore.shared.entry(for: sessionID)
@@ -353,6 +383,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
+            case "fork":
+                guard let body = message.body as? [String: Any],
+                      let index = (body["index"] as? NSNumber)?.intValue else { return }
+                onFork?(index)
             case "rendererError":
                 NewPiLogger.error(
                     category: "app",

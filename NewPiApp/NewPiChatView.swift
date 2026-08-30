@@ -69,7 +69,10 @@ struct NewPiSessionPanel: View {
                         tintHues: turnTintHues(for: runtime.transcript),
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；
                         // 无记录则落底。文档内同步锚定，无「高度未回」中间态。
-                        restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID)
+                        restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID),
+                        onFork: { index in
+                            Task { await viewModel.forkFromMessage(index: index) }
+                        }
                     )
                     .overlay(alignment: .bottom) {
                         if runtime.isStreaming && !docController.isNearBottom {

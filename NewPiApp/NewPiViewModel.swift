@@ -1480,6 +1480,21 @@ final class NewPiViewModel: ObservableObject {
 
         // 方案 A：保留前缀（被压缩的完整旧历史）时，撤掉 removeAll，改为截断到前缀末尾。
         if preservedPrefixCount > 0 {
+            // Bug 2（FORK-STALE-INDEX）：被压缩旧历史的 messageIndex 是压缩前原始 position，
+            // 而 session.fork(atMessageIndex:) 作用于压缩后的 context.messages（0 起重新排）。
+            // 旧 index 要么越界抛错，要么静默 fork 到错误位置。压缩历史语义上不可回 fork，
+            // 因此把保留前缀的 messageIndex 统一置 nil（canFork 即 false，按钮不显示）。
+            for i in 0..<preservedPrefixCount {
+                runtime.transcript[i] = NewPiTranscriptItem(
+                    id: runtime.transcript[i].id,
+                    kind: runtime.transcript[i].kind,
+                    body: runtime.transcript[i].body,
+                    toolCommand: runtime.transcript[i].toolCommand,
+                    messageIndex: nil,
+                    sessionEntryID: runtime.transcript[i].sessionEntryID,
+                    detailTurnID: runtime.transcript[i].detailTurnID
+                )
+            }
             runtime.transcript.removeSubrange(preservedPrefixCount...)
         } else {
             runtime.transcript.removeAll()

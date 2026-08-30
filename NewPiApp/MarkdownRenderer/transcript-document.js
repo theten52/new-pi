@@ -31,6 +31,10 @@
   const groupState = {};
   const manualOverride = {};
 
+  // 全局 fork 锁（FORK-LOCK-GLOBAL）：会话正在流式时原生禁止 fork（forkFromMessage guard !isStreaming）。
+  // 历史条目即使自身非流式，也应在全局流式期间禁用其 Fork 按钮，避免点击无反馈。
+  let forkLocked = false;
+
   // 按 turnID 把组内条目的 detail-hidden class 对齐到 groupState，并同步 marker 行的 chevron 方向。
   function applyGroupState(turnID) {
     const collapsed = !!groupState[turnID];
@@ -501,6 +505,34 @@
   // ===== 折叠卡片（思考 / 工具）：事件委托，JS 切 class（不用 <details>——
   // Safari 18.0 的 <details> + content-visibility 有展开失效回归，WebKit #277573） =====
   main.addEventListener("click", function (event) {
+    // 消息级操作按钮（复制 / 分叉）
+    const copyBtn = event.target.closest(".ti-action-copy");
+    if (copyBtn) {
+      const ti = copyBtn.closest(".ti");
+      const state = ti ? items.get(ti.getAttribute("data-iid")) : null;
+      const text = state ? (state.source || "") : "";
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText) {
+        window.webkit.messageHandlers.copyText.postMessage(text);
+      }
+      // 复制成功反馈（与代码块复制通道一致）：短暂高亮 + 图标切勾。
+      copyBtn.classList.add("copied");
+      window.setTimeout(function () {
+        copyBtn.classList.remove("copied");
+      }, 1000);
+      return;
+    }
+    const forkBtn = event.target.closest(".ti-action-fork");
+    if (forkBtn) {
+      if (forkBtn.disabled) {
+        return;
+      }
+      const index = Number(forkBtn.getAttribute("data-fork-index"));
+      if (Number.isFinite(index) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.fork) {
+        window.webkit.messageHandlers.fork.postMessage({ index: index });
+      }
+      return;
+    }
+
     const header = event.target.closest(".card-hd");
     if (header) {
       const card = header.closest(".card");
@@ -586,6 +618,7 @@
     bubble.className = "bubble";
     bubble.textContent = op.body;
     el.appendChild(bubble);
+    attachActions(bubble, op);
   }
 
   function renderSystemLike(el, op, cssClass) {
@@ -629,6 +662,55 @@
   }
 
   // 思考 / 工具卡：header（chevron + 标题胶囊 + 折叠预览）+ 折叠体。
+  // ===== 消息级操作按钮（复制 / 分叉）：hover 显示在 user / assistant 条目右上角 =====
+  // 复制走 copyText（复用代码块复制通道）；分叉走 fork（回传 messageIndex，原生触发 forkFromMessage）。
+  function attachActions(el, op) {
+    // 幂等：流式状态变化（streaming → final）时复用已有按钮，仅同步 fork 的禁用态。
+    let wrap = el.querySelector(":scope > .ti-actions");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "ti-actions";
+
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "ti-action ti-action-copy";
+      copy.title = "复制消息";
+      copy.setAttribute("aria-label", "复制消息");
+      copy.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+        '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3"/>' +
+        '<path d="M10.5 3.5h-6a1 1 0 0 0-1 1v6" stroke="currentColor" stroke-width="1.3" fill="none"/>' +
+        "</svg>";
+      wrap.appendChild(copy);
+
+      if (op.canFork && typeof op.messageIndex === "number") {
+        const fork = document.createElement("button");
+        fork.type = "button";
+        fork.className = "ti-action ti-action-fork";
+        fork.title = "从这里分叉";
+        fork.setAttribute("aria-label", "从这里分叉");
+        fork.dataset.forkIndex = String(op.messageIndex);
+        fork.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+          '<circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+          '<circle cx="12" cy="4" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+          '<circle cx="12" cy="12" r="2" stroke="currentColor" stroke-width="1.3"/>' +
+          '<path d="M4 6v2a2 2 0 0 0 2 2h6" stroke="currentColor" stroke-width="1.3" fill="none"/>' +
+          "</svg>";
+        fork.disabled = !!op.streaming || forkLocked;
+        wrap.appendChild(fork);
+      }
+
+      el.appendChild(wrap);
+    }
+
+    // 同步禁用态：本条目流式中或全局流式（会话正在生成）时 fork 都不可用。
+    const forkBtn = wrap.querySelector(".ti-action-fork");
+    if (forkBtn) {
+      forkBtn.disabled = !!op.streaming || forkLocked;
+    }
+  }
+
   function renderCard(el, op, state) {
     const isThinking = op.kind === "thinking";
     el.className = "ti " + (isThinking ? "ti-thinking" : "ti-tool");
@@ -718,6 +800,7 @@
       card.appendChild(hd);
       card.appendChild(article);
       el.appendChild(card);
+      attachActions(card, op);
       // 单文档内不报高度、不回传产物（浏览器自持布局；replay 缓存是遗留路径的资产）
       state.renderer = window.createMarkdownRenderer(article, {
         reportHeight: false,
@@ -735,6 +818,11 @@
       }
       state.source = op.body;
       state.streaming = op.streaming;
+      // 流式结束（streaming → final）时 fork 按钮解除禁用。
+      const cardEl = el.querySelector(".card.answer");
+      if (cardEl) {
+        attachActions(cardEl, op);
+      }
     }
   }
 
@@ -829,6 +917,19 @@
         // 分组状态一并清空（页面生命周期内有效，但 reset 表示全新文档，应重置）。
         for (const k in groupState) { delete groupState[k]; }
         for (const k in manualOverride) { delete manualOverride[k]; }
+        forkLocked = false;
+      } else if (op.op === "forkLock") {
+        // 全局 fork 锁切换（FORK-LOCK-GLOBAL）：更新所有已有 fork 按钮的禁用态。
+        // 锁住（进入流式）或解锁（流式结束）都只影响 fork 按钮，历史条目自身 streaming 位不变。
+        forkLocked = !!op.locked;
+        const forkButtons = main.querySelectorAll(".ti-action-fork");
+        for (let i = 0; i < forkButtons.length; i += 1) {
+          const btn = forkButtons[i];
+          const ti = btn.closest(".ti");
+          const state = ti ? items.get(ti.getAttribute("data-iid")) : null;
+          const selfStreaming = state ? !!state.streaming : false;
+          btn.disabled = selfStreaming || forkLocked;
+        }
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));
       } else if (op.op === "remove") {
