@@ -223,41 +223,33 @@ struct NewPiAgentStatusBar: View {
 }
 
 /// 状态栏文字标签：激活（working / thinking / running tool / 待审批）时，
-/// 以绿色做「呼吸灯」脉动闪烁（透明度随时间往复变化），使其更显眼。
+/// 以绿色做「呼吸灯」脉动闪烁（透明度在 0.55↔1 之间往复，不会透明到看不见）。
+/// 非激活（如 "NewPi is ready"）时恒定为主色，不做任何呼吸。
 struct NewPiStatusBreathingLabel: View {
     let text: String
     let isActive: Bool
 
-    /// 呼吸灯相位：true → 亮，false → 暗。用 repeatForever(autoreverses:) 让其往复，
-    /// 形成连续呼吸效果。
-    @State private var phase: Bool = false
+    /// 呼吸相位：开关翻转驱动透明度在亮/暗间往复，形成连续呼吸。
+    @State private var breathing = false
+
+    /// 呼吸周期定时器：仅在激活时翻转相位。
+    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Text(text)
             .font(.subheadline)
             .lineLimit(1)
             .foregroundStyle(textColor)
-            .opacity(isActive ? (phase ? 1.0 : 0.35) : 1.0)
-            .animation(breathingAnimation, value: phase)
-            .onAppear {
-                if isActive { phase = true }
-            }
-            .onChange(of: isActive) { newValue in
-                if newValue {
-                    phase = true
-                } else {
-                    phase = false
-                }
+            .opacity(isActive ? (breathing ? 1.0 : 0.55) : 1.0)
+            .animation(isActive ? .easeInOut(duration: 1.1) : nil, value: breathing)
+            .onReceive(timer) { _ in
+                guard isActive else { return }
+                breathing.toggle()
             }
     }
 
     private var textColor: Color {
         isActive ? Color.green : Color.secondary
-    }
-
-    private var breathingAnimation: Animation? {
-        guard isActive else { return nil }
-        return .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
     }
 }
 
