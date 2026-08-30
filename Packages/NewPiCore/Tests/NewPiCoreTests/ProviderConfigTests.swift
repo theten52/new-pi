@@ -326,3 +326,97 @@ struct ProviderNetworkingTests {
         #expect(responses.session.configuration.timeoutIntervalForResource <= 600)
     }
 }
+
+@Suite("ProviderProfile multi-model")
+struct ProviderProfileMultiModelTests {
+    @Test("legacy JSON without models decodes to [modelID]")
+    func legacyDecodeWithoutModels() throws {
+        let legacy = """
+        {
+          "id": "p1",
+          "name": "Anthropic",
+          "preset": "anthropic",
+          "modelID": "claude-sonnet-4-20250514",
+          "thinkingLevel": "off",
+          "maxTokens": 8192,
+          "options": {}
+        }
+        """
+        let profile = try JSONDecoder().decode(ProviderProfile.self, from: Data(legacy.utf8))
+        #expect(profile.models == ["claude-sonnet-4-20250514"])
+        #expect(profile.modelID == "claude-sonnet-4-20250514")
+    }
+
+    @Test("decode appends current modelID when missing from models")
+    func decodeEnsuresCurrentModelPresent() throws {
+        let json = """
+        {
+          "id": "p1",
+          "name": "OpenAI",
+          "preset": "openai",
+          "modelID": "gpt-4o",
+          "models": ["gpt-5"],
+          "thinkingLevel": "off",
+          "maxTokens": 8192,
+          "options": {}
+        }
+        """
+        let profile = try JSONDecoder().decode(ProviderProfile.self, from: Data(json.utf8))
+        #expect(profile.models == ["gpt-5", "gpt-4o"])
+    }
+
+    @Test("init normalizes duplicates and blanks")
+    func initNormalizes() {
+        let profile = ProviderProfile(
+            name: "t",
+            preset: .ollama,
+            modelID: "llama3",
+            models: ["llama3", " qwen2.5-coder ", "", "llama3"]
+        )
+        #expect(profile.models == ["llama3", "qwen2.5-coder"])
+    }
+
+    @Test("addModel dedupes; removeModel keeps at least one and falls back current")
+    func addRemoveModel() {
+        var profile = ProviderProfile(name: "t", preset: .ollama, modelID: "llama3")
+        profile.addModel("qwen2.5-coder")
+        profile.addModel("llama3")
+        #expect(profile.models == ["llama3", "qwen2.5-coder"])
+
+        // 删除当前模型：回落到剩余首个。
+        profile.removeModel("llama3")
+        #expect(profile.models == ["qwen2.5-coder"])
+        #expect(profile.modelID == "qwen2.5-coder")
+
+        // 最后一个不可删。
+        profile.removeModel("qwen2.5-coder")
+        #expect(profile.models == ["qwen2.5-coder"])
+    }
+
+    @Test("makeDefault seeds preset default models")
+    func makeDefaultSeedsPresetModels() {
+        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic)
+        #expect(profile.models == ProviderPresetCatalog.anthropic.defaultModels)
+        #expect(profile.modelID == ProviderPresetCatalog.anthropic.defaultModels.first)
+    }
+
+    @Test("validate rejects empty model list")
+    func validateRejectsEmptyModels() {
+        var profile = ProviderProfile(name: "t", preset: .ollama, modelID: "llama3")
+        profile.models = []
+        #expect(throws: ProviderConfigError.self) {
+            try profile.validate()
+        }
+    }
+
+    @Test("well-known presets ship built-in default models")
+    func presetsHaveDefaultModels() {
+        for preset in ProviderPreset.allCases {
+            let definition = ProviderPresetCatalog.definition(for: preset)
+            #expect(!definition.defaultModels.isEmpty, "preset \(preset.rawValue) missing default models")
+        }
+        #expect(ProviderPresetCatalog.anthropic.defaultModels.count >= 3)
+        #expect(ProviderPresetCatalog.openai.defaultModels.count >= 3)
+        #expect(ProviderPresetCatalog.openRouter.defaultModels.count >= 3)
+    }
+}

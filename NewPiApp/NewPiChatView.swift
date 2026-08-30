@@ -138,7 +138,16 @@ struct NewPiSessionPanel: View {
                         presentation: viewModel.agentStatusPresentation,
                         usageText: runtime.totalUsage.newPiCompactText,
                         lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
-                        cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText
+                        cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
+                        modelPicker: NewPiModelPickerMenu(
+                            groups: viewModel.providerModelGroups,
+                            activeProfileID: viewModel.activeProviderID,
+                            activeModelID: viewModel.activeProviderModel,
+                            isDisabled: runtime.isStreaming,
+                            onSelect: { profileID, modelID in
+                                Task { await viewModel.switchModel(profileID: profileID, modelID: modelID) }
+                            }
+                        )
                     )
 
                     // 多行输入框（NSTextView）：真实多行、自动增高，

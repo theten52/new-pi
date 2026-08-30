@@ -74,6 +74,8 @@ public enum ProviderPresetCatalog {
         systemImage: "sparkles",
         defaultBaseURL: "https://api.anthropic.com/v1/messages",
         defaultModels: [
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
             "claude-sonnet-4-20250514",
             "claude-opus-4-20250514",
             "claude-3-5-haiku-20241022",
@@ -91,7 +93,7 @@ public enum ProviderPresetCatalog {
         displayName: "OpenAI",
         systemImage: "brain.head.profile",
         defaultBaseURL: "https://api.openai.com/v1/chat/completions",
-        defaultModels: ["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
+        defaultModels: ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
         optionFields: [
             ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.openai.com/v1/chat/completions"),
             ProviderOptionField(key: .organization, label: "Organization ID", placeholder: "org-…"),
@@ -124,8 +126,11 @@ public enum ProviderPresetCatalog {
         systemImage: "arrow.triangle.branch",
         defaultBaseURL: "https://openrouter.ai/api/v1/chat/completions",
         defaultModels: [
+            "anthropic/claude-sonnet-4.5",
             "anthropic/claude-sonnet-4",
+            "openai/gpt-5",
             "openai/gpt-4o",
+            "google/gemini-2.5-pro",
             "deepseek/deepseek-chat",
         ],
         optionFields: [
@@ -145,7 +150,7 @@ public enum ProviderPresetCatalog {
         displayName: "Ollama",
         systemImage: "desktopcomputer",
         defaultBaseURL: "http://127.0.0.1:11434",
-        defaultModels: ["llama3", "qwen2.5-coder", "codellama"],
+        defaultModels: ["llama3", "qwen2.5-coder", "codellama", "deepseek-r1", "mistral"],
         optionFields: [
             ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "http://127.0.0.1:11434"),
         ],

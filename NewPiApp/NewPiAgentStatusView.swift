@@ -102,8 +102,71 @@ struct NewPiAgentStatusIcon: View {
     }
 }
 
+/// 状态栏模型菜单的分组数据（选择粒度是模型，provider 只做分组展示）。
+struct NewPiProviderModelGroup: Identifiable, Equatable {
+    let profileID: String
+    let profileName: String
+    let systemImage: String
+    let hasAPIKey: Bool
+    let models: [String]
+
+    var id: String { profileID }
+}
+
+/// 模型选择菜单（BACKLOG-STATUSBAR-MODEL-PICKER）：按 provider 分组列出可选模型，
+/// 当前使用中的模型打勾。点击即切换当前会话的模型（无会话时切换默认 provider 的模型）。
+struct NewPiModelPickerMenu: View {
+    let groups: [NewPiProviderModelGroup]
+    let activeProfileID: String?
+    let activeModelID: String
+    var isDisabled: Bool = false
+    let onSelect: (_ profileID: String, _ modelID: String) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(groups) { group in
+                Section {
+                    ForEach(group.models, id: \.self) { model in
+                        Button {
+                            onSelect(group.profileID, model)
+                        } label: {
+                            if group.profileID == activeProfileID, model == activeModelID {
+                                Label(model, systemImage: "checkmark")
+                            } else {
+                                Text(model)
+                            }
+                        }
+                    }
+                } header: {
+                    Label {
+                        Text(group.hasAPIKey ? group.profileName : "\(group.profileName)（未配置 Key）")
+                    } icon: {
+                        Image(systemName: group.systemImage)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.caption)
+                Text(activeModelID.isEmpty ? "选择模型" : activeModelID)
+                    .font(.caption.monospaced())
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(isDisabled || groups.isEmpty)
+        .help("切换当前会话使用的模型")
+    }
+}
+
 /// Input-area status strip — always visible above the composer.
-/// 输入框上方状态栏基座：左侧 agent 状态，右侧本会话 token 用量（BACKLOG-TOKEN-BAR）。
+/// 输入框上方状态栏基座：左侧 agent 状态，右侧模型选择菜单 + 本会话 token 用量。
 struct NewPiAgentStatusBar: View {
     let presentation: NewPiAgentStatusPresentation
     /// 累计用量文本（如 "↑12.3k ↓4.5k"）；nil 时隐藏。
@@ -112,6 +175,8 @@ struct NewPiAgentStatusBar: View {
     var lastTurnUsageText: String? = nil
     /// 缓存命中率文本（如 "85%"）；nil 时隐藏。
     var cacheHitRateText: String? = nil
+    /// 模型选择菜单；nil 时隐藏（如 spike 窗口）。
+    var modelPicker: NewPiModelPickerMenu? = nil
 
     var body: some View {
         // 图标用与文本同高的紧凑尺寸；整条用与输入框一致的圆角矩形包裹
@@ -123,6 +188,9 @@ struct NewPiAgentStatusBar: View {
                 .foregroundStyle(presentation.isActive ? Color.primary : Color.secondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if let modelPicker {
+                modelPicker
+            }
             if let cacheHitRateText {
                 Label(cacheHitRateText, systemImage: "bolt.fill")
                     .font(.caption.monospacedDigit())

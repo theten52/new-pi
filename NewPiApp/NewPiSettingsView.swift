@@ -17,7 +17,7 @@ struct NewPiSettingsView: View {
                         Text(profile.name).tag(profile.id)
                     }
                 }
-                Text("只影响之后新建的会话；已有会话保持各自选择的 provider（会话内可通过侧边栏 Provider 选择器切换，选择会随会话记住）。")
+                Text("只影响之后新建的会话；已有会话保持各自选择的模型（会话内可在状态栏的模型菜单中切换，选择会随会话记住）。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -143,6 +143,9 @@ struct NewPiProviderRow: View {
                     Text(item.profile.modelID)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
+                    Text("\(item.profile.models.count) 个模型")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
             Spacer()
@@ -241,7 +244,7 @@ struct NewPiEditProviderSheet: View {
 
     @State private var profile: ProviderProfile
     @State private var apiKeyDraft = ""
-    @State private var customModel = ""
+    @State private var newModelDraft = ""
     @State private var errorMessage: String?
     @State private var testMessage: String?
     @State private var isTestingConnection = false
@@ -249,7 +252,6 @@ struct NewPiEditProviderSheet: View {
     init(viewModel: NewPiViewModel, profile: ProviderProfile) {
         self.viewModel = viewModel
         _profile = State(initialValue: profile)
-        _customModel = State(initialValue: profile.modelID)
     }
 
     private var definition: ProviderPresetDefinition {
@@ -279,17 +281,51 @@ struct NewPiEditProviderSheet: View {
                     }
                 }
 
-                Section("Model") {
-                    Picker("Preset models", selection: $customModel) {
-                        ForEach(definition.defaultModels, id: \.self) { model in
-                            Text(model).tag(model)
-                        }
-                        if !definition.defaultModels.contains(customModel) {
-                            Text(customModel).tag(customModel)
+                // 多模型管理：模型列表任意增删，星标为该 provider 的默认模型
+                //（新建会话/连接测试用它；会话内可在状态栏模型菜单临时切换）。
+                Section("Models") {
+                    ForEach(profile.models, id: \.self) { model in
+                        HStack {
+                            Text(model)
+                                .font(.body.monospaced())
+                                .lineLimit(1)
+                            Spacer()
+                            Button {
+                                profile.modelID = model
+                            } label: {
+                                Image(systemName: profile.modelID == model ? "star.fill" : "star")
+                                    .foregroundStyle(profile.modelID == model ? Color.yellow : Color.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help(profile.modelID == model ? "默认模型" : "设为默认模型")
+                            Button(role: .destructive) {
+                                profile.removeModel(model)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(profile.models.count <= 1)
+                            .help(profile.models.count <= 1 ? "至少保留一个模型" : "移除该模型")
                         }
                     }
-                    TextField("Custom model ID", text: $customModel)
-                        .textFieldStyle(.roundedBorder)
+                    HStack(spacing: 8) {
+                        TextField("Add model ID", text: $newModelDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(addDraftedModel)
+                        Button("Add", action: addDraftedModel)
+                            .disabled(newModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    let unusedPresets = definition.defaultModels.filter { !profile.models.contains($0) }
+                    if !unusedPresets.isEmpty {
+                        Menu("从内置模型添加…") {
+                            ForEach(unusedPresets, id: \.self) { model in
+                                Button(model) {
+                                    profile.addModel(model)
+                                }
+                            }
+                        }
+                        .menuStyle(.borderlessButton)
+                    }
                 }
 
                 if profile.supportsAPIModeSelection {
@@ -366,9 +402,13 @@ struct NewPiEditProviderSheet: View {
             }
         }
         .frame(minWidth: 460, minHeight: 420)
-        .onChange(of: customModel) { _, newValue in
-            profile.modelID = newValue
-        }
+    }
+
+    private func addDraftedModel() {
+        let draft = newModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draft.isEmpty else { return }
+        profile.addModel(draft)
+        newModelDraft = ""
     }
 
     private func optionBinding(for key: ProviderOptionKey) -> Binding<String> {
@@ -419,7 +459,6 @@ struct NewPiEditProviderSheet: View {
     }
 
     private func testConnection() async {
-        profile.modelID = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             try profile.validate()
         } catch {
@@ -435,7 +474,6 @@ struct NewPiEditProviderSheet: View {
     }
 
     private func save() {
-        profile.modelID = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             try profile.validate()
             errorMessage = nil

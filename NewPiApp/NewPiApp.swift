@@ -223,32 +223,11 @@ struct NewPiRootView: View {
                     sessionDisplayLimit = recentSessionLimit
                 }
 
+                // Provider 选择已移到输入框上方状态栏的模型菜单
+                //（BACKLOG-STATUSBAR-MODEL-PICKER）；这里只保留只读状态摘要。
                 Section("Provider") {
-                    Picker("Provider", selection: Binding(
-                        get: { viewModel.activeProviderID ?? "" },
-                        set: { profileID in
-                            Task { await viewModel.switchProvider(profileID: profileID) }
-                        }
-                    )) {
-                        ForEach(viewModel.providerListItems) { item in
-                            Text(item.profile.name).tag(item.profile.id)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(viewModel.isStreaming || viewModel.providerListItems.isEmpty)
-
-                    // 快捷入口：把当前会话的 provider 设为全局默认（影响之后新建的会话）。
-                    if let activeID = viewModel.activeProviderID,
-                       !activeID.isEmpty,
-                       activeID != viewModel.providerConfig.defaultProfileID {
-                        Button("Set as Default") {
-                            Task { await viewModel.setDefaultProvider(profileID: activeID) }
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
+                    Text(viewModel.activeProviderName)
+                        .font(.subheadline)
                     if !viewModel.activeProviderModel.isEmpty {
                         Text(viewModel.activeProviderModel)
                             .font(.caption.monospaced())
@@ -261,7 +240,7 @@ struct NewPiRootView: View {
                         Label("Key missing", systemImage: "key.slash")
                             .foregroundStyle(.orange)
                     }
-                    Text("Settings → NewPi")
+                    Text("在状态栏切换模型 · Settings 管理 Provider")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -510,11 +510,28 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func switchProvider(profileID: String) async {
+        guard let profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
+        await switchModel(profileID: profileID, modelID: profile.modelID)
+    }
+
+    /// 会话内切换模型（BACKLOG-STATUSBAR-MODEL-PICKER）：选择粒度是「具体模型」，
+    /// provider 仅作为分组。同时把该模型持久化为 provider 的默认模型（记住上次选择）。
+    func switchModel(profileID: String, modelID: String) async {
         guard !isStreaming else { return }
         guard let projectURL else { return }
-        guard let profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
+        guard var profile = providerConfig.profiles.first(where: { $0.id == profileID }) else { return }
+        let trimmedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else { return }
+        // 目标与当前一致：无副作用，直接返回。
+        if activeProviderID == profileID, activeProviderModel == trimmedModel { return }
 
         do {
+            profile.modelID = trimmedModel
+            profile.addModel(trimmedModel)
+            // 记住该 provider 最近选用的模型；无活跃会话时选择即「之后新会话用什么」，
+            // 同步设为默认 provider（否则状态栏会回落显示旧默认）。
+            try providerConfigStore.upsertProfile(profile, in: &providerConfig, setAsDefault: session == nil)
+
             let llm = try LLMProviderFactory.make(
                 profile: profile,
                 credentialResolver: providerCredentialResolver
@@ -535,7 +552,7 @@ final class NewPiViewModel: ObservableObject {
 
             NewPiLogger.info(
                 category: "app",
-                message: "Provider switched",
+                message: "Model switched",
                 details: """
                 provider=\(profile.name)
                 model=\(profile.modelID)
@@ -547,16 +564,28 @@ final class NewPiViewModel: ObservableObject {
                var header = await session.attachedSessionHeader {
                 header.providerProfileID = profile.id
                 header.modelID = profile.modelID
-                // 立即落盘：切换后未发消息就退出 App，也要记住该会话的 provider 选择。
+                // 立即落盘：切换后未发消息就退出 App，也要记住该会话的模型选择。
                 await session.updateSessionHeader(header)
             }
 
-            activeProviderID = profile.id
-            activeProviderName = profile.name
-            activeProviderModel = profile.modelID
-            activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+            await refreshProviderList()
+            await setActiveProviderState(profile)
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
+    /// 状态栏模型菜单的分组数据源（按 provider 分组，组内为该 provider 的模型列表）。
+    var providerModelGroups: [NewPiProviderModelGroup] {
+        providerListItems.map { item in
+            let definition = ProviderPresetCatalog.definition(for: item.profile.preset)
+            return NewPiProviderModelGroup(
+                profileID: item.profile.id,
+                profileName: item.profile.name,
+                systemImage: definition.systemImage,
+                hasAPIKey: item.hasAPIKey || !definition.credentialRequired,
+                models: item.profile.models
+            )
         }
     }
 
