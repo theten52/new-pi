@@ -165,7 +165,7 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > feature flag 本身。发送消息 = 显式钉底意图。
 > 顺带关闭 BACKLOG-SCROLL-LAG（多滚动机制叠加的痼疾随遗留路径整体消失）。
 >
-> **补充（2026-09）：布局锚定——三轮迭代记录**。
+> **补充（2026-08）：布局锚定——三轮迭代记录**。
 > 用户实测往上滚时页面冷不丁跳位置：根因是 content-visibility 估算高 ↔ 真实高的
 > 切换让文档在 scrollY 不变下整体平移（WebKit 无 scroll anchoring）。
 > **第一轮 ResizeObserver 补偿：WebKit 无效**——Playwright WebKit（26.5）实测 CV
@@ -179,7 +179,7 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > 占位高=真实高，平移从源头消失。
 > 教训：scroll 补偿的输入信号必须是「内容几何变化」本身，不能混入 scrollY 差分。
 > 验证指标：可见跳变帧 = 无滚动（dy=0）时锚定元素屏上位移 |dt| > 15px
-> （/tmp/pwtest/webkit-metric*.cjs）。
+> （方法详见 [dev-notes/2026-08-30-transcript-scroll-jump.md](./dev-notes/2026-08-30-transcript-scroll-jump.md)）。
 > **第三轮（用户实测收尾）**：长会话打开头几秒的短暂跳动——原因是 restoreAnchor 的
 > 3s 校正窗口内 Warmer 让路（预热停摆）+ rIC 调度太慢 + rAF 轮询比当帧布局晚一拍。
 > 修正：恢复窗口内允许预热（恢复 RAF 每帧校正，与预热同纪律）；Warmer 改 setTimeout(0)

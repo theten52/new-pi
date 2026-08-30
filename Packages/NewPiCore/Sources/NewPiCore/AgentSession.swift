@@ -240,6 +240,20 @@ public actor AgentSession {
         try? jsonlStore.save(persisted, to: fileURL)
     }
 
+    /// 手动重命名会话时用：允许把 label 设为 nil（留空 = 重置为默认显示名），
+    /// 同时更新内存态 `persistenceContext`/`persistenceHeader` 并落盘。
+    /// 关键：若不更新内存态，后续 `persistIfNeeded()` 会用内存里的旧 header
+    /// 覆盖掉刚写进磁盘的新 label，导致重命名结果在下次消息落盘时丢失。
+    public func setSessionLabel(_ label: String?) {
+        guard var persisted = persistenceContext, let fileURL = persistenceFileURL else { return }
+        let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalLabel: String? = (trimmed?.isEmpty == false) ? trimmed : nil
+        persisted.header.label = finalLabel
+        persistenceHeader = persisted.header
+        persistenceContext = persisted
+        try? jsonlStore.save(persisted, to: fileURL)
+    }
+
     /// 更新会话 header（如会话内切换 provider/model）并**立即落盘**。
     /// 注意不能用 `attachPersistence` 代替：它只更新内存中的 header，且会从磁盘重载
     /// 带旧 header 的 context——下次 persistIfNeeded 会把 header 覆盖回旧值，

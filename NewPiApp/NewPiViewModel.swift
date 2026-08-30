@@ -690,15 +690,27 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func renameSession(_ summary: SessionSummary, to newLabel: String) async {
+        // 空串/纯空白视为「重置为默认显示名」（label 存 nil，显示层回落显示创建时间）。
+        let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalLabel: String? = trimmed.isEmpty ? nil : trimmed
+
         do {
-            try await Task.detached(priority: .userInitiated) {
-                try SessionManager.updateLabel(newLabel, for: summary.fileURL)
-            }.value
+            if summary.fileURL == currentSessionFileURL,
+               let session = activeRuntime?.session {
+                // 活动会话：必须同时更新 AgentSession 内存态并落盘，否则下一次
+                // persistIfNeeded() 会用内存里的旧 header 覆盖掉新 label（重命名丢失根因）。
+                await session.setSessionLabel(finalLabel)
+            } else {
+                // 非活动会话：无运行中的内存态，直接写磁盘即可。
+                try await Task.detached(priority: .userInitiated) {
+                    try SessionManager.updateLabel(finalLabel ?? "", for: summary.fileURL)
+                }.value
+            }
             await refreshSessionList()
             NewPiLogger.info(
                 category: "app",
                 message: "Session renamed",
-                details: "\(summary.fileURL.lastPathComponent) → \(newLabel)"
+                details: "\(summary.fileURL.lastPathComponent) → \(finalLabel ?? "<default>")"
             )
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)

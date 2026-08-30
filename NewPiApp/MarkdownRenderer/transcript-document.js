@@ -10,7 +10,7 @@
 // - 内容变更时的视口稳定在同一同步块内完成（保存锚点→变更→恢复），
 //   不存在「高度还没回来」的中间态（对比：遗留路径跨原生↔Web 异步边界尽力而为）；
 // - 锚点（视口顶部条目 id + 条目内偏移）随滚动状态上报原生持久化，切换/冷启动恢复。
-// - 布局锚定（2026-09 两次修正）：
+// - 布局锚定（2026-08 三轮迭代，详见 docs/dev-notes/2026-08-30-transcript-scroll-jump.md）：
 //   ① ResizeObserver 补偿——WebKit 实测 content-visibility 占位高↔真实高切换
 //     不触发 RO（Playwright WebKit 探针 0 事件），方案无效；
 //   ② 锚点文档位置 − scrollY 差分看门狗——macOS 异步滚动下 scrollY 读数与视觉

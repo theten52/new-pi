@@ -352,7 +352,9 @@ public enum SessionManager {
         store: JSONLSessionStore = JSONLSessionStore()
     ) throws {
         var context = try store.load(from: fileURL)
-        context.header.label = label
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 空串/纯空白视为「重置为默认显示名」（存 nil，显示层回落显示创建时间）。
+        context.header.label = trimmed.isEmpty ? nil : trimmed
         try store.save(context, to: fileURL)
     }
 
