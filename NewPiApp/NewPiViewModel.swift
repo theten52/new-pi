@@ -23,6 +23,9 @@ enum NewPiTranscriptItemKind: Equatable, Sendable {
     /// 思考过程（reasoning/thinking delta）。isStreaming=true 表示仍在流入。
     case thinking(isStreaming: Bool)
     case tool(name: String, state: NewPiToolState)
+    /// 处理详情组的 disclosure 行（BACKLOG-DETAIL-GROUP）。collapsed 为自动逻辑的目标状态，
+    /// JS 侧在未手动覆盖时采纳。
+    case detailGroup(collapsed: Bool)
 }
 
 struct NewPiTranscriptItem: Identifiable, Sendable {
@@ -34,6 +37,10 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let toolCommand: String?
     let messageIndex: Int?
     let sessionEntryID: String?
+    /// 处理详情组的 turn 归属（BACKLOG-DETAIL-GROUP）。非 nil 表示该条目属于某个详情组
+    /// （thinking / tool / 中间 assistant）。最终答复与 marker 的语义见方案文档：
+    /// marker 用 detailTurnID 标识它管理的组；组内条目用它归属到组；最终答复置 nil 移出组。
+    let detailTurnID: String?
 
     init(
         id: UUID = UUID(),
@@ -41,7 +48,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         body: String,
         toolCommand: String? = nil,
         messageIndex: Int? = nil,
-        sessionEntryID: String? = nil
+        sessionEntryID: String? = nil,
+        detailTurnID: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -49,6 +57,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.toolCommand = toolCommand
         self.messageIndex = messageIndex
         self.sessionEntryID = sessionEntryID
+        self.detailTurnID = detailTurnID
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -63,6 +72,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         case .thinking: "Thinking"
         case .tool(_, .running): "Tool"
         case .tool(let name, .completed): "Tool \(name)"
+        case .detailGroup: "处理详情"
         }
     }
 
@@ -121,6 +131,19 @@ final class SessionRuntime: ObservableObject {
     /// 进行/已完成工具调用的命令摘要（toolCallID → 摘要）：start 时提取，end 时回填入条目，
     /// 覆盖「end 找不到 running 条目」的兜底分支。
     var toolCommands: [String: String] = [:]
+    /// 处理详情分组（BACKLOG-DETAIL-GROUP）的 turn 状态。
+    /// detailTurnID：当前 turn id（nil = 不在 turn 中）；detailGroupMarkerID：当前 turn 的
+    /// disclosure 行条目 id（nil = 尚未创建 marker）；detailMarkerIDs：turnID → marker 条目 id，
+    /// 跨 rebuild 复用，防止 fork/agentEnd 重建时 marker UUID 变化导致 DOM 闪烁。
+    var detailTurnID: String?
+    var detailGroupMarkerID: UUID?
+    var detailMarkerIDs: [String: UUID] = [:]
+    /// live turn 的用户消息条目 id → 当时的 live turnID（"live-..."）。
+    /// 从单槽改为映射表：每轮 send 都登记一条，历史轮次在后续 agentEnd 的 rebuildTranscript
+    /// 里也能通过 preservedID 查回原来的 live turnID，保证 turnID 跨多轮稳定（不翻成
+    /// "turn-<entryID>"），detailMarkerIDs 与 JS 端 groupState/manualOverride（以 turnID 为
+    /// key）始终命中，手动展开过的旧组不会被后续轮的 rebuild 重新收起。
+    var detailLiveTurnIDByUser: [UUID: String] = [:]
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
@@ -167,6 +190,27 @@ private func accumulateUsage(
     return (total, lastTurn)
 }
 
+/// 确定性的 turn id 规则（BACKLOG-DETAIL-GROUP A.4）：历史重建用
+/// `"turn-<user消息entryID ?? index>"`，保证 rebuild 后 JS 端 manualOverride（以 turnID 为 key）能命中。
+private func detailTurnID(userMessageIndex index: Int, entryID: String?) -> String {
+    return "turn-\(entryID ?? String(index))"
+}
+
+/// 判定某条 assistant 消息是否「自身归属进组」（中间过程）：只有有工具调用才算。
+/// 这是决定 assistant 条目 detailTurnID 的唯一依据：开了 thinking 但无 toolCalls 的
+/// 最终答复仍是组外条目（review 意见2：reasoningContent 非空只意味着补一条 thinking
+/// 组内条目，不代表 assistant 正文进组，否则最终答复会被折叠隐藏）。
+private func assistantBelongsToGroup(_ assistant: AssistantMessage) -> Bool {
+    return !assistant.toolCalls.isEmpty
+}
+
+/// 判定某条 assistant 消息是否为「组内条目」（用于预计算 turn 是否有组内条目，
+/// 决定是否插入 marker）：有工具调用，或有思考内容。与 assistantBelongsToGroup 不同，
+/// 这里只看「该 turn 是否产生中间过程」，thinking 也算，否则 marker 会缺失。
+private func isDetailGroupItem(_ assistant: AssistantMessage) -> Bool {
+    return !assistant.toolCalls.isEmpty || !assistant.reasoningContent.isEmpty
+}
+
 /// 由消息列表构建转录条目（纯函数，供后台线程调用；新建 session 的转录为空，
 /// 无需保留既有条目的 id）。
 private func makeTranscriptItems(
@@ -178,20 +222,61 @@ private func makeTranscriptItems(
     // 上一条 assistant 消息的工具调用表：toolResult 只有结果没有参数，
     // 用 toolCallID 回查拿命令摘要（恢复会话后工具卡仍能展示命令）。
     var lastToolCalls: [String: ToolCallContent] = [:]
+    // 处理详情分组（BACKLOG-DETAIL-GROUP）：当前 turn id；turn 内已产出过组内条目的标记。
+    var currentTurnID: String? = nil
+    var turnHasGroupItems = false
+
+    // 首次遍历：预计算每个 user 消息之后（到下一个 user 前）该 turn 是否有组内条目，
+    // 用于决定是否在 user 之后插入 marker。
+    // 组内条目 = reasoningContent 非空的 assistant / toolCalls 非空的 assistant / toolResult。
+    var turnHasGroupItemsByUserIndex: [Int: Bool] = [:]
+    var lastUserIndex: Int? = nil
+    for (index, message) in messages.enumerated() {
+        if case .user = message {
+            lastUserIndex = index
+            turnHasGroupItemsByUserIndex[index] = false
+        } else if let ui = lastUserIndex {
+            let isGroup = makeTranscriptItems_isGroupMessage(message)
+            if isGroup {
+                turnHasGroupItemsByUserIndex[ui] = true
+            }
+        }
+    }
+
     for (index, message) in messages.enumerated() {
         let entryID = index < entryIDs.count ? entryIDs[index] : nil
         switch message {
         case let .user(user):
+            currentTurnID = detailTurnID(userMessageIndex: index, entryID: entryID)
+            turnHasGroupItems = turnHasGroupItemsByUserIndex[index] ?? false
             items.append(NewPiTranscriptItem(kind: .user, body: user.content, messageIndex: index, sessionEntryID: entryID))
+            // marker 在 user 之后、组内条目之前插入（恢复默认收起）；无组内条目的 turn 不插。
+            if turnHasGroupItems {
+                items.append(NewPiTranscriptItem(kind: .detailGroup(collapsed: true), body: "", detailTurnID: currentTurnID))
+            }
         case let .assistant(assistant):
             lastToolCalls = Dictionary(uniqueKeysWithValues: assistant.toolCalls.map { ($0.id, $0) })
             // 思考过程入转录（BACKLOG-TYPED-TRANSCRIPT）：reasoningContent 非空时
             // 在正文前补一条 thinking 条目。不带 messageIndex——它跟随正文条目进退，
             // 不参与 fork 锚点，也避免与正文条目争抢 id 保留表的同一 messageIndex。
             if !assistant.reasoningContent.isEmpty {
-                items.append(NewPiTranscriptItem(kind: .thinking(isStreaming: false), body: assistant.reasoningContent))
+                items.append(NewPiTranscriptItem(
+                    kind: .thinking(isStreaming: false),
+                    body: assistant.reasoningContent,
+                    detailTurnID: currentTurnID
+                ))
             }
-            items.append(NewPiTranscriptItem(kind: .assistant, body: assistant.text, messageIndex: index, sessionEntryID: entryID))
+            // 组内 / 组外判定：有 toolCalls → 中间 assistant（组内）；否则最终答复（组外）。
+            // 注意用 assistantBelongsToGroup（只认 toolCalls），开了 thinking 的最终答复
+            // 不能打上 detailTurnID（否则会被折叠隐藏，review 意见2）。
+            let assistantIsGroup = assistantBelongsToGroup(assistant)
+            items.append(NewPiTranscriptItem(
+                kind: .assistant,
+                body: assistant.text,
+                messageIndex: index,
+                sessionEntryID: entryID,
+                detailTurnID: assistantIsGroup ? currentTurnID : nil
+            ))
         case let .toolResult(result):
             let command = lastToolCalls[result.toolCallID]
                 .flatMap { newPiToolCommandSummary(name: $0.name, arguments: $0.arguments) }
@@ -200,13 +285,26 @@ private func makeTranscriptItems(
                 body: result.content,
                 toolCommand: command,
                 messageIndex: index,
-                sessionEntryID: entryID
+                sessionEntryID: entryID,
+                detailTurnID: currentTurnID
             ))
         case let .compactionSummary(summary):
             items.append(NewPiTranscriptItem(kind: .summary, body: summary, messageIndex: index, sessionEntryID: entryID))
         }
     }
     return items
+}
+
+/// 判定某条消息是否属于「组内条目」（用于预计算 turn 是否有组内条目）。
+private func makeTranscriptItems_isGroupMessage(_ message: AgentMessage) -> Bool {
+    switch message {
+    case .assistant(let assistant):
+        return isDetailGroupItem(assistant)
+    case .toolResult:
+        return true
+    case .user, .compactionSummary:
+        return false
+    }
 }
 
 /// 工具调用参数 → 展示用命令摘要：bash 给命令本体，文件类工具给路径，
@@ -1036,7 +1134,17 @@ final class NewPiViewModel: ObservableObject {
             return
         }
 
-        appendTranscript(kind: .user, body: text, on: runtime)
+        // 新 turn 开始（BACKLOG-DETAIL-GROUP）：重置当前 turn 状态，marker 留待首条组内条目懒创建。
+        let liveTurnID = "live-\(UUID().uuidString)"
+        runtime.detailTurnID = liveTurnID
+        runtime.detailGroupMarkerID = nil
+        // 记录这条 user 条目的 messageIndex（= 已同步消息数，rebuild 时该 user 在 messages 里的
+        // 位置与此一致），使 rebuild 的 preservedTranscriptID 能通过 messageIndex 命中稳定 id；
+        // 同时把 user 条目 id → live turnID 登记进映射表（review「🟡 turnID 稳定性」修复），
+        // rebuild 时据此复用 live turnID，历史轮次也能保持 turnID 稳定，避免手动展开状态丢失。
+        let userItemID = appendTranscript(
+            kind: .user, body: text, messageIndex: runtime.liveMessageCount, on: runtime)
+        runtime.detailLiveTurnIDByUser[userItemID] = liveTurnID
         runtime.isStreaming = true
         runtime.agentActivity = .thinking
         reflectActive()
@@ -1191,6 +1299,11 @@ final class NewPiViewModel: ObservableObject {
                 //（无工具调用 → 不会再来新一轮）；有工具调用则后面还有 turn，不翻。
                 if assistant.toolCalls.isEmpty {
                     runtime.finalAnswerComplete = true
+                    // 最终答复落定（BACKLOG-DETAIL-GROUP，决策 1+2）：
+                    // a. 把该 streaming assistant 条目 detailTurnID 置 nil（移出组，DOM 不动只改标记，
+                    //    原地留下，折叠后作为该 turn 组后第一条可见内容）；
+                    // b. marker 更新为 collapsed=true（同 id 替换走 upsert）。
+                    finalizeDetailGroup(on: runtime)
                 }
             }
             // messageEnd 默认不触发镜像刷新；最终答复落定（状态栏翻 ready）时除外。
@@ -1233,7 +1346,9 @@ final class NewPiViewModel: ObservableObject {
             if let commandSummary {
                 runtime.toolCommands[id] = commandSummary
             }
-            appendTranscript(kind: .tool(name: name, state: .running), body: "", toolCommand: commandSummary, on: runtime)
+            // 工具卡入组（BACKLOG-DETAIL-GROUP）：首个组内条目触发 marker 懒创建，条目带当前 turn ID。
+            ensureDetailGroupMarker(on: runtime)
+            appendTranscript(kind: .tool(name: name, state: .running), body: "", toolCommand: commandSummary, detailTurnID: runtime.detailTurnID, on: runtime)
             NewPiLogger.info(
                 category: "app",
                 message: "UI: tool execution started",
@@ -1251,13 +1366,16 @@ final class NewPiViewModel: ObservableObject {
                     body: result.content,
                     toolCommand: command ?? running.toolCommand,
                     messageIndex: running.messageIndex,
-                    sessionEntryID: running.sessionEntryID
+                    sessionEntryID: running.sessionEntryID,
+                    detailTurnID: running.detailTurnID
                 )
             } else {
+                ensureDetailGroupMarker(on: runtime)
                 appendTranscript(
                     kind: .tool(name: name, state: .completed(isError: result.isError)),
                     body: result.content,
                     toolCommand: command,
+                    detailTurnID: runtime.detailTurnID,
                     on: runtime
                 )
             }
@@ -1346,6 +1464,22 @@ final class NewPiViewModel: ObservableObject {
         // 同 makeTranscriptItems：toolResult 只有结果没有参数，用 toolCallID 回查上一条
         // assistant 消息的工具调用表，恢复命令摘要。
         var lastToolCalls: [String: ToolCallContent] = [:]
+        // 处理详情分组（BACKLOG-DETAIL-GROUP）：当前 turn id；turn 内已产出过组内条目的标记。
+        var currentTurnID: String? = nil
+        var turnHasGroupItems = false
+
+        // 预计算每个 user 消息之后的 turn 是否有组内条目（与 makeTranscriptItems 一致）。
+        var turnHasGroupItemsByUserIndex: [Int: Bool] = [:]
+        var lastUserIndex: Int? = nil
+        for (index, message) in messages.enumerated() {
+            if case .user = message {
+                lastUserIndex = index
+                turnHasGroupItemsByUserIndex[index] = false
+            } else if let ui = lastUserIndex, makeTranscriptItems_isGroupMessage(message) {
+                turnHasGroupItemsByUserIndex[ui] = true
+            }
+        }
+
         for (index, message) in messages.enumerated() {
             let entryID = index < entryIDs.count ? entryIDs[index] : nil
             let preservedID = preservedTranscriptID(
@@ -1359,6 +1493,16 @@ final class NewPiViewModel: ObservableObject {
             )
             switch message {
             case let .user(user):
+                // review「🟡 turnID 稳定性」修复：按 preservedID 查映射表复用历史 live turnID，
+                // 使每个 user 消息的 turnID 跨多轮 rebuild 稳定（不翻成 "turn-<entryID>"），
+                // detailMarkerIDs 与 JS 端 groupState/manualOverride（以 turnID 为 key）始终命中，
+                // 手动展开过的旧组不会被后续轮的 rebuild 重新收起。
+                if let liveTurnID = runtime.detailLiveTurnIDByUser[preservedID] {
+                    currentTurnID = liveTurnID
+                } else {
+                    currentTurnID = detailTurnID(userMessageIndex: index, entryID: entryID)
+                }
+                turnHasGroupItems = turnHasGroupItemsByUserIndex[index] ?? false
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     kind: .user,
@@ -1366,6 +1510,17 @@ final class NewPiViewModel: ObservableObject {
                     messageIndex: index,
                     sessionEntryID: entryID
                 ))
+                // marker 在 user 之后、组内条目之前插入（恢复默认收起）；marker id 从缓存复用防闪烁。
+                if turnHasGroupItems, let turnID = currentTurnID {
+                    let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
+                    runtime.detailMarkerIDs[turnID] = markerID
+                    runtime.transcript.append(NewPiTranscriptItem(
+                        id: markerID,
+                        kind: .detailGroup(collapsed: true),
+                        body: "",
+                        detailTurnID: turnID
+                    ))
+                }
             case let .assistant(assistant):
                 lastToolCalls = Dictionary(uniqueKeysWithValues: assistant.toolCalls.map { ($0.id, $0) })
                 // 与 makeTranscriptItems 一致：reasoningContent 非空时在正文前补 thinking 条目
@@ -1373,15 +1528,18 @@ final class NewPiViewModel: ObservableObject {
                 if !assistant.reasoningContent.isEmpty {
                     runtime.transcript.append(NewPiTranscriptItem(
                         kind: .thinking(isStreaming: false),
-                        body: assistant.reasoningContent
+                        body: assistant.reasoningContent,
+                        detailTurnID: currentTurnID
                     ))
                 }
+                let assistantIsGroup = assistantBelongsToGroup(assistant)
                 runtime.transcript.append(NewPiTranscriptItem(
                     id: preservedID,
                     kind: .assistant,
                     body: assistant.text,
                     messageIndex: index,
-                    sessionEntryID: entryID
+                    sessionEntryID: entryID,
+                    detailTurnID: assistantIsGroup ? currentTurnID : nil
                 ))
             case let .toolResult(result):
                 let command = lastToolCalls[result.toolCallID]
@@ -1392,7 +1550,8 @@ final class NewPiViewModel: ObservableObject {
                     body: result.content,
                     toolCommand: command,
                     messageIndex: index,
-                    sessionEntryID: entryID
+                    sessionEntryID: entryID,
+                    detailTurnID: currentTurnID
                 ))
             case let .compactionSummary(summary):
                 runtime.transcript.append(NewPiTranscriptItem(
@@ -1548,11 +1707,14 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, on runtime: SessionRuntime) {
-        runtime.transcript.append(NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID))
+    @discardableResult
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, on runtime: SessionRuntime) -> UUID {
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID)
+        runtime.transcript.append(item)
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
+        return item.id
     }
 
     /// 流式增量合并的节流间隔（毫秒）：间隔内到达的 textDelta 会合并成一次 transcript 刷新。
@@ -1625,10 +1787,16 @@ final class NewPiViewModel: ObservableObject {
                 kind: .thinking(isStreaming: true),
                 body: last.body + delta,
                 messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID
+                sessionEntryID: last.sessionEntryID,
+                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
             )
         } else {
-            runtime.transcript.append(NewPiTranscriptItem(kind: .thinking(isStreaming: true), body: delta))
+            ensureDetailGroupMarker(on: runtime)
+            runtime.transcript.append(NewPiTranscriptItem(
+                kind: .thinking(isStreaming: true),
+                body: delta,
+                detailTurnID: runtime.detailTurnID
+            ))
         }
     }
 
@@ -1641,8 +1809,75 @@ final class NewPiViewModel: ObservableObject {
             kind: .thinking(isStreaming: false),
             body: last.body,
             messageIndex: last.messageIndex,
-            sessionEntryID: last.sessionEntryID
+            sessionEntryID: last.sessionEntryID,
+            detailTurnID: last.detailTurnID
         )
+    }
+
+    /// marker 懒创建（BACKLOG-DETAIL-GROUP）：当前 turn 尚未创建 disclosure 行时，
+    /// 在组内第一条条目之前插入 marker 条目（collapsed=false，流式期间展开），
+    /// 并缓存其 id 到 detailMarkerIDs 跨 rebuild 复用。
+    private func ensureDetailGroupMarker(on runtime: SessionRuntime) {
+        guard let turnID = runtime.detailTurnID, runtime.detailGroupMarkerID == nil else { return }
+        let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
+        runtime.detailMarkerIDs[turnID] = markerID
+        runtime.detailGroupMarkerID = markerID
+        runtime.transcript.append(NewPiTranscriptItem(
+            id: markerID,
+            kind: .detailGroup(collapsed: false),
+            body: "",
+            detailTurnID: turnID
+        ))
+        if runtime === activeRuntime {
+            transcript = runtime.transcript
+        }
+    }
+
+    /// 最终答复落定（BACKLOG-DETAIL-GROUP，决策 1+2）：把 turn 内最后一个 assistant 条目
+    /// detailTurnID 置 nil（移出组，原地保留），并把 marker 置为 collapsed=true。
+    /// 仅在存在当前 turn 且有 marker 时执行；无中间过程（无 marker）的 turn 是纯最终答复，无需处理。
+    private func finalizeDetailGroup(on runtime: SessionRuntime) {
+        guard let turnID = runtime.detailTurnID else { return }
+        // a. 找到最后一个 detailTurnID == 当前 turn 的 assistant 条目，置 nil 移出组。
+        if let lastIndex = runtime.transcript.lastIndex(where: { $0.kind == .assistant && $0.detailTurnID == turnID }) {
+            let item = runtime.transcript[lastIndex]
+            runtime.transcript[lastIndex] = NewPiTranscriptItem(
+                id: item.id,
+                kind: item.kind,
+                body: item.body,
+                toolCommand: item.toolCommand,
+                messageIndex: item.messageIndex,
+                sessionEntryID: item.sessionEntryID,
+                detailTurnID: nil
+            )
+        }
+        // b. marker：最终答复已移出组后，若组内已无剩余条目，说明这是无中间过程的
+        //    纯最终答复 turn——移除 marker（否则留下一个点开后空无一物的「处理详情」行，
+        //    review 意见4，方案 B.2「无中间过程直接出答复的 turn 没有 marker」）。
+        //    若组内仍有条目（thinking / tool / 中间 assistant），则把 marker 收起（同 id 替换，走 upsert）。
+        if let markerID = runtime.detailGroupMarkerID,
+           let markerIndex = runtime.transcript.firstIndex(where: { $0.id == markerID }) {
+            let marker = runtime.transcript[markerIndex]
+            let turnHasRemainingGroupItems = runtime.transcript.contains {
+                $0.id != markerID && $0.detailTurnID == turnID
+            }
+            if turnHasRemainingGroupItems {
+                runtime.transcript[markerIndex] = NewPiTranscriptItem(
+                    id: marker.id,
+                    kind: .detailGroup(collapsed: true),
+                    body: marker.body,
+                    detailTurnID: marker.detailTurnID
+                )
+            } else {
+                runtime.transcript.remove(at: markerIndex)
+            }
+        }
+        // 本轮收尾完成，关闭 turn 状态（abort 不走到这里，组保持展开）。
+        runtime.detailTurnID = nil
+        runtime.detailGroupMarkerID = nil
+        if runtime === activeRuntime {
+            transcript = runtime.transcript
+        }
     }
 
     private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
@@ -1655,10 +1890,16 @@ final class NewPiViewModel: ObservableObject {
                 kind: .assistant,
                 body: last.body + delta,
                 messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID
+                sessionEntryID: last.sessionEntryID,
+                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
             )
         } else {
-            runtime.transcript.append(NewPiTranscriptItem(kind: .assistant, body: delta))
+            ensureDetailGroupMarker(on: runtime)
+            runtime.transcript.append(NewPiTranscriptItem(
+                kind: .assistant,
+                body: delta,
+                detailTurnID: runtime.detailTurnID
+            ))
         }
         // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
         // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着

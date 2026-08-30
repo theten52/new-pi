@@ -246,8 +246,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 case .completed(let isError): kindTag = "tool"; extra = (isError ? "err|" : "ok|") + name
                 }
                 extra += "|" + (item.toolCommand ?? "")
+            case .detailGroup(let collapsed): kindTag = "detailGroup"; extra = collapsed ? "1" : "0"
             }
-            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.body)"
+            // detailTurnID 纳入签名：分组归属变化（最终答复移出组 / 条目入组）必须触发再 upsert，
+            // 否则 lastSignatures 判等为相等会跳过更新（BACKLOG-DETAIL-GROUP，文档 D 强调的 diff 感知）。
+            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(item.body)"
         }
 
         private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> [String: Any] {
@@ -259,6 +262,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             ]
             if let tint { op["tint"] = tint }
             if let command = item.toolCommand { op["command"] = command }
+            if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
             switch item.kind {
             case .user: op["kind"] = "user"
             case .assistant: op["kind"] = "assistant"
@@ -273,6 +277,9 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 case .running: op["toolRunning"] = true
                 case .completed(let isError): op["toolError"] = isError
                 }
+            case .detailGroup(let collapsed):
+                op["kind"] = "detailGroup"
+                op["collapsed"] = collapsed
             }
             return op
         }

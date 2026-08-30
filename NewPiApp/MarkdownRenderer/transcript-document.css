@@ -216,3 +216,60 @@ html, body {
 .ti-error .sysline {
   color: #d70015;
 }
+
+/* ===== 处理详情组（BACKLOG-DETAIL-GROUP）===== */
+
+/* disclosure 行条目：占位高给一小行即可（折叠态主要内容是下面隐藏的 detail-item）。 */
+.ti-detail {
+  contain-intrinsic-size: auto 48px;
+}
+
+/* 外框与最终答复（.ti-answer .card.answer）保持一致：max-width 760px、圆角 14px、
+   背景色与对话气泡同源（--tint 色相驱动的半透明底）。 */
+.detail-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 760px;
+  padding: 10px 12px;
+  /* button 的 UA 默认是 border-box；改回 content-box 让 max-width:760px 只约束内容，
+     加上左右 padding 后外框 = 784px，与最终答复（.card.answer content-box）精确对齐。 */
+  box-sizing: content-box;
+  border: 0;
+  background: hsl(var(--tint, 212) 55% 60% / 0.18);
+  border-radius: 14px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: rgba(60, 60, 67, 0.7);
+}
+
+.detail-row:hover {
+  background: hsl(var(--tint, 212) 55% 60% / 0.24);
+}
+
+.detail-chevron::before {
+  content: "▸";
+  font-size: 22px;
+  line-height: 1;
+  color: rgba(60, 60, 67, 0.5);
+  display: inline-block;
+  width: 16px;
+  transition: transform 0.15s ease;
+}
+
+.detail-group.expanded .detail-chevron::before {
+  content: "▾";
+}
+
+.detail-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* 组内条目折叠态：CSS class + display:none 切换（需求 8：DOM 保持扁平、不搬节点、
+   不碰 content-visibility 高度缓存）。 */
+.detail-hidden {
+  display: none;
+}

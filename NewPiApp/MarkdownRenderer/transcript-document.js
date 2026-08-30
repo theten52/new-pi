@@ -25,6 +25,34 @@
   // itemID -> { el, kind, source, streaming, renderer, toolName, toolRunning, toolError, tint }
   const items = new Map();
 
+  // ===== 处理详情分组（BACKLOG-DETAIL-GROUP）=====
+  // 组状态模块级、页面生命周期内有效：手动状态不持久化、不回传原生。
+  // groupState: turnID -> 当前是否收起；manualOverride: turnID -> 用户已手动干预（一切自动逻辑失效）。
+  const groupState = {};
+  const manualOverride = {};
+
+  // 按 turnID 把组内条目的 detail-hidden class 对齐到 groupState，并同步 marker 行的 chevron 方向。
+  function applyGroupState(turnID) {
+    const collapsed = !!groupState[turnID];
+    const nodes = main.querySelectorAll('.detail-item[data-turn-id="' + turnID + '"]');
+    for (let i = 0; i < nodes.length; i += 1) {
+      if (collapsed) {
+        nodes[i].classList.add("detail-hidden");
+      } else {
+        nodes[i].classList.remove("detail-hidden");
+      }
+    }
+    // 同步 marker（disclosure 行）的 chevron 展示态。
+    const markers = main.querySelectorAll('.detail-group[data-turn-id="' + turnID + '"]');
+    for (let j = 0; j < markers.length; j += 1) {
+      if (collapsed) {
+        markers[j].classList.remove("expanded");
+      } else {
+        markers[j].classList.add("expanded");
+      }
+    }
+  }
+
   // ===== Scroll：文档内滚动的唯一 writer（osaurus ScrollAnchorManager 算法同构，
   // 但同步执行：保存→变更→恢复在同一执行块，不可能被其他 writer 插队） =====
   const nearBottomThreshold = 100;
@@ -474,23 +502,41 @@
   // Safari 18.0 的 <details> + content-visibility 有展开失效回归，WebKit #277573） =====
   main.addEventListener("click", function (event) {
     const header = event.target.closest(".card-hd");
-    if (!header) {
+    if (header) {
+      const card = header.closest(".card");
+      if (card) {
+        card.classList.toggle("expanded");
+        // 折叠/展开改变布局：走统一的批次纪律（非底部保持视口锚定）。
+        const plan = Scroll.beginBatch();
+        Scroll.endBatch(plan);
+        scheduleTurnOffsetsReport();
+        // 展开态高度变了，已固化的占位高过时——重新预热该条目。
+        const ti = card.closest(".ti");
+        const id = ti ? ti.getAttribute("data-iid") : null;
+        if (id) {
+          Warmer.warmed.delete(id);
+          Warmer.schedule();
+        }
+      }
       return;
     }
-    const card = header.closest(".card");
-    if (card) {
-      card.classList.toggle("expanded");
-      // 折叠/展开改变布局：走统一的批次纪律（非底部保持视口锚定）。
-      const plan = Scroll.beginBatch();
-      Scroll.endBatch(plan);
-      scheduleTurnOffsetsReport();
-      // 展开态高度变了，已固化的占位高过时——重新预热该条目。
-      const ti = card.closest(".ti");
-      const id = ti ? ti.getAttribute("data-iid") : null;
-      if (id) {
-        Warmer.warmed.delete(id);
-        Warmer.schedule();
+
+    // 处理详情组 disclosure 行（BACKLOG-DETAIL-GROUP）：手动切换折叠态。
+    const detailRow = event.target.closest(".detail-row");
+    if (detailRow) {
+      const group = detailRow.closest(".detail-group");
+      const turnID = group ? group.getAttribute("data-turn-id") : null;
+      if (turnID) {
+        const current = !!groupState[turnID];
+        groupState[turnID] = !current;
+        manualOverride[turnID] = true; // 手动干预后一切自动逻辑失效（需求 4）。
+        applyGroupState(turnID);
+        // display 切换改变文档高度：走批次纪律保锚（需求 7）。
+        const plan = Scroll.beginBatch();
+        Scroll.endBatch(plan);
+        scheduleTurnOffsetsReport();
       }
+      return;
     }
   });
 
@@ -549,6 +595,37 @@
     line.className = "sysline";
     line.textContent = op.body;
     el.appendChild(line);
+  }
+
+  // 处理详情组 disclosure 行（BACKLOG-DETAIL-GROUP）：chevron + 「处理详情」文本，整行可点击。
+  function renderDetailGroup(el, op) {
+    el.className = "ti ti-detail detail-group";
+    el.textContent = "";
+    el.setAttribute("data-turn-id", op.detailTurnID || "");
+    // 手动覆盖优先：无手动干预时才采纳 op.collapsed（自动逻辑目标态）。
+    if (!manualOverride[op.detailTurnID]) {
+      groupState[op.detailTurnID] = !!op.collapsed;
+    }
+    // collapsed 态在 el（.detail-group）上用 expanded class 表达（与 applyGroupState 一致），
+    // CSS 用它驱动 chevron 方向与组内条目的展示。
+    if (groupState[op.detailTurnID]) {
+      el.classList.remove("expanded");
+    } else {
+      el.classList.add("expanded");
+    }
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "detail-row";
+    const chevron = document.createElement("span");
+    chevron.className = "detail-chevron";
+    row.appendChild(chevron);
+    const label = document.createElement("span");
+    label.className = "detail-label";
+    label.textContent = "处理详情";
+    row.appendChild(label);
+    el.appendChild(row);
+    // 组内条目（可能存在，若先渲染了条目再渲染 marker）按当前组状态对齐。
+    applyGroupState(op.detailTurnID);
   }
 
   // 思考 / 工具卡：header（chevron + 标题胶囊 + 折叠预览）+ 折叠体。
@@ -678,6 +755,9 @@
 
     if (op.kind === "assistant" || op.kind === "summary") {
       renderAssistant(el, op, state);
+    } else if (op.kind === "detailGroup") {
+      // 处理详情 disclosure 行（BACKLOG-DETAIL-GROUP）。
+      renderDetailGroup(el, op);
     } else if (structuralKinds.indexOf(op.kind) >= 0) {
       // 结构性条目内容整体替换（思考/工具流式期 body 会增长，重渲染成本可忽略——纯文本节点）
       if (state.source !== op.body || state.streaming !== op.streaming ||
@@ -698,8 +778,40 @@
         state.toolError = op.toolError;
       }
     }
+
+    // 组内条目归属管理（BACKLOG-DETAIL-GROUP）：thinking/tool/中间 assistant 带 detailTurnID。
+    // detailTurnID 有 → 标记为 detail-item（遵守组折叠状态）；无 → 移除（最终答复移出组）。
+    applyDetailGroupClass(el, op, state);
+
     state.kind = op.kind;
     return el;
+  }
+
+  // 按 op.detailTurnID 维护条目的 detail-item / data-turn-id / detail-hidden class。
+  // 只在归属发生变化时切换，避免无谓 class 抖动。
+  // 注意：detailGroup（marker）由 renderDetailGroup 管理其 data-turn-id / expanded，
+  // 这里必须跳过，否则 else 分支会把 marker 的 data-turn-id 移除导致点击展开失效。
+  function applyDetailGroupClass(el, op, state) {
+    if (op.kind === "detailGroup") {
+      // marker 的归属管理交给 renderDetailGroup；这里只记录，不清除 data-turn-id。
+      state.detailTurnID = op.detailTurnID || null;
+      return;
+    }
+    const isGroupItem = !!op.detailTurnID;
+    const prevTurnID = state.detailTurnID || null;
+    if (isGroupItem) {
+      el.classList.add("detail-item");
+      el.setAttribute("data-turn-id", op.detailTurnID);
+      // 新条目 / 组归属变化时对齐组状态（折叠态立即隐藏，展开态保持可见）。
+      if (prevTurnID !== op.detailTurnID) {
+        applyGroupState(op.detailTurnID);
+      }
+    } else {
+      el.classList.remove("detail-item");
+      el.classList.remove("detail-hidden");
+      el.removeAttribute("data-turn-id");
+    }
+    state.detailTurnID = op.detailTurnID || null;
   }
 
   function applyOps(ops) {
@@ -714,6 +826,9 @@
         main.textContent = "";
         items.clear();
         Warmer.reset();
+        // 分组状态一并清空（页面生命周期内有效，但 reset 表示全新文档，应重置）。
+        for (const k in groupState) { delete groupState[k]; }
+        for (const k in manualOverride) { delete manualOverride[k]; }
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));
       } else if (op.op === "remove") {
