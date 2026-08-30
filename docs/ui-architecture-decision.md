@@ -146,8 +146,11 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 > 冷启动/切回随首个内容批次同批恢复，restoringAnchor 3s 有界校正窗口；
 > ④ rail 升级 minimap：JS 实测上报 user 条目相对位置，刻度按比例分布（未上报条目退化为均匀位）。
 > ⑤ 遗留路径**尚未删除**（验收条件），先 dogfood 验证单文档路径再执行删除。
-> 已知限制：content-visibility 未渲染区域用 200px 估算高，冷恢复的锚点位置可能有小幅漂移
->（restoringAnchor 窗口 + 后续批次重校缓解）——验收指标「误差 < 2px」待 dogfood 验证。
+> 已知限制：content-visibility 未渲染区域用估算高——已按条目类型给近似真实值的估算
+> （user 64px / answer 480px / 卡 48px），且 restoringAnchor 窗口内有 RAF 逐帧校正
+> （实测冷恢复锚点精度 -60.0px 精确收敛，用户滚轮即时接管不抢）。
+> 修复记录：单文档滚轮失效的根因是共享 markdown-renderer.css 的 `html,body{overflow:hidden}`
+> （遗留路径禁止内部滚动的设定被单文档页继承）——transcript-document.css 已覆盖回 visible。
 
 沿用提案 §7 的四阶段，补充三点修正：
 

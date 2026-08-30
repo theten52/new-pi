@@ -109,8 +109,10 @@
 
     // 滚动停止（scrollend 或 debounce 兜底）：落底则回钉底态，否则归 idle。
     onScrollSettled: function () {
-      if (this.intent === "jumpingToTarget" || this.intent === "restoringAnchor") {
-        // 跳转/恢复结束：按落点决定后续。
+      if (this.intent === "restoringAnchor") {
+        // 恢复模式由截止期限管理（RAF 校正还要继续），不因滚动停驻提前退出；
+        // 只有用户滚动输入（onUserScrollInput）能提前接管。
+        return;
       }
       this.intent = this.isNearBottom() ? "pinnedBottom" : "idle";
     },
@@ -145,6 +147,32 @@
           this.scrollToBottom(false);
         }
       }
+      this.startRestoreLoop();
+    },
+
+    // 恢复窗口期内的逐帧校正：content-visibility 未渲染区域用估算高，
+    // 冷恢复落点后附近条目渲染出真实高度会引发几何漂移——RAF 循环在窗口内
+    // 持续把视口拉回锚点（<1px 差值跳过，稳定后近乎零开销）。
+    // 用户滚动输入会先把 intent 改为 userScrolling，循环下一帧即退出，不跟用户抢。
+    restoreRAF: null,
+    startRestoreLoop: function () {
+      if (this.restoreRAF !== null) {
+        return;
+      }
+      const step = () => {
+        this.restoreRAF = null;
+        if (this.intent !== "restoringAnchor" || !this.restoreTarget) {
+          return;
+        }
+        if (Date.now() > this.restoreDeadline) {
+          this.intent = "idle";
+          this.restoreTarget = null;
+          return;
+        }
+        this.scrollToAnchor(this.restoreTarget);
+        this.restoreRAF = requestAnimationFrame(step);
+      };
+      this.restoreRAF = requestAnimationFrame(step);
     }
   };
 

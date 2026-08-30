@@ -6,6 +6,10 @@ html, body {
   padding: 0;
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   color: #1d1d1f;
+  /* 关键覆盖：共享的 markdown-renderer.css 把 html/body 设为 overflow:hidden
+     （遗留路径每条消息一个 WebView、高度由原生驱动，禁止内部滚动）。
+     单文档路径窗口滚动由文档自持，必须改回 visible（本表加载顺序在后，同优先级后定义生效）。 */
+  overflow: visible;
 }
 
 #transcript {
@@ -20,6 +24,13 @@ html, body {
   contain-intrinsic-size: auto 200px;
   margin-bottom: 16px;
 }
+
+/* 按条目类型给更接近真实值的估算高：冷恢复锚点重定位的精度取决于估算与真实的差距
+   （auto 记住已渲染真实高，估算只影响从未渲染过的条目）。 */
+.ti-user { contain-intrinsic-size: auto 64px; }
+.ti-answer { contain-intrinsic-size: auto 480px; }
+.ti-thinking, .ti-tool { contain-intrinsic-size: auto 48px; }
+.ti-system, .ti-error { contain-intrinsic-size: auto 40px; }
 
 /* ===== 用户气泡（右对齐，轮对话色调由 --tint（色相度数）驱动） ===== */
 
