@@ -300,6 +300,20 @@ struct NewPiEditProviderSheet: View {
                                 .font(.body.monospaced())
                                 .lineLimit(1)
                             Spacer()
+                            // 图片能力标注（BACKLOG-IMAGE-INPUT）：preset 预填之外的自定义模型
+                            //（如 OpenRouter 渠道）由用户在此手动标注；Save 时随 profile 持久化。
+                            Button {
+                                profile.toggleImageSupport(model)
+                            } label: {
+                                Image(systemName: profile.supportsImages(modelID: model) ? "photo.fill" : "photo")
+                                    .foregroundStyle(profile.supportsImages(modelID: model) ? Color.accentColor : Color.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help(
+                                profile.supportsImages(modelID: model)
+                                    ? "支持图片识别（点击关闭）"
+                                    : "不支持图片识别（点击开启）"
+                            )
                             Button {
                                 profile.modelID = model
                             } label: {

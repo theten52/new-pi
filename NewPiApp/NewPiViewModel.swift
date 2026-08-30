@@ -41,6 +41,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     /// （thinking / tool / 中间 assistant）。最终答复与 marker 的语义见方案文档：
     /// marker 用 detailTurnID 标识它管理的组；组内条目用它归属到组；最终答复置 nil 移出组。
     let detailTurnID: String?
+    /// 用户消息附带的图片附件（BACKLOG-IMAGE-INPUT）；仅 user 条目非空。
+    let attachments: [MessageAttachment]
 
     init(
         id: UUID = UUID(),
@@ -49,7 +51,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         toolCommand: String? = nil,
         messageIndex: Int? = nil,
         sessionEntryID: String? = nil,
-        detailTurnID: String? = nil
+        detailTurnID: String? = nil,
+        attachments: [MessageAttachment] = []
     ) {
         self.id = id
         self.kind = kind
@@ -58,6 +61,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.messageIndex = messageIndex
         self.sessionEntryID = sessionEntryID
         self.detailTurnID = detailTurnID
+        self.attachments = attachments
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -249,7 +253,13 @@ private func makeTranscriptItems(
         case let .user(user):
             currentTurnID = detailTurnID(userMessageIndex: index, entryID: entryID)
             turnHasGroupItems = turnHasGroupItemsByUserIndex[index] ?? false
-            items.append(NewPiTranscriptItem(kind: .user, body: user.content, messageIndex: index, sessionEntryID: entryID))
+            items.append(NewPiTranscriptItem(
+                kind: .user,
+                body: user.content,
+                messageIndex: index,
+                sessionEntryID: entryID,
+                attachments: user.attachments
+            ))
             // marker 在 user 之后、组内条目之前插入（恢复默认收起）；无组内条目的 turn 不插。
             if turnHasGroupItems {
                 items.append(NewPiTranscriptItem(kind: .detailGroup(collapsed: true), body: "", detailTurnID: currentTurnID))
@@ -429,6 +439,46 @@ final class NewPiViewModel: ObservableObject {
 
     var chatNavigationTitle: String {
         isForkedBranch ? "Chat (branch)" : "Chat"
+    }
+
+    /// 当前活跃 provider 的完整 profile（供能力检查、落盘等使用）。
+    var activeProfile: ProviderProfile? {
+        guard let id = activeProviderID else { return nil }
+        return providerConfig.profiles.first(where: { $0.id == id })
+    }
+
+    /// 当前活跃 provider 的 preset（供上下文窗口目录表兜底使用）。
+    private var activeProfilePreset: ProviderPreset? {
+        activeProfile?.preset
+    }
+
+    /// 状态栏「上下文占用」文本：`上下文 9.2% / 1.0M`。
+    ///
+    /// - 分子：最近一轮请求的真实输入 token（未命中缓存 + 命中缓存 + 写缓存，
+    ///   即 `UsageStats.totalInputTokens`），代表当前上下文实际占用的输入量。
+    /// - 分母：当前模型的上下文窗口大小（来自 `ContextWindowCatalog` 内置目录表）。
+    ///
+    /// 无输入数据（尚未产生任何请求）或查不到窗口大小时返回 nil（不显示）。
+    func contextUsageText(for usage: UsageStats) -> String? {
+        let input = usage.totalInputTokens
+        guard input > 0, let preset = activeProfilePreset else { return nil }
+        let window = ContextWindowCatalog.windowTokens(for: activeProviderModel, preset: preset)
+        guard window > 0 else { return nil }
+
+        let percent = Double(input) / Double(window) * 100
+        // 极低占用（<0.05%）显示 0.0 会误导，仍给一位小数；上限钳制到 999% 避免越界。
+        let clamped = min(percent, 999.9)
+        let percentText = String(format: "%.1f%%", clamped)
+        let windowText = Self.compactTokenCount(window)
+        return "上下文 \(percentText) / \(windowText)"
+    }
+
+    /// 紧凑 token 计数：≥1M 显示 `x.xM`，≥10k 显示 `xk`，≥1k 显示 `x.xk`，否则原值。
+    private static func compactTokenCount(_ value: Int) -> String {
+        if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
+        if value >= 10_000 { return String(format: "%.0fk", Double(value) / 1_000) }
+        if value >= 1_000 { return String(format: "%.1fk", Double(value) / 1_000) }
+        return "\(value)"
     }
 
     init() {
@@ -1124,6 +1174,14 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func send(_ text: String) {
+        send(text, draftAttachments: [])
+    }
+
+    /// 发送用户消息，可携带图片附件（BACKLOG-IMAGE-INPUT）。
+    ///
+    /// 发送前做能力拦截：当前模型不支持图片时给出明确提示且不发送；
+    /// 附件先落盘到会话附件目录（`SessionAttachments`），再组装成 `UserMessage`。
+    func send(_ text: String, draftAttachments: [DraftImageAttachment]) {
         guard let runtime = activeRuntime else {
             appendTranscript(
                 kind: .system,
@@ -1132,6 +1190,47 @@ final class NewPiViewModel: ObservableObject {
                     : "Start a new session first (⇧⌘N)."
             )
             return
+        }
+
+        // 能力拦截：有图片但当前模型不支持 → 提示且不发送。
+        if !draftAttachments.isEmpty {
+            guard let profile = activeProfile, profile.supportsImages(modelID: activeProviderModel) else {
+                let modelName = activeProviderModel.isEmpty ? "当前模型" : activeProviderModel
+                appendTranscript(
+                    kind: .error,
+                    body: "当前模型 \(modelName) 不支持图片输入。请在设置中为该模型开启「支持图片识别」，或切换到支持图片的模型。"
+                )
+                return
+            }
+        }
+
+        // 附件落盘：解码/缩放/压缩已在采集层完成，这里做体积校验 + 写入 + 组装路径引用。
+        var attachments: [MessageAttachment] = []
+        if !draftAttachments.isEmpty {
+            do {
+                let dir = try SessionAttachments.directory(for: runtime.sessionID)
+                for draft in draftAttachments {
+                    if let tooLarge = ImageAttachmentProcessor.validate(draft) {
+                        appendTranscript(kind: .error, body: tooLarge)
+                        return
+                    }
+                    let ext = Self.fileExtension(for: draft.mediaType)
+                    let fileName = "\(draft.id.uuidString).\(ext)"
+                    try draft.data.write(to: dir.appendingPathComponent(fileName))
+                    let relativePath = "\(runtime.sessionID.uuidString)/\(fileName)"
+                    attachments.append(
+                        MessageAttachment(
+                            mediaType: draft.mediaType,
+                            path: relativePath,
+                            displayName: draft.displayName,
+                            note: draft.note
+                        )
+                    )
+                }
+            } catch {
+                appendTranscript(kind: .error, body: "无法保存图片附件：\(error.localizedDescription)")
+                return
+            }
         }
 
         // 新 turn 开始（BACKLOG-DETAIL-GROUP）：重置当前 turn 状态，marker 留待首条组内条目懒创建。
@@ -1143,14 +1242,32 @@ final class NewPiViewModel: ObservableObject {
         // 同时把 user 条目 id → live turnID 登记进映射表（review「🟡 turnID 稳定性」修复），
         // rebuild 时据此复用 live turnID，历史轮次也能保持 turnID 稳定，避免手动展开状态丢失。
         let userItemID = appendTranscript(
-            kind: .user, body: text, messageIndex: runtime.liveMessageCount, on: runtime)
+            kind: .user,
+            body: text,
+            messageIndex: runtime.liveMessageCount,
+            attachments: attachments,
+            on: runtime
+        )
         runtime.detailLiveTurnIDByUser[userItemID] = liveTurnID
         runtime.isStreaming = true
         runtime.agentActivity = .thinking
         reflectActive()
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
+        let message = attachments.isEmpty
+            ? AgentMessage.user(text)
+            : AgentMessage.user(text, attachments: attachments)
         Task {
-            await runtime.session.prompt(text)
+            await runtime.session.prompt(message)
+        }
+    }
+
+    /// MIME 类型 → 文件扩展名。
+    private static func fileExtension(for mediaType: String) -> String {
+        switch mediaType {
+        case "image/jpeg", "image/jpg": "jpg"
+        case "image/gif": "gif"
+        case "image/webp": "webp"
+        default: "png"
         }
     }
 
@@ -1546,7 +1663,11 @@ final class NewPiViewModel: ObservableObject {
                     kind: .user,
                     body: user.content,
                     messageIndex: index,
-                    sessionEntryID: entryID
+                    sessionEntryID: entryID,
+                    // 附件必须随 rebuild 保留（BACKLOG-IMAGE-INPUT）：agentEnd 后的
+                    // rebuild 重建全部条目，漏传会使用户气泡缩略图在回复结束后消失
+                    //（与加载路径 257 行保持一致）。
+                    attachments: user.attachments
                 ))
                 // marker 在 user 之后、组内条目之前插入（恢复默认收起）；marker id 从缓存复用防闪烁。
                 if turnHasGroupItems, let turnID = currentTurnID {
@@ -1798,8 +1919,8 @@ final class NewPiViewModel: ObservableObject {
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
     @discardableResult
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, on runtime: SessionRuntime) -> UUID {
-        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID)
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], on runtime: SessionRuntime) -> UUID {
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments)
         runtime.transcript.append(item)
         if runtime === activeRuntime {
             transcript = runtime.transcript

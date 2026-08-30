@@ -176,6 +176,8 @@ struct NewPiAgentStatusBar: View {
     var lastTurnUsageText: String? = nil
     /// 缓存命中率文本（如 "85%"）；nil 时隐藏。
     var cacheHitRateText: String? = nil
+    /// 上下文占用文本（如 "上下文 9.2% / 1.0M"）；nil 时隐藏。
+    var contextText: String? = nil
     /// 模型选择菜单；nil 时隐藏（如 spike 窗口）。
     var modelPicker: NewPiModelPickerMenu? = nil
 
@@ -194,6 +196,12 @@ struct NewPiAgentStatusBar: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .help("本会话累计缓存命中率（命中缓存的输入 token / 总输入 token）")
+            }
+            if let contextText {
+                Label(contextText, systemImage: "square.stack.3d.up.fill")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .help("当前上下文占用（最近一轮输入 token / 模型上下文窗口）")
             }
             if let usageText {
                 Text(usageText)

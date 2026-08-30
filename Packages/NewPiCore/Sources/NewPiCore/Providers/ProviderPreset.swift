@@ -39,6 +39,8 @@ public struct ProviderPresetDefinition: Sendable, Equatable {
     public var systemImage: String
     public var defaultBaseURL: String?
     public var defaultModels: [String]
+    /// 预设中已知支持图片识别的模型（新建 provider 时预填进 profile 的 imageCapableModels）。
+    public var imageCapableModels: Set<String>
     public var optionFields: [ProviderOptionField]
     public var credentialRequired: Bool
     public var environmentVariable: String?
@@ -50,6 +52,7 @@ public struct ProviderPresetDefinition: Sendable, Equatable {
         systemImage: String,
         defaultBaseURL: String? = nil,
         defaultModels: [String] = [],
+        imageCapableModels: Set<String> = [],
         optionFields: [ProviderOptionField] = [],
         credentialRequired: Bool = true,
         environmentVariable: String? = nil,
@@ -60,6 +63,7 @@ public struct ProviderPresetDefinition: Sendable, Equatable {
         self.systemImage = systemImage
         self.defaultBaseURL = defaultBaseURL
         self.defaultModels = defaultModels
+        self.imageCapableModels = imageCapableModels
         self.optionFields = optionFields
         self.credentialRequired = credentialRequired
         self.environmentVariable = environmentVariable
@@ -80,6 +84,13 @@ public enum ProviderPresetCatalog {
             "claude-opus-4-20250514",
             "claude-3-5-haiku-20241022",
         ],
+        imageCapableModels: [
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+            "claude-3-5-haiku-20241022",
+        ],
         optionFields: [
             ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.anthropic.com/v1/messages"),
             ProviderOptionField(key: .apiVersion, label: "API Version", placeholder: "2023-06-01"),
@@ -94,6 +105,7 @@ public enum ProviderPresetCatalog {
         systemImage: "brain.head.profile",
         defaultBaseURL: "https://api.openai.com/v1/chat/completions",
         defaultModels: ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
+        imageCapableModels: ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
         optionFields: [
             ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.openai.com/v1/chat/completions"),
             ProviderOptionField(key: .organization, label: "Organization ID", placeholder: "org-…"),
@@ -132,6 +144,13 @@ public enum ProviderPresetCatalog {
             "openai/gpt-4o",
             "google/gemini-2.5-pro",
             "deepseek/deepseek-chat",
+        ],
+        imageCapableModels: [
+            "anthropic/claude-sonnet-4.5",
+            "anthropic/claude-sonnet-4",
+            "openai/gpt-5",
+            "openai/gpt-4o",
+            "google/gemini-2.5-pro",
         ],
         optionFields: [
             ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://openrouter.ai/api/v1/chat/completions"),
@@ -185,6 +204,7 @@ public enum ProviderPresetCatalog {
             "deepseek-v4-pro",
             "deepseek-v4-flash-vision-exp",
         ],
+        imageCapableModels: ["deepseek-v4-flash-vision-exp"],
         optionFields: openaiCompatible.optionFields,
         credentialRequired: true,
         environmentVariable: "OPENAI_API_KEY",

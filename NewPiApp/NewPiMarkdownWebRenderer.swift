@@ -34,7 +34,7 @@ enum NewPiMarkdownWebDocument {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self' file:; script-src 'self' file: 'nonce-\(scriptNonce)'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: pi-att:; style-src 'self' file:; script-src 'self' file: 'nonce-\(scriptNonce)'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
           <link rel="stylesheet" href="\(htmlAttributeEscaped(githubMarkdownCSSURL.absoluteString))">
           <link rel="stylesheet" href="\(htmlAttributeEscaped(highlightCSSURL.absoluteString))">
           <link rel="stylesheet" href="\(htmlAttributeEscaped(appCSSURL.absoluteString))">

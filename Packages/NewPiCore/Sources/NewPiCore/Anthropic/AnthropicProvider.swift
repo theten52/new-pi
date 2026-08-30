@@ -25,7 +25,7 @@ public enum AnthropicMessageEncoder {
                 flushToolResults()
                 encoded.append([
                     "role": "user",
-                    "content": user.content,
+                    "content": userContentPayload(user),
                 ])
             case let .assistant(assistant):
                 flushToolResults()
@@ -102,6 +102,33 @@ public enum AnthropicMessageEncoder {
             "content": toolResult.content,
             "is_error": toolResult.isError,
         ]
+    }
+
+    /// 用户消息内容：无附件时保持纯字符串（旧格式），有附件时升级为块数组
+    /// `[{type:"text"},{type:"image",source:{...}}]`。
+    private static func userContentPayload(_ user: UserMessage) -> Any {
+        guard !user.attachments.isEmpty else { return user.content }
+        var blocks: [[String: Any]] = []
+        if !user.content.isEmpty {
+            blocks.append(["type": "text", "text": user.content])
+        }
+        for attachment in user.attachments {
+            guard let data = SessionAttachments.data(for: attachment) else { continue }
+            let base64 = data.base64EncodedString()
+            blocks.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": attachment.mediaType,
+                    "data": base64,
+                ],
+            ])
+            // 缩放/坐标映射说明（BACKLOG-IMAGE-INPUT）：紧跟 image 块以 text 块下发。
+            if let note = attachment.note, !note.isEmpty {
+                blocks.append(["type": "text", "text": note])
+            }
+        }
+        return blocks
     }
 }
 

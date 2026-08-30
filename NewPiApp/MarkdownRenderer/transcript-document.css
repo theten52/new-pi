@@ -34,6 +34,9 @@ html, body {
 
 /* ===== 用户气泡（右对齐，轮对话色调由 --tint（色相度数）驱动） ===== */
 
+/* 带图附件的气泡更高：估算高相应提升，冷恢复锚点重定位更准（auto 仍会记住真实高）。 */
+.ti-user:has(.bubble-attachments) { contain-intrinsic-size: auto 168px; }
+
 .ti-user .bubble {
   max-width: 640px;
   margin-left: auto;
@@ -46,6 +49,48 @@ html, body {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   position: relative;
+}
+
+/* ===== 用户气泡图片附件条（BACKLOG-IMAGE-INPUT；src 走 pi-att:// 受控通道） ===== */
+
+.bubble-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bubble-attachments:first-child {
+  margin-top: 0;
+}
+
+.bubble-attachment {
+  display: block;
+  height: 128px;
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.04);
+  cursor: zoom-in;
+}
+
+.bubble-attachment:hover,
+.bubble-attachment:focus-visible {
+  filter: brightness(1.06);
+  outline: 2px solid rgba(0, 0, 0, 0.25);
+  outline-offset: 1px;
+}
+
+.bubble-attachment-missing {
+  display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px dashed rgba(0, 0, 0, 0.25);
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
 }
 
 /* ===== 消息级操作按钮（复制 / 分叉）：hover 浮现在气泡 / 卡片右上角 ===== */

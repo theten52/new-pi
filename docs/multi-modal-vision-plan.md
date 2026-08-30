@@ -1,6 +1,8 @@
 # NewPi 聊天图片支持（Multi-modal Vision）设计方案
 
-> 状态：**规划中，未执行**
+> 状态：**MVP 已实现**（2026-08-31 落地 UI 采集 + 气泡缩略图；此前 Core/provider/落盘层已就绪）
+> 2026-08-31 补齐：Settings 模型行「支持图片识别」开关、点击放大预览、DeepSeek 双端点带图实测。
+> 待办：Anthropic 带图端到端实测（本机无 key，格式已有单测覆盖）、HEIC 转 JPEG、Quick Look 预览。
 > 目标：为聊天增加图片（vision）输入 —— 采集、持久化、provider 序列化、UI 展示全链路。
 > 依据：`CLAUDE.md` 的 UI 渲染架构（单文档 transcript）+ `AgentMessage` / provider 现状。
 
@@ -80,8 +82,11 @@ public struct UserMessage: Sendable, Codable, Equatable {
 
 - 发送时把用户选中的图片**拷贝 / 重组**进该目录（以会话 UUID 隔离）。
 - `MessageAttachment.path` 存**相对附件根目录的路径**（不存绝对路径），提高可移植性。
-- 写盘前做**边长缩放 + 压缩**（最长边 ~1568px，Anthropic 推荐上限），保证 ≤ 5MB；
-  超限或不可解码时给用户明确报错，不发送。
+- 写盘前处理管道（对标 pi / osaurus 的实现，2026-08-31 强化）：**原样优先**（尺寸与
+  base64 体积均在预算内 → 不动字节）；需处理时**PNG/JPEG 双编码取满足预算的最小者**
+  （JPEG 质量阶梯 0.85→0.4），仍超则长边 ×0.75 递减；体积口径统一为 **base64 后字节**
+  （Anthropic 单图 5MB 按此计，膨胀 ×4/3）；发生缩放时生成**坐标映射 note**，随 image
+  块以 text 块下发（`MessageAttachment.note`，三 provider 序列化同构）。
 - MVP 不自动清理附件（会话删除时附件的回收策略见 5.5 二期）。
 
 ### 4.3 Provider 模型图片能力标注：并行集合（方案 B）
@@ -191,16 +196,17 @@ scheme 只解析附件目录内路径，或 `loadFileURL:allowingReadAccessTo:` 
 
 ## 7. 验收清单（MVP）
 
-- [ ] 新增 / 编辑 model 时能勾选「支持图片识别」，配置可持久化
-- [ ] 点附件按钮选择多张图片，composer 上方显示草稿缩略图 + 可移除
-- [ ] 拖拽图片文件到 composer 能加入草稿；粘贴图片（或 cmd+V 截图）能加入草稿
-- [ ] 发送后用户气泡显示图片缩略图；附件落盘到会话附件目录
-- [ ] Anthropic / OpenAI / Responses 三种 provider 带图请求格式正确（实测 200）
-- [ ] 模型不支持图片时带图发送被拦截并提示
-- [ ] 会话重开 / 继续对话时 JSONL 重放附件正确（含图片显示 + 回传给模型）
-- [ ] 旧会话（无附件字段）正常回放，不报错
-- [ ] 图片 > 5MB 或不可解码时给出明确报错且不发送
-- [ ] 缩略图加载走受控本地通道，不借 CND、不开任意本地文件读取
+- [x] 新增 / 编辑 model 时能勾选「支持图片识别」，配置可持久化（模型行 photo 图标开关，Save 随 profile 落盘）
+- [x] 点附件按钮选择多张图片，composer 上方显示草稿缩略图 + 可移除
+- [x] 拖拽图片文件到 composer 能加入草稿；粘贴图片（或 cmd+V 截图）能加入草稿
+- [x] 发送后用户气泡显示图片缩略图；附件落盘到会话附件目录
+- [x] Anthropic / OpenAI / Responses 三种 provider 带图请求格式正确（**OpenAI 兼容与 Responses 已实测**：DeepSeek 官方双端点 200 且识图正确（红色图→"Red"）；Anthropic 无 key 未实测，格式有单测覆盖）
+- [x] 模型不支持图片时带图发送被拦截并提示（`NewPiViewModel.send`）
+- [ ] 会话重开 / 继续对话时 JSONL 重放附件正确（含图片显示 + 回传给模型）（rebuild 已携带 attachments，未端到端实测）
+- [x] 旧会话（无附件字段）正常回放，不报错（decode 缺省 `[]`）
+- [x] 图片 > 5MB 或不可解码时给出明确报错且不发送
+- [x] 缩略图加载走受控本地通道，不借 CDN、不开任意本地文件读取（`pi-att://` scheme handler + `SessionAttachments.resolve` 唯一边界）
+- [x] 点击缩略图放大预览（原生浮层窗：Esc / 点击背景关闭；路径同样经 `SessionAttachments.resolve` 受控解析）
 
 ## 8. 参考
 

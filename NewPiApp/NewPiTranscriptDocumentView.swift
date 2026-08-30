@@ -68,6 +68,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "rendererError")
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
+        configuration.userContentController.add(context.coordinator, name: "attachmentTap")
+        // 附件图片受控读取通道（BACKLOG-IMAGE-INPUT）：pi-att:// 仅经 SessionAttachments.resolve
+        // 放行附件根目录内路径，WebView 不获得任意本地文件读取能力。
+        configuration.setURLSchemeHandler(AttachmentSchemeHandler(), forURLScheme: AttachmentSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -98,6 +102,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "attachmentTap")
         webView.navigationDelegate = nil
     }
 
@@ -251,7 +256,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             var kindTag: String
             var extra = ""
             switch item.kind {
-            case .user: kindTag = "user"
+            case .user:
+                kindTag = "user"
+                // 附件路径入签名：附件集合变化（理论上 user 条目一次带全，防御性保留）须触发再 upsert。
+                extra = item.attachments.map(\.path).joined(separator: ",")
             case .assistant: kindTag = "assistant"
             case .summary: kindTag = "summary"
             case .system: kindTag = "system"
@@ -292,7 +300,18 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 op["messageIndex"] = messageIndex
             }
             switch item.kind {
-            case .user: op["kind"] = "user"
+            case .user:
+                op["kind"] = "user"
+                // 附件图片（BACKLOG-IMAGE-INPUT）：src 走 pi-att:// 受控通道，JS 侧 <img> 懒加载。
+                if !item.attachments.isEmpty {
+                    op["attachments"] = item.attachments.compactMap { attachment -> [String: Any]? in
+                        guard let src = AttachmentSchemeHandler.imageURL(forRelativePath: attachment.path) else {
+                            return nil
+                        }
+                        // path 供 JS 点击放大回传（受控解析）；alt 为展示名。
+                        return ["src": src, "alt": attachment.displayName, "path": attachment.path]
+                    }
+                }
             case .assistant: op["kind"] = "assistant"
             case .summary: op["kind"] = "summary"
             case .system: op["kind"] = "system"
@@ -405,6 +424,13 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                     anchorDelta: anchorDelta,
                     scrollTop: scrollTop
                 )
+            case "attachmentTap":
+                // 点击缩略图放大（BACKLOG-IMAGE-INPUT 二期）：只接收相对路径，
+                // 经 SessionAttachments.resolve 受控解析后弹原生预览窗。
+                guard let body = message.body as? [String: Any],
+                      let path = body["path"] as? String, !path.isEmpty else { return }
+                let title = body["alt"] as? String ?? path
+                AttachmentPreviewWindowController.shared.present(relativePath: path, title: title)
             case "turnOffsets":
                 guard let body = message.body as? [String: Any],
                       let offsets = body["offsets"] as? [[String: Any]] else { return }

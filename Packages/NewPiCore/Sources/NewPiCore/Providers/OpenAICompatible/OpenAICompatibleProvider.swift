@@ -40,7 +40,7 @@ public enum OpenAIMessageEncoder {
         for message in messages {
             switch message {
             case let .user(user):
-                encoded.append(["role": "user", "content": user.content])
+                encoded.append(["role": "user", "content": userContentPayload(user)])
             case let .assistant(assistant):
                 var payload: [String: Any] = ["role": "assistant"]
                 if assistant.toolCalls.isEmpty {
@@ -93,6 +93,29 @@ public enum OpenAIMessageEncoder {
                 ],
             ] as [String: Any]
         }
+    }
+
+    /// 用户消息内容：无附件时保持纯字符串；有附件时升级为
+    /// `[{type:"text"},{type:"image_url",image_url:{url:"data:<mime>;base64,…"}}]`。
+    private static func userContentPayload(_ user: UserMessage) -> Any {
+        guard !user.attachments.isEmpty else { return user.content }
+        var blocks: [[String: Any]] = []
+        if !user.content.isEmpty {
+            blocks.append(["type": "text", "text": user.content])
+        }
+        for attachment in user.attachments {
+            guard let data = SessionAttachments.data(for: attachment) else { continue }
+            let dataURL = "data:\(attachment.mediaType);base64,\(data.base64EncodedString())"
+            blocks.append([
+                "type": "image_url",
+                "image_url": ["url": dataURL],
+            ])
+            // 缩放/坐标映射说明（BACKLOG-IMAGE-INPUT）：紧跟 image_url 块以 text 块下发。
+            if let note = attachment.note, !note.isEmpty {
+                blocks.append(["type": "text", "text": note])
+            }
+        }
+        return blocks
     }
 }
 

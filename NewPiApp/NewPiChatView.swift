@@ -1,6 +1,7 @@
 import AppKit
 import NewPiCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 保活容器：把每个缓存会话的面板视图（含彼此内部的 WKWebView）常驻挂载，
 /// 切换会话时仅翻转活跃面板的显示/交互，而不销毁重建 —— 这样 DOM、测高、滚动位置
@@ -39,6 +40,8 @@ struct NewPiSessionPanel: View {
     @State private var input = ""
     /// composer 输入框的实测内容高度（由 NewPiComposerTextView 回报，固定 4 行）。
     @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
+    /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
+    @State private var draftAttachments: [DraftImageAttachment] = []
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
 
@@ -142,6 +145,7 @@ struct NewPiSessionPanel: View {
                         usageText: runtime.totalUsage.newPiCompactText,
                         lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
                         cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
+                        contextText: viewModel.contextUsageText(for: runtime.lastTurnUsage),
                         modelPicker: NewPiModelPickerMenu(
                             groups: viewModel.providerModelGroups,
                             activeProfileID: viewModel.activeProviderID,
@@ -153,6 +157,11 @@ struct NewPiSessionPanel: View {
                         )
                     )
 
+                    // 草稿附件条（BACKLOG-IMAGE-INPUT）：非空才占位。
+                    if !draftAttachments.isEmpty {
+                        NewPiDraftAttachmentStrip(drafts: $draftAttachments)
+                    }
+
                     // 多行输入框（NSTextView）：真实多行、自动增高，
                     // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
                     NewPiComposerTextView(
@@ -160,6 +169,7 @@ struct NewPiSessionPanel: View {
                         isDisabled: runtime.isStreaming,
                         placeholder: "Message NewPi…",
                         onSubmit: sendComposerInput,
+                        onImagesPicked: appendDrafts,
                         onHeightChange: { newHeight in
                             guard abs(composerInputHeight - newHeight) > 0.5 else { return }
                             composerInputHeight = newHeight
@@ -177,6 +187,17 @@ struct NewPiSessionPanel: View {
                     )
                 }
 
+                // 附件按钮（BACKLOG-IMAGE-INPUT）：NSOpenPanel 多选图片；拖拽 / ⌘V 粘贴走输入框自身。
+                Button {
+                    pickImages()
+                } label: {
+                    Image(systemName: "photo.on.rectangle.angled")
+                }
+                .buttonStyle(.borderless)
+                .disabled(runtime.isStreaming)
+                .help("添加图片（也可直接拖拽或 ⌘V 粘贴到输入框）")
+                .frame(minWidth: 32)
+
                 Button("Stop") {
                     viewModel.abort()
                 }
@@ -187,7 +208,10 @@ struct NewPiSessionPanel: View {
                 // Return 发送由 composer 自身处理，按钮不再占用 Return 快捷键，
                 // 避免与 NSTextView 的按键处理双重触发。
                 Button("Send", action: sendComposerInput)
-                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || runtime.isStreaming)
+                    .disabled(
+                        (input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && draftAttachments.isEmpty) || runtime.isStreaming
+                    )
             }
             .padding(.top, 8)
             .padding(.horizontal)
@@ -199,13 +223,76 @@ struct NewPiSessionPanel: View {
 
     private func sendComposerInput() {
         let text = input
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        let drafts = draftAttachments
+        // 空文本 + 有图片也可发送（识图场景常只发图）；拦截与体积校验在 ViewModel.send。
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty,
               !runtime.isStreaming else { return }
         input = ""
-        viewModel.send(text)
+        draftAttachments = []
+        viewModel.send(text, draftAttachments: drafts)
         // 发送 = 明确要看最新内容的意图（聊天应用惯例）：显式钉底，
         // 否则用户停在中部时，流式输出按保锚纪律不跟随（看起来像没反应）。
         docController.scrollToBottom()
+    }
+
+    // MARK: - 图片附件采集（BACKLOG-IMAGE-INPUT）
+
+    /// 附件按钮：NSOpenPanel 多选图片 → 解码/缩放/压缩成草稿（ImageAttachmentProcessor）。
+    private func pickImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        appendDrafts(panel.urls.compactMap { ImageAttachmentProcessor.makeDraft(fromFileURL: $0) })
+    }
+
+    /// 采集入口（按钮 / 拖拽 / 粘贴）统一汇入：全部不可解码时 beep 提示，不静默丢弃。
+    private func appendDrafts(_ newDrafts: [DraftImageAttachment]) {
+        guard !newDrafts.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        draftAttachments.append(contentsOf: newDrafts)
+    }
+}
+
+/// composer 上方的草稿附件条：缩略图横排 + 逐张移除。
+private struct NewPiDraftAttachmentStrip: View {
+    @Binding var drafts: [DraftImageAttachment]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(drafts) { draft in
+                    ZStack(alignment: .topTrailing) {
+                        Group {
+                            if let image = NSImage(data: draft.data) {
+                                Image(nsImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                Color.gray.opacity(0.2)
+                            }
+                        }
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                        Button {
+                            drafts.removeAll { $0.id == draft.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.white, .black.opacity(0.55))
+                        }
+                        .buttonStyle(.plain)
+                        .help("移除该图片")
+                        .offset(x: 5, y: -5)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(maxHeight: 64)
     }
 }
 
@@ -218,6 +305,8 @@ struct NewPiComposerTextView: NSViewRepresentable {
     var isDisabled: Bool = false
     var placeholder: String = "Message NewPi…"
     var onSubmit: () -> Void = {}
+    /// 图片采集回调（输入框拖拽 / ⌘V 粘贴）：汇入外层草稿附件条。
+    var onImagesPicked: ([DraftImageAttachment]) -> Void = { _ in }
     /// 内容高度变化回调：外层据此用 .frame(height:) 精确控制高度，
     /// 不依赖 intrinsicContentSize（NSScrollView hugging 优先级低，会被 VStack 拉伸）。
     var onHeightChange: (CGFloat) -> Void = { _ in }
@@ -233,9 +322,14 @@ struct NewPiComposerTextView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
 
+        // NSTextView() 便利构造会创建完整 TextKit 链（textStorage/layoutManager/container）；
+        // designated init(frame:textContainer: nil) 不会（见 NSTextView.h），别用。
         let textView = NewPiComposerInnerTextView()
+        // 图片文件拖拽注册（追加注册，不影响既有文本拖拽类型；任意时机调用均合法）。
+        textView.registerForDraggedTypes([.fileURL])
         textView.delegate = context.coordinator
         textView.onSubmit = onSubmit
+        textView.onImagesPicked = onImagesPicked
         textView.placeholder = placeholder
         textView.isRichText = false
         textView.importsGraphics = false
@@ -263,6 +357,7 @@ struct NewPiComposerTextView: NSViewRepresentable {
         guard let textView = context.coordinator.textView else { return }
         context.coordinator.parent = self
         textView.onSubmit = onSubmit
+        textView.onImagesPicked = onImagesPicked
         textView.placeholder = placeholder
         textView.isEditable = !isDisabled
         textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
@@ -337,6 +432,48 @@ final class NewPiComposerInnerTextView: NSTextView {
         didSet { needsDisplay = true }
     }
     var onSubmit: (() -> Void)?
+    /// 图片采集回调（拖拽文件 / ⌘V 粘贴截图）：由外层汇入草稿附件条。
+    var onImagesPicked: (([DraftImageAttachment]) -> Void)?
+
+    // ⌘V 粘贴：剪贴板有图片（截图 / 复制的位图）→ 采集为草稿；否则走默认文本粘贴。
+    override func paste(_ sender: Any?) {
+        if let data = PasteboardImageReader.readImageData(),
+           let draft = ImageAttachmentProcessor.makeDraft(
+               from: data,
+               displayName: "pasted-image-\(UUID().uuidString.prefix(8))"
+           ) {
+            onImagesPicked?([draft])
+            return
+        }
+        super.paste(sender)
+    }
+
+    // 拖拽图片文件进输入框 → 采集为草稿；非图片文件保持默认行为（插入路径文本）。
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if !Self.imageFileURLs(from: sender).isEmpty { return .copy }
+        return super.draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = Self.imageFileURLs(from: sender)
+        if !urls.isEmpty {
+            onImagesPicked?(urls.compactMap { ImageAttachmentProcessor.makeDraft(fromFileURL: $0) })
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
+
+    /// 拖拽信息里的图片文件 URL（按扩展名 UTType 判定 conforms(to: .image)）。
+    private static func imageFileURLs(from sender: NSDraggingInfo) -> [URL] {
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else { return [] }
+        return urls.filter { url in
+            guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+            return type.conforms(to: .image)
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         let isReturn = event.keyCode == 36 || event.keyCode == 76 // Return / 小键盘 Enter

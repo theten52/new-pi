@@ -20,13 +20,58 @@ public struct ToolCallContent: Sendable, Codable, Equatable {
     }
 }
 
+/// 用户消息附带的结构化附件（当前仅图片，后续可扩展 file 等）。
+/// 图片数据**不内联 base64**，只存相对附件根目录的路径引用，见
+/// `SessionAttachments`（`docs/multi-modal-vision-plan.md`）。
+public struct MessageAttachment: Sendable, Codable, Equatable {
+    public enum Kind: String, Sendable, Codable, Equatable {
+        case image
+    }
+
+    public var kind: Kind
+    /// MIME 类型，如 "image/png" / "image/jpeg"。
+    public var mediaType: String
+    /// 相对附件根目录的路径（不含绝对前缀，可移植）。
+    public var path: String
+    /// 原始文件名（展示用）。
+    public var displayName: String
+    /// 附给模型的说明文本（如缩放后的坐标映射提示，`ImageAttachmentProcessor` 生成）；
+    /// 序列化时紧跟 image 块以 text 块下发。旧会话缺省 nil（safely synthesized decode
+    /// 对 Optional 用 decodeIfPresent）。
+    public var note: String?
+
+    public init(
+        kind: Kind = .image,
+        mediaType: String,
+        path: String,
+        displayName: String,
+        note: String? = nil
+    ) {
+        self.kind = kind
+        self.mediaType = mediaType
+        self.path = path
+        self.displayName = displayName
+        self.note = note
+    }
+}
+
 public struct UserMessage: Sendable, Codable, Equatable {
     public var content: String
+    public var attachments: [MessageAttachment]
     public var timestamp: Date
 
-    public init(content: String, timestamp: Date = Date()) {
+    public init(content: String, attachments: [MessageAttachment] = [], timestamp: Date = Date()) {
         self.content = content
+        self.attachments = attachments
         self.timestamp = timestamp
+    }
+
+    /// 向后兼容：旧会话文件没有 `attachments` 字段，缺省为空数组。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.content = try container.decode(String.self, forKey: .content)
+        self.attachments = try container.decodeIfPresent([MessageAttachment].self, forKey: .attachments) ?? []
+        self.timestamp = try container.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
     }
 }
 
@@ -123,5 +168,9 @@ public enum AgentMessage: Sendable, Codable, Equatable {
 extension AgentMessage {
     public static func user(_ content: String) -> AgentMessage {
         .user(UserMessage(content: content))
+    }
+
+    public static func user(_ content: String, attachments: [MessageAttachment]) -> AgentMessage {
+        .user(UserMessage(content: content, attachments: attachments))
     }
 }

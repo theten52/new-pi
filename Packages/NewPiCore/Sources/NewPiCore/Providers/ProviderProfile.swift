@@ -40,6 +40,9 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
     public var modelID: String
     /// 该 provider 下可供选择的模型列表（内置预设模型 + 用户自增）。
     public var models: [String]
+    /// 支持图片识别的模型集合（BACKLOG-IMAGE-INPUT）。缺省空 = 都不支持图片。
+    /// 旧配置解码时缺省为空（语义「不支持」）；preset 已知 vision 模型预填默认值。
+    public var imageCapableModels: Set<String>
     public var thinkingLevel: ThinkingLevel
     public var maxTokens: Int
     public var options: [String: String]
@@ -50,6 +53,7 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         preset: ProviderPreset,
         modelID: String,
         models: [String]? = nil,
+        imageCapableModels: Set<String> = [],
         thinkingLevel: ThinkingLevel = .off,
         maxTokens: Int = 8192,
         options: [String: String] = [:]
@@ -59,13 +63,14 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         self.preset = preset
         self.modelID = modelID
         self.models = Self.normalizedModels(models ?? [modelID], ensuring: modelID)
+        self.imageCapableModels = imageCapableModels
         self.thinkingLevel = thinkingLevel
         self.maxTokens = maxTokens
         self.options = options
     }
 
     // 自定义解码：旧版 providers.json 没有 `models` 字段，回退为 [modelID]，
-    // 实现无损迁移（BACKLOG-PROVIDER-MULTI-MODEL）。
+    // 实现无损迁移（BACKLOG-PROVIDER-MULTI-MODEL）；`imageCapableModels` 缺省空。
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -74,9 +79,30 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         modelID = try container.decode(String.self, forKey: .modelID)
         let decodedModels = try container.decodeIfPresent([String].self, forKey: .models)
         models = Self.normalizedModels(decodedModels ?? [modelID], ensuring: modelID)
+        imageCapableModels = Set(
+            try container.decodeIfPresent([String].self, forKey: .imageCapableModels) ?? []
+        )
         thinkingLevel = try container.decodeIfPresent(ThinkingLevel.self, forKey: .thinkingLevel) ?? .off
         maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens) ?? 8192
         options = try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:]
+    }
+
+    /// 判断某个模型是否支持图片输入。
+    public func supportsImages(modelID: String) -> Bool {
+        let normalized = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return imageCapableModels.contains(normalized)
+    }
+
+    /// 切换某模型的图片能力标注（与 `supportsImages` 同一 normalize 口径）。
+    /// preset 预填之外的自定义模型（如 OpenRouter 渠道）由用户在 Settings 手动标注。
+    public mutating func toggleImageSupport(_ modelID: String) {
+        let normalized = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        if imageCapableModels.contains(normalized) {
+            imageCapableModels.remove(normalized)
+        } else {
+            imageCapableModels.insert(normalized)
+        }
     }
 
     /// 归一化模型列表：去空白、去重（保序），并保证当前 modelID 在列表中。
@@ -170,6 +196,7 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
             modelID: template.defaultModels.first ?? "default",
             // 内置模型清单直接预置进 profile，用户可在此基础上增删。
             models: template.defaultModels,
+            imageCapableModels: template.imageCapableModels,
             maxTokens: template.defaultBaseURL?.contains("deepseek.com") == true ? 16_384 : 8_192,
             options: options
         )

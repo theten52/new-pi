@@ -7,7 +7,7 @@ public enum ResponsesMessageEncoder {
         for message in messages {
             switch message {
             case let .user(user):
-                items.append(messageItem(role: "user", text: user.content, contentType: "input_text"))
+                items.append(userMessageItem(user))
             case let .assistant(assistant):
                 if !assistant.reasoningContent.isEmpty {
                     items.append([
@@ -75,5 +75,27 @@ public enum ResponsesMessageEncoder {
                 ],
             ],
         ]
+    }
+
+    /// 用户消息：无附件时复用 `input_text`；有附件时 content 升级为
+    /// `[{type:"input_text"},{type:"input_image",image_url:"data:…"}]`。
+    private static func userMessageItem(_ user: UserMessage) -> [String: Any] {
+        guard !user.attachments.isEmpty else {
+            return messageItem(role: "user", text: user.content, contentType: "input_text")
+        }
+        var content: [[String: Any]] = []
+        if !user.content.isEmpty {
+            content.append(["type": "input_text", "text": user.content])
+        }
+        for attachment in user.attachments {
+            guard let data = SessionAttachments.data(for: attachment) else { continue }
+            let dataURL = "data:\(attachment.mediaType);base64,\(data.base64EncodedString())"
+            content.append(["type": "input_image", "image_url": dataURL])
+            // 缩放/坐标映射说明（BACKLOG-IMAGE-INPUT）：紧跟 input_image 块以 input_text 块下发。
+            if let note = attachment.note, !note.isEmpty {
+                content.append(["type": "input_text", "text": note])
+            }
+        }
+        return ["type": "message", "role": "user", "content": content]
     }
 }

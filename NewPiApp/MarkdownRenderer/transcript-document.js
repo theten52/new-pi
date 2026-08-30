@@ -617,8 +617,54 @@
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.textContent = op.body;
+    // 图片附件（BACKLOG-IMAGE-INPUT）：正文之后追加缩略图条（src 走 pi-att:// 受控通道）。
+    if (op.attachments && op.attachments.length) {
+      bubble.appendChild(makeAttachmentStrip(op.attachments));
+    }
     el.appendChild(bubble);
     attachActions(bubble, op);
+  }
+
+  // 用户气泡内的图片附件条：懒加载；加载失败（文件缺失/目录被移）替换为占位文案。
+  function makeAttachmentStrip(attachments) {
+    const strip = document.createElement("div");
+    strip.className = "bubble-attachments";
+    for (const att of attachments) {
+      const img = document.createElement("img");
+      img.className = "bubble-attachment";
+      img.src = att.src;
+      img.alt = att.alt || "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.addEventListener("error", function () {
+        const missing = document.createElement("div");
+        missing.className = "bubble-attachment-missing";
+        missing.textContent = "图片已丢失";
+        if (img.parentNode) img.parentNode.replaceChild(missing, img);
+      });
+      // 点击放大（BACKLOG-IMAGE-INPUT 二期）：只传相对路径，原生经 SessionAttachments
+      // 受控解析后弹预览窗；不回传图数据（避免大 base64 过 message 桥）。
+      img.addEventListener("click", function () {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.attachmentTap) {
+          window.webkit.messageHandlers.attachmentTap.postMessage({
+            path: att.path || "",
+            alt: att.alt || ""
+          });
+        }
+      });
+      // 可点击的视觉提示（悬停时轻微提亮 + 指针）。
+      img.tabIndex = 0;
+      img.role = "button";
+      strip.appendChild(img);
+    }
+    return strip;
+  }
+
+  // 附件集合的比较键（路径 join）：进 upsert 的重渲染判定，不参与 DOM。
+  function attachmentKey(op) {
+    return op.attachments && op.attachments.length
+      ? op.attachments.map(function (a) { return a.src; }).join("|")
+      : "";
   }
 
   function renderSystemLike(el, op, cssClass) {
@@ -856,10 +902,12 @@
       // 处理详情 disclosure 行（BACKLOG-DETAIL-GROUP）。
       renderDetailGroup(el, op);
     } else if (structuralKinds.indexOf(op.kind) >= 0) {
-      // 结构性条目内容整体替换（思考/工具流式期 body 会增长，重渲染成本可忽略——纯文本节点）
+      // 结构性条目内容整体替换（思考/工具流式期 body 会增长，重渲染成本可忽略——纯文本节点）。
+      // attachKey：附件集合变化也须触发重渲染（防御；user 附件当前一次带全不变）。
+      const attachKey = attachmentKey(op);
       if (state.source !== op.body || state.streaming !== op.streaming ||
           state.toolRunning !== op.toolRunning || state.toolError !== op.toolError ||
-          state.kind !== op.kind) {
+          state.kind !== op.kind || state.attachKey !== attachKey) {
         if (op.kind === "user") {
           renderUser(el, op);
         } else if (op.kind === "system") {
@@ -873,6 +921,7 @@
         state.streaming = op.streaming;
         state.toolRunning = op.toolRunning;
         state.toolError = op.toolError;
+        state.attachKey = attachKey;
       }
       // fork 元数据与渲染门控解耦：user 气泡的按钮也要在「只有 canFork 变化」的
       // upsert 里同步（compaction 撤回时移除按钮），不能只依赖 renderUser 重渲染。
