@@ -384,7 +384,7 @@ struct NewPiEditProviderSheet: View {
                             }
                             
                             // 模型详细信息（如果从 VendorPreset 加载）
-                            if let modelDef = findModelDefinition(modelID: model) {
+                            if let modelDef = findModelDefinition(modelID: model, profile: profile) {
                                 HStack(spacing: 12) {
                                     // Context Window
                                     Label(formatTokenCount(modelDef.contextWindow), systemImage: "doc.text")
@@ -601,14 +601,9 @@ struct NewPiEditProviderSheet: View {
 
 // MARK: - 模型信息辅助函数
 
-private func findModelDefinition(modelID: String) -> ModelDefinition? {
-    // 从 VendorPresets 中查找模型定义
-    for preset in VendorPresets.all {
-        if let model = preset.defaultModels.first(where: { $0.id == modelID }) {
-            return model
-        }
-    }
-    return nil
+private func findModelDefinition(modelID: String, profile: ProviderProfile) -> ModelDefinition? {
+    // 从 profile 的 modelDefinitions 中查找
+    return profile.modelDefinition(for: modelID)
 }
 
 private func formatTokenCount(_ count: Int) -> String {

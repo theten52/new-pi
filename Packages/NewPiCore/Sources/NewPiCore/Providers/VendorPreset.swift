@@ -166,6 +166,12 @@ public enum VendorPresets {
         // 保存 apiKeyHeader 到 options
         options["apiKeyHeader"] = preset.apiKeyHeader
         
+        // 构建 modelDefinitions 字典，保存完整的模型信息
+        var modelDefs: [String: ModelDefinition] = [:]
+        for model in preset.defaultModels {
+            modelDefs[model.id] = model
+        }
+        
         return ProviderProfile(
             id: preset.id,
             name: preset.displayName,
@@ -174,7 +180,8 @@ public enum VendorPresets {
             models: models,
             imageCapableModels: Set(preset.defaultModels.filter { $0.capabilities.image }.map { $0.id }),
             maxTokens: preset.defaultModels.first?.maxOutputTokens ?? 8192,
-            options: options
+            options: options,
+            modelDefinitions: modelDefs
         )
     }
     

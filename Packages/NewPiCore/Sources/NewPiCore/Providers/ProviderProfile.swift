@@ -46,6 +46,9 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
     public var thinkingLevel: ThinkingLevel
     public var maxTokens: Int
     public var options: [String: String]
+    /// 模型详细定义（新增）：保存模型的完整信息，包括价格、能力、context window 等。
+    /// 旧配置解码时缺省为空字典；从 VendorPreset 创建时会填充。
+    public var modelDefinitions: [String: ModelDefinition]
 
     public init(
         id: String = UUID().uuidString,
@@ -56,7 +59,8 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         imageCapableModels: Set<String> = [],
         thinkingLevel: ThinkingLevel = .off,
         maxTokens: Int = 8192,
-        options: [String: String] = [:]
+        options: [String: String] = [:],
+        modelDefinitions: [String: ModelDefinition] = [:]
     ) {
         self.id = id
         self.name = name
@@ -67,6 +71,7 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         self.thinkingLevel = thinkingLevel
         self.maxTokens = maxTokens
         self.options = options
+        self.modelDefinitions = modelDefinitions
     }
 
     // 自定义解码：旧版 providers.json 没有 `models` 字段，回退为 [modelID]，
@@ -85,12 +90,24 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         thinkingLevel = try container.decodeIfPresent(ThinkingLevel.self, forKey: .thinkingLevel) ?? .off
         maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens) ?? 8192
         options = try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:]
+        modelDefinitions = try container.decodeIfPresent([String: ModelDefinition].self, forKey: .modelDefinitions) ?? [:]
     }
 
     /// 判断某个模型是否支持图片输入。
     public func supportsImages(modelID: String) -> Bool {
         let normalized = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         return imageCapableModels.contains(normalized)
+    }
+    
+    /// 获取模型的详细定义（如果存在）。
+    public func modelDefinition(for modelID: String) -> ModelDefinition? {
+        let normalized = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return modelDefinitions[normalized]
+    }
+    
+    /// 获取模型的 Context Window 大小。
+    public func contextWindow(for modelID: String) -> Int {
+        modelDefinition(for: modelID)?.contextWindow ?? 128000
     }
 
     /// 切换某模型的图片能力标注（与 `supportsImages` 同一 normalize 口径）。
