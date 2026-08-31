@@ -178,6 +178,8 @@ struct NewPiAgentStatusBar: View {
     var cacheHitRateText: String? = nil
     /// 上下文占用文本（如 "上下文 9.2% / 1.0M"）；nil 时隐藏。
     var contextText: String? = nil
+    /// 流式输出 token 速率文本（如 "24 tok/s"）；nil 时隐藏（非流式期间）。
+    var tokenRateText: String? = nil
     /// 模型选择菜单；nil 时隐藏（如 spike 窗口）。
     var modelPicker: NewPiModelPickerMenu? = nil
 
@@ -202,6 +204,12 @@ struct NewPiAgentStatusBar: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .help("当前上下文占用（最近一轮输入 token / 模型上下文窗口）")
+            }
+            if let tokenRateText {
+                Label(tokenRateText, systemImage: "speedometer")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .help("当前输出速率（基于流式文本估算的 token/秒）")
             }
             if let usageText {
                 Text(usageText)

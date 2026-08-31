@@ -13,7 +13,7 @@ public enum OpenAICompatibleEndpoint {
                 throw ProviderConfigError.invalidURL(base)
             }
             return url
-        case .openai, .openRouter, .openaiCompatible:
+        case .openai, .openRouter, .openaiCompatible, .xiaomiMiMo:
             if raw.contains("/chat/completions") {
                 guard let url = URL(string: raw) else {
                     throw ProviderConfigError.invalidURL(raw)

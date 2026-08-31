@@ -32,7 +32,7 @@ extension ProviderProfile {
 
     public var supportsAPIModeSelection: Bool {
         switch preset {
-        case .openai, .openaiCompatible, .openRouter:
+        case .openai, .openaiCompatible, .openRouter, .xiaomiMiMo:
             true
         case .anthropic, .ollama:
             false

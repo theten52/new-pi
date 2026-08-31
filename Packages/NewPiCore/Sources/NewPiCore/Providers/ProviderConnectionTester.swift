@@ -24,7 +24,7 @@ public enum ProviderConnectionTester {
             case .anthropic:
                 let apiKey = try await credentialResolver.apiKey(for: profile)
                 return try await testAnthropic(profile: profile, apiKey: apiKey, session: session)
-            case .openai, .openaiCompatible, .openRouter:
+            case .openai, .openaiCompatible, .openRouter, .xiaomiMiMo:
                 let apiKey = try await credentialResolver.apiKey(for: profile)
                 if profile.apiMode == .responses {
                     return try await testResponsesAPI(profile: profile, apiKey: apiKey, session: session)

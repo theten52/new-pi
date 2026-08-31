@@ -101,6 +101,69 @@ struct NewPiProviderListItem: Identifiable, Equatable {
     var id: String { profile.id }
 }
 
+/// 流式输出 token 速率追踪器（BACKLOG-TOKEN-RATE）。
+///
+/// `assistant.usage` 只在 `messageEnd` 时一次性拿到，流式期间（textDelta）没有精确的
+/// token 计数。因此这里用「字符数与 token 的经验换算式」估算输出 token：约每 4 个
+/// 字符折 1 个 token（英文大致如此，中文会偏低，但足以反映相对速率变化）。
+/// 用滑动窗口（默认 5 秒）压平短脉冲抖动，求得稳定的 tokens/s 展示。
+struct TokenRateTracker {
+    /// 滑动窗口长度（秒）。
+    private let window: TimeInterval = 5
+    /// 窗口内每个采样点的时间戳与累计 token 数。
+    private var samples: [(time: TimeInterval, tokens: Double)] = []
+
+    /// 当前估算速率（tokens/s）；窗口内样本不足时为 nil。
+    /// 非 mutating：读取时按窗口过滤，不修改存储（struct 的 computed getter 不能 mutating）。
+    var currentRate: Double? {
+        let now = Self.now
+        let windowSamples = samples.filter { now - $0.time <= window }
+        guard windowSamples.count >= 2 else { return nil }
+        let first = windowSamples[0]
+        let last = windowSamples[windowSamples.count - 1]
+        let dt = last.time - first.time
+        guard dt > 0 else { return nil }
+        return (last.tokens - first.tokens) / dt
+    }
+
+    private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    /// 追加一段正文增量，按经验公式折算输出 token 数入窗口。
+    mutating func record(delta: String) {
+        guard !delta.isEmpty else { return }
+        let tokens = Double(delta.utf8.count) / 4.0
+        samples.append((time: Self.now, tokens: (samples.last?.tokens ?? 0) + tokens))
+        prune(now: Self.now)
+    }
+
+    /// 当前正文流结束（messageEnd）：用真实 outputToken 校正累计值，保持后续展示一致。
+    /// 流式期间是估算，结束时替换为精确实值（仅用于累计口径，速率在流结束即停止展示）。
+    mutating func finalize(totalOutputTokens: Int) {
+        prune(now: Self.now)
+        if samples.last != nil {
+            samples.append((time: Self.now, tokens: Double(totalOutputTokens)))
+        }
+    }
+
+    /// 清空，供新一轮 run 开始前重置。
+    mutating func reset() {
+        samples.removeAll(keepingCapacity: true)
+    }
+
+    /// 丢弃窗口外的旧样本（防内存无界增长）。
+    /// 样本时间戳单调递增，可从头部一次性批量删除，避免逐次 removeFirst 的 O(n²) 退化。
+    private mutating func prune(now: TimeInterval) {
+        let cutoff = now - window
+        var leadingExpired = 0
+        while leadingExpired < samples.count, samples[leadingExpired].time < cutoff {
+            leadingExpired += 1
+        }
+        if leadingExpired > 0 {
+            samples.removeFirst(leadingExpired)
+        }
+    }
+}
+
 /// 单个 Session 的独立运行态。
 ///
 /// 每个 Session 拥有自己的一份转录、流式状态、进行中的审批、以及一个**常驻**的
@@ -158,6 +221,9 @@ final class SessionRuntime: ObservableObject {
     /// 流式思考增量缓冲：与 pendingStreamingDelta 同管线同节流，flush 时先入 thinking 条目。
     var pendingThinkingDelta = ""
     var streamingFlushTask: Task<Void, Never>?
+    /// 流式输出 token 速率追踪（BACKLOG-TOKEN-RATE）：累计 textDelta 估算的
+    /// 输出 token 数 + 时间戳，滑动窗口计算 tokens/s，仅流式期间显示。
+    var tokenRateTracker = TokenRateTracker()
 
     init(session: AgentSession, fileURL: URL, sessionID: UUID) {
         self.session = session
@@ -357,6 +423,10 @@ final class NewPiViewModel: ObservableObject {
     @Published var pendingToolApproval: ToolApprovalRequest?
     /// 见 SessionRuntime.finalAnswerComplete（状态栏提前翻 ready）。
     @Published var finalAnswerComplete = false
+    /// 流式输出 token 速率文本（如 "24 tok/s"）；非流式或样本不足时为 nil，状态栏隐藏。
+    @Published var tokenRateText: String?
+    /// 流式期间周期刷新 token 速率文本的定时器（BACKLOG-TOKEN-RATE）。
+    private var tokenRateRefreshTimer: Timer?
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
     @Published var savedSessions: [SessionSummary] = []
@@ -1367,6 +1437,7 @@ final class NewPiViewModel: ObservableObject {
             pendingToolApproval = nil
             branchPointCount = 0
             isForkedBranch = false
+            tokenRateText = nil
             return
         }
         transcript = r.transcript
@@ -1376,6 +1447,29 @@ final class NewPiViewModel: ObservableObject {
         finalAnswerComplete = r.finalAnswerComplete
         branchPointCount = r.branchPointCount
         isForkedBranch = r.isForkedBranch
+        tokenRateText = Self.tokenRateText(from: r.tokenRateTracker.currentRate)
+    }
+
+    /// 周期刷新 token 速率文本（BACKLOG-TOKEN-RATE）：流式期间按固定节奏读滑动窗口，
+    /// 不依赖 textDelta 触发（否则每个 delta 都会全量重渲染）。停止流式时清理定时器。
+    private func startTokenRateRefresh() {
+        stopTokenRateRefresh()
+        tokenRateRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let r = self.activeRuntime else { return }
+                self.tokenRateText = Self.tokenRateText(from: r.tokenRateTracker.currentRate)
+            }
+        }
+    }
+
+    private func stopTokenRateRefresh() {
+        tokenRateRefreshTimer?.invalidate()
+        tokenRateRefreshTimer = nil
+    }
+
+    private static func tokenRateText(from rate: Double?) -> String? {
+        guard let rate, rate > 0 else { return nil }
+        return String(format: "%.0f tok/s", rate)
     }
 
     private func handle(_ event: AgentEvent, on runtime: SessionRuntime) {
@@ -1394,6 +1488,10 @@ final class NewPiViewModel: ObservableObject {
             runtime.agentActivity = .thinking
             runtime.streamingBubbleComplete = false
             runtime.finalAnswerComplete = false
+            runtime.tokenRateTracker.reset()
+            if runtime === activeRuntime {
+                startTokenRateRefresh()
+            }
             NewPiLogger.info(category: "app", message: "UI: agent started")
         case let .messageStart(message):
             NewPiLogger.debug(category: "app", message: "UI: message started", details: message.roleLabel)
@@ -1411,6 +1509,10 @@ final class NewPiViewModel: ObservableObject {
                assistant.usage.inputTokens > 0 || assistant.usage.outputTokens > 0 {
                 runtime.totalUsage.add(assistant.usage)
                 runtime.lastTurnUsage = assistant.usage
+            }
+            // 流式速率：正文落定后用真实 outputToken 校正（BACKLOG-TOKEN-RATE）。
+            if case let .assistant(assistant) = message, assistant.text.isEmpty == false {
+                runtime.tokenRateTracker.finalize(totalOutputTokens: assistant.usage.outputTokens)
             }
             // 正文已完整：气泡提前切完成态渲染（去 ✦ 光标），不等 agentEnd。
             if case let .assistant(assistant) = message {
@@ -1434,6 +1536,7 @@ final class NewPiViewModel: ObservableObject {
             // 新一轮正文开始（多轮 run 的后续 turn）：气泡切回流式渲染。
             runtime.streamingBubbleComplete = false
             runtime.finalAnswerComplete = false
+            runtime.tokenRateTracker.record(delta: delta)
             enqueueStreamingDelta(delta, on: runtime)
             if runtime === activeRuntime, agentActivity != .writing {
                 agentActivity = .writing
@@ -1511,6 +1614,10 @@ final class NewPiViewModel: ObservableObject {
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
             freezeStreamingThinking(on: runtime)
+            if runtime === activeRuntime {
+                stopTokenRateRefresh()
+                tokenRateText = nil
+            }
             NewPiLogger.info(category: "app", message: "UI: agent finished")
             Task {
                 await appendTruncatedOutputNoticeIfNeeded(on: runtime)
@@ -1523,6 +1630,10 @@ final class NewPiViewModel: ObservableObject {
             runtime.isStreaming = false
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
+            if runtime === activeRuntime {
+                stopTokenRateRefresh()
+                tokenRateText = nil
+            }
             freezeStreamingThinking(on: runtime)
             NewPiLogger.error(
                 category: "app",
@@ -1598,6 +1709,11 @@ final class NewPiViewModel: ObservableObject {
             if case .assistant = $0 { return true }
             return false
         })
+
+        // error 条目是 UI 层临时条目，不在 context.messages 里。若 rebuild 直接 removeAll，
+        // 紧随 agentEnd 的全量重建会把刚 append 的 error 抹掉，导致错误信息一闪而过。
+        // 因此在重建前把 error 条目抢救出来，重建后追加回 transcript 末尾。
+        let preservedErrors = runtime.transcript.filter { $0.kind == .error }
 
         // 方案 A：保留前缀（被压缩的完整旧历史）时，撤掉 removeAll，改为截断到前缀末尾。
         if preservedPrefixCount > 0 {
@@ -1727,6 +1843,8 @@ final class NewPiViewModel: ObservableObject {
             }
         }
         runtime.liveMessageCount = messages.count
+        // 把抢救出来的 error 条目追加回末尾（保持错误信息可见，不被 rebuild 吞掉）。
+        runtime.transcript.append(contentsOf: preservedErrors)
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }

@@ -40,6 +40,7 @@ public enum ContextWindowCatalog {
         case .openaiCompatible: 128_000
         case .openRouter: 128_000
         case .ollama: 128_000
+        case .xiaomiMiMo: 128_000
         }
     }
 

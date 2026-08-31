@@ -146,6 +146,7 @@ struct NewPiSessionPanel: View {
                         lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
                         cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
                         contextText: viewModel.contextUsageText(for: runtime.lastTurnUsage),
+                        tokenRateText: viewModel.tokenRateText,
                         modelPicker: NewPiModelPickerMenu(
                             groups: viewModel.providerModelGroups,
                             activeProfileID: viewModel.activeProviderID,

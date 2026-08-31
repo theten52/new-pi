@@ -34,7 +34,7 @@ public enum LLMProviderFactory {
                 baseURL: baseURL,
                 apiVersion: apiVersion
             )
-        case .openai, .openaiCompatible, .openRouter, .ollama:
+        case .openai, .openaiCompatible, .openRouter, .ollama, .xiaomiMiMo:
             if profile.apiMode == .responses {
                 return ResponsesAPIProvider(profile: profile, apiKeyProvider: apiKeyProvider)
             }

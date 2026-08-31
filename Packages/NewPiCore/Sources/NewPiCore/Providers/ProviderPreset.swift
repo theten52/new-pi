@@ -6,6 +6,7 @@ public enum ProviderPreset: String, Sendable, Codable, CaseIterable, Identifiabl
     case openaiCompatible
     case openRouter
     case ollama
+    case xiaomiMiMo
 
     public var id: String { rawValue }
 }
@@ -179,6 +180,53 @@ public enum ProviderPresetCatalog {
         ]
     )
 
+    public static let xiaomiMiMo = ProviderPresetDefinition(
+        preset: .xiaomiMiMo,
+        displayName: "Xiaomi MiMo",
+        systemImage: "bolt.horizontal.circle.fill",
+        defaultBaseURL: "https://api.xiaomimimo.com/v1/chat/completions",
+        defaultModels: [
+            "mimo-v2.5-pro",
+            "mimo-v2.5-flash",
+        ],
+        imageCapableModels: [
+            "mimo-v2.5-pro",
+        ],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.xiaomimimo.com/v1/chat/completions"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "MIMO_API_KEY",
+        quickSetupDefaults: [
+            .baseURL: "https://api.xiaomimimo.com/v1/chat/completions",
+            .apiMode: ProviderAPIMode.chatCompletions.rawValue,
+        ]
+    )
+
+    /// MiMo Anthropic 兼容接口（支持 extended thinking）。
+    public static let xiaomiMiMoAnthropic = ProviderPresetDefinition(
+        preset: .anthropic,
+        displayName: "Xiaomi MiMo (Anthropic)",
+        systemImage: "bolt.circle.fill",
+        defaultBaseURL: "https://api.xiaomimimo.com/anthropic/v1/messages",
+        defaultModels: [
+            "mimo-v2.5-pro",
+            "mimo-v2.5-flash",
+        ],
+        imageCapableModels: [
+            "mimo-v2.5-pro",
+        ],
+        optionFields: [
+            ProviderOptionField(key: .baseURL, label: "Base URL", placeholder: "https://api.xiaomimimo.com/anthropic/v1/messages"),
+            ProviderOptionField(key: .apiVersion, label: "API Version", placeholder: "2023-06-01"),
+        ],
+        credentialRequired: true,
+        environmentVariable: "MIMO_API_KEY",
+        quickSetupDefaults: [
+            .baseURL: "https://api.xiaomimimo.com/anthropic/v1/messages",
+        ]
+    )
+
     public static let deepSeekQuickSetup = ProviderPresetDefinition(
         preset: .openaiCompatible,
         displayName: "DeepSeek",
@@ -221,7 +269,13 @@ public enum ProviderPresetCatalog {
         case .openaiCompatible: openaiCompatible
         case .openRouter: openRouter
         case .ollama: ollama
+        case .xiaomiMiMo: xiaomiMiMo
         }
+    }
+
+    /// 所有 MiMo 相关预设（OpenAI 兼容 + Anthropic 兼容）。
+    public static var xiaomiMiMoPresets: [ProviderPresetDefinition] {
+        [xiaomiMiMo, xiaomiMiMoAnthropic]
     }
 
     public static var quickAddTemplates: [ProviderPresetDefinition] {
@@ -231,6 +285,8 @@ public enum ProviderPresetCatalog {
             deepSeekQuickSetup,
             deepSeekResponsesQuickSetup,
             openRouter,
+            xiaomiMiMo,
+            xiaomiMiMoAnthropic,
             ollama,
             openaiCompatible,
         ]
