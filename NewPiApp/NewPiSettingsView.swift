@@ -622,7 +622,9 @@ private func formatTokenCount(_ count: Int) -> String {
 
 private func formatPricing(_ pricing: ModelPricing) -> String {
     let symbol = pricing.currency == .cny ? "¥" : "$"
-    return "\(symbol)\(pricing.input)/\(pricing.output) per 1M"
+    let inputStr = String(format: "%.1f", pricing.input)
+    let outputStr = String(format: "%.1f", pricing.output)
+    return "输入 \(symbol)\(inputStr)/M · 输出 \(symbol)\(outputStr)/M"
 }
 
 

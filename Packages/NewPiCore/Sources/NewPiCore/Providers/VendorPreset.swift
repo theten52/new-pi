@@ -159,6 +159,13 @@ public enum VendorPresets {
     /// 将 VendorPreset 转换为 ProviderProfile
     public static func makeProfile(from preset: VendorPreset) -> ProviderProfile {
         let models = preset.defaultModels.map { $0.id }
+        var options: [String: String] = [
+            ProviderOptionKey.baseURL.rawValue: preset.baseUrl,
+            ProviderOptionKey.apiMode.rawValue: preset.apiMode.rawValue,
+        ]
+        // 保存 apiKeyHeader 到 options
+        options["apiKeyHeader"] = preset.apiKeyHeader
+        
         return ProviderProfile(
             id: preset.id,
             name: preset.displayName,
@@ -167,10 +174,7 @@ public enum VendorPresets {
             models: models,
             imageCapableModels: Set(preset.defaultModels.filter { $0.capabilities.image }.map { $0.id }),
             maxTokens: preset.defaultModels.first?.maxOutputTokens ?? 8192,
-            options: [
-                ProviderOptionKey.baseURL.rawValue: preset.baseUrl,
-                ProviderOptionKey.apiMode.rawValue: preset.apiMode.rawValue,
-            ]
+            options: options
         )
     }
     
