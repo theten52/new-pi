@@ -384,7 +384,7 @@ struct NewPiEditProviderSheet: View {
                             }
                             
                             // 模型详细信息（如果从 VendorPreset 加载）
-                            if let modelDef = findModelDefinition(modelID: model, profile: profile) {
+                            if let modelDef = findModelDefinition(modelID: model) {
                                 HStack(spacing: 12) {
                                     // Context Window
                                     Label(formatTokenCount(modelDef.contextWindow), systemImage: "doc.text")
@@ -585,6 +585,10 @@ struct NewPiEditProviderSheet: View {
         testMessage = result.success ? "✓ \(result.message)" : "✗ \(result.message)"
     }
 
+    private func findModelDefinition(modelID: String) -> ModelDefinition? {
+        return profile.modelDefinition(for: modelID)
+    }
+    
     private func save() {
         do {
             try profile.validate()
@@ -601,11 +605,6 @@ struct NewPiEditProviderSheet: View {
 
 // MARK: - 模型信息辅助函数
 
-private func findModelDefinition(modelID: String, profile: ProviderProfile) -> ModelDefinition? {
-    // 从 profile 的 modelDefinitions 中查找
-    return profile.modelDefinition(for: modelID)
-}
-
 private func formatTokenCount(_ count: Int) -> String {
     if count >= 1_000_000 {
         return String(format: "%.1fM", Double(count) / 1_000_000)
@@ -616,6 +615,10 @@ private func formatTokenCount(_ count: Int) -> String {
 }
 
 private func formatPricing(_ pricing: ModelPricing) -> String {
+    // 本地模型价格为 0，显示"免费"
+    if pricing.input == 0 && pricing.output == 0 {
+        return "免费"
+    }
     let symbol = pricing.currency == .cny ? "¥" : "$"
     let inputStr = String(format: "%.1f", pricing.input)
     let outputStr = String(format: "%.1f", pricing.output)

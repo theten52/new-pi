@@ -147,6 +147,7 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
     public mutating func removeModel(_ modelID: String) {
         guard models.count > 1 else { return }
         models.removeAll { $0 == modelID }
+        modelDefinitions.removeValue(forKey: modelID)  // 同步清理
         if self.modelID == modelID, let first = models.first {
             self.modelID = first
         }
