@@ -156,6 +156,24 @@ public enum VendorPresets {
         all.first { $0.id == id }
     }
     
+    /// 将 VendorPreset 转换为 ProviderProfile
+    public static func makeProfile(from preset: VendorPreset) -> ProviderProfile {
+        let models = preset.defaultModels.map { $0.id }
+        return ProviderProfile(
+            id: preset.id,
+            name: preset.displayName,
+            preset: preset.preset,
+            modelID: models.first ?? "default",
+            models: models,
+            imageCapableModels: Set(preset.defaultModels.filter { $0.capabilities.image }.map { $0.id }),
+            maxTokens: preset.defaultModels.first?.maxOutputTokens ?? 8192,
+            options: [
+                ProviderOptionKey.baseURL.rawValue: preset.baseUrl,
+                ProviderOptionKey.apiMode.rawValue: preset.apiMode.rawValue,
+            ]
+        )
+    }
+    
     // MARK: - 小米 MiMo
     
     /// 小米 MiMo (Token Plan)

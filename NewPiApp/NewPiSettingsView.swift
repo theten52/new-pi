@@ -91,10 +91,19 @@ struct NewPiSettingsView: View {
         .frame(minWidth: 520, minHeight: 420)
         .navigationTitle("Settings")
         .sheet(isPresented: $showingAddSheet) {
-            NewPiAddProviderSheet { template in
-                showingAddSheet = false
-                editingProfile = ProviderProfile.makeDefault(from: template)
-            }
+            NewPiAddProviderSheet(
+                onVendorSelect: { preset in
+                    showingAddSheet = false
+                    let profile = VendorPresets.makeProfile(from: preset)
+                    editingProfile = profile
+                },
+                onCustomSelect: {
+                    showingAddSheet = false
+                    // 使用默认的 OpenAI Compatible 配置
+                    let template = ProviderPresetCatalog.openaiCompatible
+                    editingProfile = ProviderProfile.makeDefault(from: template)
+                }
+            )
         }
         .sheet(item: $editingProfile) { profile in
             NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
@@ -207,27 +216,69 @@ struct NewPiProviderRow: View {
 
 struct NewPiAddProviderSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let onSelect: (ProviderPresetDefinition) -> Void
+    /// 选择知名厂商预设
+    let onVendorSelect: (VendorPreset) -> Void
+    /// 选择自定义端点（使用默认配置）
+    let onCustomSelect: () -> Void
 
     private let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(ProviderPresetCatalog.quickAddTemplates, id: \.displayName) { template in
+                VStack(alignment: .leading, spacing: 20) {
+                    // 知名厂商列表
+                    Section {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(VendorPresets.all) { preset in
+                                Button {
+                                    onVendorSelect(preset)
+                                    dismiss()
+                                } label: {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: preset.icon)
+                                            .font(.title2)
+                                        Text(preset.displayName)
+                                            .font(.subheadline)
+                                            .multilineTextAlignment(.center)
+                                            .lineLimit(2)
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 90)
+                                    .padding()
+                                    .background(.quaternary.opacity(0.5))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    } header: {
+                        Text("知名厂商")
+                            .font(.headline)
+                    }
+                    
+                    // 分隔线
+                    Divider()
+                    
+                    // 自定义端点
+                    Section {
                         Button {
-                            onSelect(template)
+                            onCustomSelect()
                             dismiss()
                         } label: {
-                            VStack(spacing: 8) {
-                                Image(systemName: template.systemImage)
+                            HStack {
+                                Image(systemName: "plus.circle.fill")
                                     .font(.title2)
-                                Text(template.displayName)
-                                    .font(.subheadline)
-                                    .multilineTextAlignment(.center)
+                                VStack(alignment: .leading) {
+                                    Text("自定义端点")
+                                        .font(.headline)
+                                    Text("手动配置 API 类型、Base URL 等参数")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(.secondary)
                             }
-                            .frame(maxWidth: .infinity, minHeight: 90)
                             .padding()
                             .background(.quaternary.opacity(0.5))
                             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -244,7 +295,7 @@ struct NewPiAddProviderSheet: View {
                 }
             }
         }
-        .frame(minWidth: 480, minHeight: 360)
+        .frame(minWidth: 480, minHeight: 420)
     }
 }
 
@@ -295,42 +346,79 @@ struct NewPiEditProviderSheet: View {
                 //（新建会话/连接测试用它；会话内可在状态栏模型菜单临时切换）。
                 Section("Models") {
                     ForEach(profile.models, id: \.self) { model in
-                        HStack {
-                            Text(model)
-                                .font(.body.monospaced())
-                                .lineLimit(1)
-                            Spacer()
-                            // 图片能力标注（BACKLOG-IMAGE-INPUT）：preset 预填之外的自定义模型
-                            //（如 OpenRouter 渠道）由用户在此手动标注；Save 时随 profile 持久化。
-                            Button {
-                                profile.toggleImageSupport(model)
-                            } label: {
-                                Image(systemName: profile.supportsImages(modelID: model) ? "photo.fill" : "photo")
-                                    .foregroundStyle(profile.supportsImages(modelID: model) ? Color.accentColor : Color.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(model)
+                                    .font(.body.monospaced())
+                                    .lineLimit(1)
+                                Spacer()
+                                // 图片能力标注
+                                Button {
+                                    profile.toggleImageSupport(model)
+                                } label: {
+                                    Image(systemName: profile.supportsImages(modelID: model) ? "photo.fill" : "photo")
+                                        .foregroundStyle(profile.supportsImages(modelID: model) ? Color.accentColor : Color.secondary)
+                                }
+                                .buttonStyle(.borderless)
+                                .help(
+                                    profile.supportsImages(modelID: model)
+                                        ? "支持图片识别（点击关闭）"
+                                        : "不支持图片识别（点击开启）"
+                                )
+                                Button {
+                                    profile.modelID = model
+                                } label: {
+                                    Image(systemName: profile.modelID == model ? "star.fill" : "star")
+                                        .foregroundStyle(profile.modelID == model ? Color.yellow : Color.secondary)
+                                }
+                                .buttonStyle(.borderless)
+                                .help(profile.modelID == model ? "默认模型" : "设为默认模型")
+                                Button(role: .destructive) {
+                                    profile.removeModel(model)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(profile.models.count <= 1)
+                                .help(profile.models.count <= 1 ? "至少保留一个模型" : "移除该模型")
                             }
-                            .buttonStyle(.borderless)
-                            .help(
-                                profile.supportsImages(modelID: model)
-                                    ? "支持图片识别（点击关闭）"
-                                    : "不支持图片识别（点击开启）"
-                            )
-                            Button {
-                                profile.modelID = model
-                            } label: {
-                                Image(systemName: profile.modelID == model ? "star.fill" : "star")
-                                    .foregroundStyle(profile.modelID == model ? Color.yellow : Color.secondary)
+                            
+                            // 模型详细信息（如果从 VendorPreset 加载）
+                            if let modelDef = findModelDefinition(modelID: model) {
+                                HStack(spacing: 12) {
+                                    // Context Window
+                                    Label(formatTokenCount(modelDef.contextWindow), systemImage: "doc.text")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    
+                                    // 价格
+                                    if let pricing = modelDef.pricing {
+                                        Label(formatPricing(pricing), systemImage: "yensign.circle")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    
+                                    // 能力标记
+                                    HStack(spacing: 4) {
+                                        if modelDef.capabilities.reasoning {
+                                            Image(systemName: "brain")
+                                                .help("推理")
+                                        }
+                                        if modelDef.capabilities.image {
+                                            Image(systemName: "photo")
+                                                .help("图片")
+                                        }
+                                        if modelDef.capabilities.toolUse {
+                                            Image(systemName: "wrench")
+                                                .help("工具")
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                }
                             }
-                            .buttonStyle(.borderless)
-                            .help(profile.modelID == model ? "默认模型" : "设为默认模型")
-                            Button(role: .destructive) {
-                                profile.removeModel(model)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(profile.models.count <= 1)
-                            .help(profile.models.count <= 1 ? "至少保留一个模型" : "移除该模型")
                         }
+                        .padding(.vertical, 2)
                     }
                     HStack(spacing: 8) {
                         TextField("Add model ID", text: $newModelDraft)
@@ -510,6 +598,33 @@ struct NewPiEditProviderSheet: View {
         }
     }
 }
+
+// MARK: - 模型信息辅助函数
+
+private func findModelDefinition(modelID: String) -> ModelDefinition? {
+    // 从 VendorPresets 中查找模型定义
+    for preset in VendorPresets.all {
+        if let model = preset.defaultModels.first(where: { $0.id == modelID }) {
+            return model
+        }
+    }
+    return nil
+}
+
+private func formatTokenCount(_ count: Int) -> String {
+    if count >= 1_000_000 {
+        return String(format: "%.1fM", Double(count) / 1_000_000)
+    } else if count >= 1_000 {
+        return String(format: "%.0fK", Double(count) / 1_000)
+    }
+    return "\(count)"
+}
+
+private func formatPricing(_ pricing: ModelPricing) -> String {
+    let symbol = pricing.currency == .cny ? "¥" : "$"
+    return "\(symbol)\(pricing.input)/\(pricing.output) per 1M"
+}
+
 
 #Preview {
     NewPiSettingsView(viewModel: NewPiViewModel())
