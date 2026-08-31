@@ -52,17 +52,18 @@ public struct ProviderConfigStore {
         in config: inout ProviderConfigFile,
         setAsDefault: Bool = false
     ) throws {
-        try profile.validate()
-        let isNew = !config.profiles.contains(where: { $0.id == profile.id })
-        if let index = config.profiles.firstIndex(where: { $0.id == profile.id }) {
-            config.profiles[index] = profile
+        var mutableProfile = profile
+        try mutableProfile.validateAndSync()
+        let isNew = !config.profiles.contains(where: { $0.id == mutableProfile.id })
+        if let index = config.profiles.firstIndex(where: { $0.id == mutableProfile.id }) {
+            config.profiles[index] = mutableProfile
         } else {
-            config.profiles.append(profile)
+            config.profiles.append(mutableProfile)
         }
         if setAsDefault || isNew {
-            config.defaultProfileID = profile.id
+            config.defaultProfileID = mutableProfile.id
         } else if config.defaultProfileID == nil {
-            config.defaultProfileID = profile.id
+            config.defaultProfileID = mutableProfile.id
         }
         try save(config)
     }

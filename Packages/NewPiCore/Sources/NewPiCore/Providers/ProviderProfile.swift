@@ -153,12 +153,17 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         }
     }
 
+    /// 获取当前模型的 maxTokens（优先使用 modelDefinitions 中的值）。
+    public var effectiveMaxTokens: Int {
+        modelDefinition(for: modelID)?.maxOutputTokens ?? maxTokens
+    }
+    
     public var modelConfig: ModelConfig {
         ModelConfig(
             provider: preset.rawValue,
             modelID: modelID,
             thinkingLevel: thinkingLevel,
-            maxTokens: maxTokens
+            maxTokens: effectiveMaxTokens
         )
     }
 
@@ -174,7 +179,9 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         }
     }
 
-    public func validate() throws {
+    /// 验证并同步配置。返回是否发生了变更。
+    @discardableResult
+    public mutating func validateAndSync() throws -> Bool {
         guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ProviderConfigError.emptyModelID
         }
@@ -195,6 +202,23 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
                 try ProviderURLValidator.validate(value, preset: preset)
             }
         }
+        
+        // 同步 modelDefinitions：清理不在 models 列表中的条目
+        var changed = false
+        let modelSet = Set(models.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+        for key in modelDefinitions.keys {
+            if !modelSet.contains(key) {
+                modelDefinitions.removeValue(forKey: key)
+                changed = true
+            }
+        }
+        
+        return changed
+    }
+    
+    public func validate() throws {
+        var copy = self
+        try copy.validateAndSync()
     }
 
     public static func makeDefault(from template: ProviderPresetDefinition, name: String? = nil) -> ProviderProfile {
@@ -247,12 +271,12 @@ public struct ProviderConfigFile: Sendable, Codable, Equatable {
 
     public mutating func validate() throws {
         var seen = Set<String>()
-        for profile in profiles {
-            if seen.contains(profile.id) {
-                throw ProviderConfigError.duplicateProfileID(profile.id)
+        for i in profiles.indices {
+            if seen.contains(profiles[i].id) {
+                throw ProviderConfigError.duplicateProfileID(profiles[i].id)
             }
-            seen.insert(profile.id)
-            try profile.validate()
+            seen.insert(profiles[i].id)
+            try profiles[i].validateAndSync()
         }
     }
 }
