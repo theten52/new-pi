@@ -2,8 +2,7 @@ import Foundation
 
 public enum OpenAICompatibleEndpoint {
     public static func resolveURL(for profile: ProviderProfile) throws -> URL {
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        let raw = profile.option(.baseURL) ?? definition.defaultBaseURL ?? ""
+        let raw = profile.option(.baseURL) ?? profile.preset.defaultBaseURL ?? ""
 
         switch profile.preset {
         case .ollama:
@@ -21,7 +20,7 @@ public enum OpenAICompatibleEndpoint {
                 return url
             }
             let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let fallback = definition.defaultBaseURL ?? "https://api.openai.com/v1/chat/completions"
+            let fallback = profile.preset.defaultBaseURL ?? "https://api.openai.com/v1/chat/completions"
             let composed = trimmed.isEmpty ? fallback : "\(trimmed)/v1/chat/completions"
             guard let url = URL(string: composed) else {
                 throw ProviderConfigError.invalidURL(composed)
@@ -289,9 +288,8 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-                    let definition = ProviderPresetCatalog.definition(for: profile.preset)
-                    if definition.credentialRequired, !apiKey.isEmpty {
-                        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    if profile.preset.credentialRequired, !apiKey.isEmpty {
+                        request.setValue(profile.apiKeyHeaderValue(apiKey), forHTTPHeaderField: profile.apiKeyHeader)
                     }
 
                     if let organization = profile.option(.organization) {

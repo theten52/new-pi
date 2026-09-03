@@ -157,12 +157,9 @@ struct ProviderAPIModeProfileTests {
         #expect(profile.apiMode == .chatCompletions)
     }
 
-    @Test("DeepSeek Responses quick setup uses responses mode")
+    @Test("DeepSeek Responses preset uses responses mode")
     func deepSeekResponsesQuickSetup() {
-        let profile = ProviderProfile.makeDefault(
-            from: ProviderPresetCatalog.deepSeekResponsesQuickSetup,
-            name: "DeepSeek Responses"
-        )
+        let profile = VendorPresets.makeProfile(from: VendorPresets.deepseekResponses)
         #expect(profile.apiMode == .responses)
         #expect(profile.option(.baseURL) == "https://api.deepseek.com")
         #expect(profile.maxTokens == 16_384)
@@ -173,11 +170,7 @@ struct ProviderAPIModeProfileTests {
 struct LLMProviderFactoryResponsesTests {
     @Test("responses apiMode builds ResponsesAPIProvider")
     func responsesFactory() throws {
-        var profile = ProviderProfile.makeDefault(
-            from: ProviderPresetCatalog.deepSeekResponsesQuickSetup,
-            name: "DeepSeek Responses"
-        )
-        profile.setAPIMode(.responses)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.deepseekResponses)
         let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
             ProviderCredentialResolver.keychainAccount(for: profile.id): "sk-test",
         ]))

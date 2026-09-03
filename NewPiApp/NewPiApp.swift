@@ -136,6 +136,7 @@ struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
     @Environment(\.openWindow) private var openWindow
     @State private var showLogs = false
+    @State private var showingChatrooms = false
     /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
     @State private var sessionDisplayLimit = 5
     @State private var renameTarget: SessionSummary?
@@ -222,6 +223,14 @@ struct NewPiRootView: View {
                 .onChange(of: viewModel.projectURL) { _, _ in
                     sessionDisplayLimit = recentSessionLimit
                 }
+                
+                // 聊天室功能入口（待集成）
+                // Section("聊天室") {
+                //     Button("聊天室列表") {
+                //         showingChatrooms = true
+                //     }
+                //     .disabled(viewModel.projectURL == nil)
+                // }
             }
             .navigationTitle("NewPi")
         } detail: {
@@ -279,6 +288,9 @@ struct NewPiRootView: View {
             NewPiToolApprovalSheet(viewModel: viewModel, request: request)
                 .interactiveDismissDisabled()
         }
+        // .sheet(isPresented: $showingChatrooms) {
+        //     ChatRoomListView(viewModel: viewModel)
+        // }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
                 await viewModel.startNewSession()

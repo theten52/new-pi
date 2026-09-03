@@ -27,15 +27,13 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                 do {
                     let endpoint = try ResponsesEndpoint.resolveURL(for: profile)
                     let apiKey = try await apiKeyProvider()
-                    let definition = ProviderPresetCatalog.definition(for: profile.preset)
 
                     var request = URLRequest(url: endpoint)
                     request.httpMethod = "POST"
                     ResponsesRequestPolicy.applyCommonHeaders(
                         request: &request,
                         profile: profile,
-                        apiKey: apiKey,
-                        definition: definition
+                        apiKey: apiKey
                     )
 
                     var body: [String: Any] = [

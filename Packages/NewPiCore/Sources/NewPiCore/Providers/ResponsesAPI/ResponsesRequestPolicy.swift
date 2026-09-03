@@ -37,12 +37,11 @@ enum ResponsesRequestPolicy {
     static func applyCommonHeaders(
         request: inout URLRequest,
         profile: ProviderProfile,
-        apiKey: String,
-        definition: ProviderPresetDefinition
+        apiKey: String
     ) {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if definition.credentialRequired, !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if profile.preset.credentialRequired, !apiKey.isEmpty {
+            request.setValue(profile.apiKeyHeaderValue(apiKey), forHTTPHeaderField: profile.apiKeyHeader)
         }
         if let organization = profile.option(.organization) {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")

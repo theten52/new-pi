@@ -56,7 +56,7 @@ struct ProviderConfigStoreTests {
         )
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         config.profiles.append(deepSeek)
         try store.save(config)
 
@@ -74,7 +74,7 @@ struct ProviderConfigStoreTests {
         let store = ProviderConfigStore(configURL: configURL, credentialResolver: resolver)
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         config.profiles.append(deepSeek)
         try store.save(config)
 
@@ -108,7 +108,7 @@ struct ProviderConfigStoreTests {
         )
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         try store.upsertProfile(deepSeek, in: &config)
         #expect(config.defaultProfileID == deepSeek.id)
     }
@@ -271,9 +271,9 @@ struct OpenAICompatibleRequestPolicyTests {
         #expect((body["thinking"] as? [String: String])?["type"] == "disabled")
     }
 
-    @Test("DeepSeek quick setup defaults to higher max tokens")
+    @Test("DeepSeek Responses preset defaults to higher max tokens")
     func deepSeekProfileDefaults() {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let profile = VendorPresets.makeProfile(from: VendorPresets.deepseekResponses)
         #expect(profile.maxTokens == 16_384)
     }
 }
@@ -282,7 +282,7 @@ struct OpenAICompatibleRequestPolicyTests {
 struct LLMProviderFactoryProfileTests {
     @Test("anthropic preset builds AnthropicProvider")
     func anthropicFactory() throws {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.anthropic)
         let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
             ProviderCredentialResolver.keychainAccount(for: profile.id): "sk-test",
         ]))
@@ -292,7 +292,7 @@ struct LLMProviderFactoryProfileTests {
 
     @Test("openai preset builds OpenAICompatibleProvider")
     func openaiFactory() throws {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.openai)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.openai)
         let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
             ProviderCredentialResolver.keychainAccount(for: profile.id): "sk-test",
         ]))
@@ -393,11 +393,11 @@ struct ProviderProfileMultiModelTests {
         #expect(profile.models == ["qwen2.5-coder"])
     }
 
-    @Test("makeDefault seeds preset default models")
+    @Test("makeProfile seeds vendor default models")
     func makeDefaultSeedsPresetModels() {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic)
-        #expect(profile.models == ProviderPresetCatalog.anthropic.defaultModels)
-        #expect(profile.modelID == ProviderPresetCatalog.anthropic.defaultModels.first)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.anthropic)
+        #expect(profile.models == VendorPresets.anthropic.defaultModels.map(\.id))
+        #expect(profile.modelID == VendorPresets.anthropic.defaultModels.first?.id)
     }
 
     @Test("validate rejects empty model list")
@@ -409,14 +409,14 @@ struct ProviderProfileMultiModelTests {
         }
     }
 
-    @Test("well-known presets ship built-in default models")
+    @Test("well-known vendor presets ship built-in default models")
     func presetsHaveDefaultModels() {
-        for preset in ProviderPreset.allCases {
-            let definition = ProviderPresetCatalog.definition(for: preset)
-            #expect(!definition.defaultModels.isEmpty, "preset \(preset.rawValue) missing default models")
+        for vendor in VendorPresets.all {
+            if vendor.id == VendorPresets.openaiCompatible.id { continue }  // 自定义端点允许空模型
+            #expect(!vendor.defaultModels.isEmpty, "vendor \(vendor.id) missing default models")
         }
-        #expect(ProviderPresetCatalog.anthropic.defaultModels.count >= 3)
-        #expect(ProviderPresetCatalog.openai.defaultModels.count >= 3)
-        #expect(ProviderPresetCatalog.openRouter.defaultModels.count >= 3)
+        #expect(VendorPresets.anthropic.defaultModels.count >= 3)
+        #expect(VendorPresets.openai.defaultModels.count >= 3)
+        #expect(VendorPresets.openRouter.defaultModels.count >= 3)
     }
 }

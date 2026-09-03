@@ -2,8 +2,7 @@ import Foundation
 
 public enum ResponsesEndpoint {
     public static func resolveURL(for profile: ProviderProfile) throws -> URL {
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        let raw = profile.option(.baseURL) ?? definition.defaultBaseURL ?? ""
+        let raw = profile.option(.baseURL) ?? profile.preset.defaultBaseURL ?? ""
 
         if raw.contains("/responses") {
             guard let url = URL(string: raw) else {

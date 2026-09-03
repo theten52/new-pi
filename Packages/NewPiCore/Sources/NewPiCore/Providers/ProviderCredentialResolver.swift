@@ -39,13 +39,12 @@ public struct ProviderCredentialResolver: Sendable {
     public static let legacyAnthropicAccount = "anthropic-api-key"
 
     public func apiKey(for profile: ProviderProfile) async throws -> String {
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        guard definition.credentialRequired else {
+        guard profile.preset.credentialRequired else {
             return ""
         }
 
         let env = environment()
-        if let envKey = definition.environmentVariable,
+        if let envKey = profile.preset.environmentVariable,
            let value = env[envKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !value.isEmpty {
             return value
@@ -59,7 +58,7 @@ public struct ProviderCredentialResolver: Sendable {
         }
 
         throw AgentError.llmFailed(
-            "Missing API key for \"\(profile.name)\". Set \(definition.environmentVariable ?? "an API key") or save it in NewPi Settings."
+            "Missing API key for \"\(profile.name)\". Set \(profile.preset.environmentVariable ?? "an API key") or save it in NewPi Settings."
         )
     }
 
@@ -74,8 +73,7 @@ public struct ProviderCredentialResolver: Sendable {
     }
 
     public func hasAPIKey(for profile: ProviderProfile) async -> Bool {
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        guard definition.credentialRequired else { return true }
+        guard profile.preset.credentialRequired else { return true }
         return (try? await apiKey(for: profile)) != nil
     }
 

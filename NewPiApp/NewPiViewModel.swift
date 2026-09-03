@@ -429,6 +429,10 @@ final class NewPiViewModel: ObservableObject {
     private var tokenRateRefreshTimer: Timer?
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
+    /// 合并后的厂商模板列表（内置 + overlay 覆盖/新增）。
+    @Published var vendorTemplates: [VendorPreset] = VendorPresets.all
+    /// 厂商模板 overlay 存储（编辑内置 + 自定义新增 + 恢复默认）。
+    private let vendorTemplateStore = VendorTemplateStore()
     @Published var savedSessions: [SessionSummary] = []
     @Published var activeSessionID: UUID?
     @Published var activeProviderName = "Anthropic"
@@ -517,22 +521,18 @@ final class NewPiViewModel: ObservableObject {
         return providerConfig.profiles.first(where: { $0.id == id })
     }
 
-    /// 当前活跃 provider 的 preset（供上下文窗口目录表兜底使用）。
-    private var activeProfilePreset: ProviderPreset? {
-        activeProfile?.preset
-    }
-
     /// 状态栏「上下文占用」文本：`上下文 9.2% / 1.0M`。
     ///
     /// - 分子：最近一轮请求的真实输入 token（未命中缓存 + 命中缓存 + 写缓存，
     ///   即 `UsageStats.totalInputTokens`），代表当前上下文实际占用的输入量。
-    /// - 分母：当前模型的上下文窗口大小（来自 `ContextWindowCatalog` 内置目录表）。
+    /// - 分母：当前模型的上下文窗口大小（`ProviderProfile.contextWindow(for:)`：
+    ///   modelDefinitions 精确值 → 静态目录表 → provider 兜底）。
     ///
     /// 无输入数据（尚未产生任何请求）或查不到窗口大小时返回 nil（不显示）。
     func contextUsageText(for usage: UsageStats) -> String? {
         let input = usage.totalInputTokens
-        guard input > 0, let preset = activeProfilePreset else { return nil }
-        let window = ContextWindowCatalog.windowTokens(for: activeProviderModel, preset: preset)
+        guard input > 0, let profile = activeProfile else { return nil }
+        let window = profile.contextWindow(for: activeProviderModel)
         guard window > 0 else { return nil }
 
         let percent = Double(input) / Double(window) * 100
@@ -552,6 +552,7 @@ final class NewPiViewModel: ObservableObject {
     }
 
     init() {
+        vendorTemplates = vendorTemplateStore.load()
         Task {
             await reloadProviders()
             await restoreLastProjectIfNeeded()
@@ -711,6 +712,13 @@ final class NewPiViewModel: ObservableObject {
             let hasKey = await providerCredentialResolver.hasAPIKey(for: profile)
             items.append(NewPiProviderListItem(profile: profile, hasAPIKey: hasKey))
         }
+        // 按厂商名排序（设计文档「排序：按厂商名排序」）；同名（多实例）时按 id 保序，
+        // 避免不稳定排序导致同名项每次刷新顺序跳动。
+        items.sort {
+            let nameOrder = $0.profile.name.localizedCaseInsensitiveCompare($1.profile.name)
+            if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+            return $0.profile.id < $1.profile.id
+        }
         providerListItems = items
 
         // 有活跃会话时显示该会话自己选择的 provider（会话内切换记进 header，逐会话记忆）；
@@ -796,12 +804,11 @@ final class NewPiViewModel: ObservableObject {
     /// 状态栏模型菜单的分组数据源（按 provider 分组，组内为该 provider 的模型列表）。
     var providerModelGroups: [NewPiProviderModelGroup] {
         providerListItems.map { item in
-            let definition = ProviderPresetCatalog.definition(for: item.profile.preset)
-            return NewPiProviderModelGroup(
+            NewPiProviderModelGroup(
                 profileID: item.profile.id,
                 profileName: item.profile.name,
-                systemImage: definition.systemImage,
-                hasAPIKey: item.hasAPIKey || !definition.credentialRequired,
+                systemImage: item.profile.preset.systemImage,
+                hasAPIKey: item.hasAPIKey || !item.profile.preset.credentialRequired,
                 models: item.profile.models
             )
         }
@@ -855,6 +862,51 @@ final class NewPiViewModel: ObservableObject {
             try providerConfigStore.deleteProfile(id: id, from: &providerConfig)
             await refreshProviderList()
             // 不自动新建会话、不改已有会话的 provider：新默认只作用于新建会话。
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
+    /// 模型发现：从 provider 端点拉取可用模型 ID 列表（设计文档「模型发现」）。
+    /// 只负责拉取，合并进 profile.models 由调用方（Edit sheet）完成。
+    func fetchModels(for profile: ProviderProfile) async -> Result<[String], Error> {
+        do {
+            let models = try await ProviderModelLister.listModels(
+                profile: profile,
+                credentialResolver: providerCredentialResolver
+            )
+            return .success(models)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// 模板编辑里的模型发现：模板无持久化凭据，用临时 API Key 拉取模型列表。
+    func fetchModelsForTemplate(_ template: VendorPreset, apiKey: String) async -> Result<[String], Error> {
+        do {
+            let profile = VendorPresets.makeProfile(from: template)
+            let models = try await ProviderModelLister.listModels(profile: profile, apiKey: apiKey)
+            return .success(models)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// 保存厂商模板列表（只把与内置不同的写入 overlay）。
+    func saveVendorTemplates(_ templates: [VendorPreset]) async {
+        do {
+            try vendorTemplateStore.save(templates)
+            vendorTemplates = vendorTemplateStore.load()
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
+    /// 恢复某个模板到内置默认（删除 overlay 条目）。
+    func resetVendorTemplate(id: String) async {
+        do {
+            try vendorTemplateStore.reset(id: id)
+            vendorTemplates = vendorTemplateStore.load()
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)
         }

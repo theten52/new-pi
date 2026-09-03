@@ -51,16 +51,6 @@ public struct ModelPricing: Codable, Equatable, Sendable {
     }
 }
 
-/// Thinking 级别配置
-public struct ThinkingLevelConfig: Codable, Equatable, Sendable {
-    /// 级别名称到 budget_tokens 的映射
-    public var levels: [String: Int]
-    
-    public init(levels: [String: Int] = [:]) {
-        self.levels = levels
-    }
-}
-
 /// 模型定义
 public struct ModelDefinition: Codable, Equatable, Identifiable, Sendable {
     public var id: String                    // 模型 ID
@@ -69,7 +59,6 @@ public struct ModelDefinition: Codable, Equatable, Identifiable, Sendable {
     public var maxOutputTokens: Int          // 最大输出 token
     public var capabilities: ModelCapabilities
     public var pricing: ModelPricing?
-    public var thinkingLevels: ThinkingLevelConfig?
     
     public init(
         id: String,
@@ -77,8 +66,7 @@ public struct ModelDefinition: Codable, Equatable, Identifiable, Sendable {
         contextWindow: Int = 128000,
         maxOutputTokens: Int = 8192,
         capabilities: ModelCapabilities = ModelCapabilities(),
-        pricing: ModelPricing? = nil,
-        thinkingLevels: ThinkingLevelConfig? = nil
+        pricing: ModelPricing? = nil
     ) {
         self.id = id
         self.name = name ?? id
@@ -86,14 +74,13 @@ public struct ModelDefinition: Codable, Equatable, Identifiable, Sendable {
         self.maxOutputTokens = maxOutputTokens
         self.capabilities = capabilities
         self.pricing = pricing
-        self.thinkingLevels = thinkingLevels
     }
 }
 
 // MARK: - 厂商预设
 
-/// 厂商预设配置
-public struct VendorPreset: Identifiable, Sendable {
+/// 厂商预设配置（可编辑、可持久化到 overlay 的模板）。
+public struct VendorPreset: Codable, Equatable, Identifiable, Sendable {
     public var id: String                    // 预设 ID
     public var displayName: String           // 显示名称
     public var icon: String                  // SF Symbols 名称
@@ -136,6 +123,9 @@ public enum VendorPresets {
     
     /// 所有内置厂商预设
     public static let all: [VendorPreset] = [
+        anthropic,
+        openai,
+        openaiCompatible,
         xiaomiMiMoTokenPlan,
         xiaomiMiMoApiKey,
         xiaomiMiMoAnthropic,
@@ -145,16 +135,68 @@ public enum VendorPresets {
         siliconflow,
         volcengine,
         deepseek,
+        deepseekResponses,
         glmTokenPlan,
         glmApiKey,
         openRouter,
         ollama,
     ]
-    
-    /// 根据 ID 查找预设
-    public static func find(by id: String) -> VendorPreset? {
-        all.first { $0.id == id }
-    }
+
+    // MARK: - 基础厂商
+
+    /// Anthropic（Claude 系列）
+    public static let anthropic = VendorPreset(
+        id: "anthropic",
+        displayName: "Anthropic",
+        icon: "sparkles",
+        apiMode: .chatCompletions,
+        preset: .anthropic,
+        baseUrl: "https://api.anthropic.com/v1/messages",
+        apiKeyHeader: "x-api-key",
+        apiKeyPlaceholder: "sk-ant-...",
+        defaultModels: [
+            ModelDefinition(id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", contextWindow: 200_000, maxOutputTokens: 64_000, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "claude-opus-4-1", name: "Claude Opus 4.1", contextWindow: 200_000, maxOutputTokens: 64_000, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", contextWindow: 200_000, maxOutputTokens: 64_000, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "claude-opus-4-20250514", name: "Claude Opus 4", contextWindow: 200_000, maxOutputTokens: 64_000, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku", contextWindow: 200_000, maxOutputTokens: 8_192, capabilities: ModelCapabilities(image: true)),
+        ],
+        description: "Anthropic Claude 系列"
+    )
+
+    /// OpenAI（GPT 系列）
+    public static let openai = VendorPreset(
+        id: "openai",
+        displayName: "OpenAI",
+        icon: "brain.head.profile",
+        apiMode: .chatCompletions,
+        preset: .openai,
+        baseUrl: "https://api.openai.com/v1/chat/completions",
+        apiKeyHeader: "Authorization",
+        apiKeyPlaceholder: "sk-...",
+        defaultModels: [
+            ModelDefinition(id: "gpt-5", name: "GPT-5", contextWindow: 400_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "gpt-5-mini", name: "GPT-5 mini", contextWindow: 400_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(reasoning: true, image: true)),
+            ModelDefinition(id: "gpt-4o", name: "GPT-4o", contextWindow: 128_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(image: true)),
+            ModelDefinition(id: "gpt-4o-mini", name: "GPT-4o mini", contextWindow: 200_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(image: true)),
+            ModelDefinition(id: "gpt-4.1-mini", name: "GPT-4.1 mini", contextWindow: 1_000_000, maxOutputTokens: 32_768, capabilities: ModelCapabilities(image: true)),
+        ],
+        description: "OpenAI GPT 系列"
+    )
+
+    /// 自定义 OpenAI 兼容端点（用户自填 Base URL）
+    public static let openaiCompatible = VendorPreset(
+        id: "openai-compatible",
+        displayName: "自定义端点",
+        icon: "server.rack",
+        apiMode: .chatCompletions,
+        preset: .openaiCompatible,
+        baseUrl: "",
+        apiKeyHeader: "Authorization",
+        apiKeyPlaceholder: "Bearer sk-...",
+        defaultModels: [],
+        description: "手动配置 API 类型、Base URL 等参数"
+    )
     
     /// 将 VendorPreset 转换为 ProviderProfile
     public static func makeProfile(from preset: VendorPreset) -> ProviderProfile {
@@ -173,7 +215,7 @@ public enum VendorPresets {
         }
         
         return ProviderProfile(
-            id: preset.id,
+            id: UUID().uuidString,
             name: preset.displayName,
             preset: preset.preset,
             modelID: models.first ?? "default",
@@ -193,6 +235,7 @@ public enum VendorPresets {
         displayName: "小米 MiMo (Token Plan)",
         icon: "bolt.horizontal.circle.fill",
         apiMode: .chatCompletions,
+        preset: .xiaomiMiMo,
         baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",
         apiKeyHeader: "api-key",
         apiKeyPlaceholder: "输入小米 API Key",
@@ -223,6 +266,7 @@ public enum VendorPresets {
         displayName: "小米 MiMo (API Key)",
         icon: "bolt.horizontal.circle.fill",
         apiMode: .chatCompletions,
+        preset: .xiaomiMiMo,
         baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",
         apiKeyHeader: "api-key",
         apiKeyPlaceholder: "输入小米 API Key",
@@ -365,6 +409,24 @@ public enum VendorPresets {
         ]
     )
     
+    /// DeepSeek (Responses)
+    public static let deepseekResponses = VendorPreset(
+        id: "deepseek-responses",
+        displayName: "DeepSeek (Responses)",
+        icon: "bolt.circle.fill",
+        apiMode: .responses,
+        preset: .openaiCompatible,
+        baseUrl: "https://api.deepseek.com",
+        apiKeyHeader: "Authorization",
+        apiKeyPlaceholder: "Bearer sk-...",
+        defaultModels: [
+            ModelDefinition(id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", contextWindow: 1_000_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(reasoning: true)),
+            ModelDefinition(id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", contextWindow: 1_000_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(reasoning: true)),
+            ModelDefinition(id: "deepseek-v4-flash-vision-exp", name: "DeepSeek V4 Flash Vision", contextWindow: 1_000_000, maxOutputTokens: 16_384, capabilities: ModelCapabilities(reasoning: true, image: true)),
+        ],
+        description: "DeepSeek V4 Responses API"
+    )
+    
     // MARK: - GLM (智谱)
     
     /// GLM (Token Plan)
@@ -411,6 +473,7 @@ public enum VendorPresets {
         displayName: "OpenRouter",
         icon: "arrow.triangle.branch",
         apiMode: .chatCompletions,
+        preset: .openRouter,
         baseUrl: "https://openrouter.ai/api/v1/chat/completions",
         apiKeyHeader: "Authorization",
         apiKeyPlaceholder: "Bearer sk-or-...",
@@ -429,7 +492,8 @@ public enum VendorPresets {
         displayName: "Ollama (本地)",
         icon: "desktopcomputer",
         apiMode: .chatCompletions,
-        baseUrl: "http://127.0.0.1:11434/v1/chat/completions",
+        preset: .ollama,
+        baseUrl: "http://127.0.0.1:11434",
         apiKeyHeader: "Authorization",
         apiKeyPlaceholder: "可留空",
         defaultModels: [

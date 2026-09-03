@@ -78,7 +78,9 @@ public struct ProviderConfigStore {
     }
 
     public static func bootstrapDefaultConfig() -> ProviderConfigFile {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic, name: "Anthropic")
+        var profile = VendorPresets.makeProfile(from: VendorPresets.anthropic)
+        // 保持既有 keychain 迁移逻辑兼容（legacyAnthropicAccount → 固定 id）。
+        profile.id = ProviderConfigFile.defaultAnthropicProfileID
         return ProviderConfigFile(
             version: ProviderConfigFile.currentVersion,
             defaultProfileID: profile.id,

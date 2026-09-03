@@ -9,6 +9,7 @@ struct NewPiSettingsView: View {
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
     @State private var showLogs = false
+    @State private var showingTemplateManager = false
 
     var body: some View {
         Form {
@@ -42,6 +43,9 @@ struct NewPiSettingsView: View {
 
                 Button("Add Provider…") {
                     showingAddSheet = true
+                }
+                Button("Manage Templates…") {
+                    showingTemplateManager = true
                 }
             }
 
@@ -92,6 +96,7 @@ struct NewPiSettingsView: View {
         .navigationTitle("Settings")
         .sheet(isPresented: $showingAddSheet) {
             NewPiAddProviderSheet(
+                vendorTemplates: viewModel.vendorTemplates,
                 onVendorSelect: { preset in
                     showingAddSheet = false
                     let profile = VendorPresets.makeProfile(from: preset)
@@ -99,11 +104,15 @@ struct NewPiSettingsView: View {
                 },
                 onCustomSelect: {
                     showingAddSheet = false
-                    // 使用默认的 OpenAI Compatible 配置
-                    let template = ProviderPresetCatalog.openaiCompatible
-                    editingProfile = ProviderProfile.makeDefault(from: template)
+                    let template = viewModel.vendorTemplates.first { $0.id == VendorPresets.openaiCompatible.id }
+                        ?? VendorPresets.openaiCompatible
+                    editingProfile = VendorPresets.makeProfile(from: template)
                 }
             )
+        }
+        .sheet(isPresented: $showingTemplateManager) {
+            // NewPiVendorTemplateManagerView(viewModel: viewModel)
+            Text("模板管理器 - 待集成")
         }
         .sheet(item: $editingProfile) { profile in
             NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
@@ -145,7 +154,7 @@ struct NewPiProviderRow: View {
                 Text(item.profile.name)
                     .font(.headline)
                 HStack(spacing: 8) {
-                    Text(ProviderPresetCatalog.definition(for: item.profile.preset).displayName)
+                    Text(item.profile.preset.displayName)
                         .font(.caption)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -192,8 +201,7 @@ struct NewPiProviderRow: View {
 
     @ViewBuilder
     private var credentialStatus: some View {
-        let definition = ProviderPresetCatalog.definition(for: item.profile.preset)
-        if definition.credentialRequired {
+        if item.profile.preset.credentialRequired {
             if item.hasAPIKey {
                 Label("Key saved", systemImage: "checkmark.seal.fill")
                     .labelStyle(.iconOnly)
@@ -216,6 +224,8 @@ struct NewPiProviderRow: View {
 
 struct NewPiAddProviderSheet: View {
     @Environment(\.dismiss) private var dismiss
+    /// 可用的厂商模板列表（内置 + overlay 覆盖/新增）。
+    let vendorTemplates: [VendorPreset]
     /// 选择知名厂商预设
     let onVendorSelect: (VendorPreset) -> Void
     /// 选择自定义端点（使用默认配置）
@@ -230,7 +240,7 @@ struct NewPiAddProviderSheet: View {
                     // 知名厂商列表
                     Section {
                         LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(VendorPresets.all) { preset in
+                            ForEach(vendorTemplates) { preset in
                                 Button {
                                     onVendorSelect(preset)
                                     dismiss()
@@ -309,14 +319,12 @@ struct NewPiEditProviderSheet: View {
     @State private var errorMessage: String?
     @State private var testMessage: String?
     @State private var isTestingConnection = false
+    @State private var isRefreshingModels = false
+    @State private var refreshMessage: String?
 
     init(viewModel: NewPiViewModel, profile: ProviderProfile) {
         self.viewModel = viewModel
         _profile = State(initialValue: profile)
-    }
-
-    private var definition: ProviderPresetDefinition {
-        ProviderPresetCatalog.definition(for: profile.preset)
     }
 
     var body: some View {
@@ -325,11 +333,11 @@ struct NewPiEditProviderSheet: View {
                 Section("Profile") {
                     TextField("Name", text: $profile.name)
                     LabeledContent("Preset") {
-                        Text(definition.displayName)
+                        Text(profile.preset.displayName)
                     }
                 }
 
-                if definition.credentialRequired {
+                if profile.preset.credentialRequired {
                     Section("API Key") {
                         SecureField("API Key", text: $apiKeyDraft)
                             .textFieldStyle(.roundedBorder)
@@ -427,16 +435,37 @@ struct NewPiEditProviderSheet: View {
                         Button("Add", action: addDraftedModel)
                             .disabled(newModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    let unusedPresets = definition.defaultModels.filter { !profile.models.contains($0) }
-                    if !unusedPresets.isEmpty {
-                        Menu("从内置模型添加…") {
-                            ForEach(unusedPresets, id: \.self) { model in
+                    let unusedDefined = profile.modelDefinitions.keys.filter { !profile.models.contains($0) }.sorted()
+                    if !unusedDefined.isEmpty {
+                        Menu("从模型定义添加…") {
+                            ForEach(unusedDefined, id: \.self) { model in
                                 Button(model) {
                                     profile.addModel(model)
                                 }
                             }
                         }
                         .menuStyle(.borderlessButton)
+                    }
+
+                    // 模型发现：从 provider 端点拉取可用模型并合并进列表（设计文档「模型发现」）。
+                    HStack {
+                        Button {
+                            Task { await refreshModels() }
+                        } label: {
+                            if isRefreshingModels {
+                                ProgressView().controlSize(.small)
+                                Text("刷新中…")
+                            } else {
+                                Label("刷新模型列表", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .disabled(isRefreshingModels)
+                        Spacer()
+                    }
+                    if let refreshMessage {
+                        Text(refreshMessage)
+                            .font(.caption)
+                            .foregroundStyle(refreshMessage.hasPrefix("✓") ? .green : .red)
                     }
                 }
 
@@ -454,9 +483,9 @@ struct NewPiEditProviderSheet: View {
                     }
                 }
 
-                if !definition.optionFields.isEmpty {
+                if !profile.preset.optionFields.isEmpty {
                     Section("Options") {
-                        ForEach(definition.optionFields, id: \.key) { field in
+                        ForEach(profile.preset.optionFields, id: \.key) { field in
                             TextField(
                                 field.label,
                                 text: optionBinding(for: field.key),
@@ -553,7 +582,7 @@ struct NewPiEditProviderSheet: View {
         if key == .baseURL, profile.supportsAPIModeSelection {
             return ResponsesEndpoint.defaultBaseURLPlaceholder(for: profile.apiMode)
         }
-        return definition.optionFields.first(where: { $0.key == key })?.placeholder ?? ""
+        return profile.preset.optionFields.first(where: { $0.key == key })?.placeholder ?? ""
     }
 
     private func normalizeBaseURLForAPIMode(_ mode: ProviderAPIMode) {
@@ -588,6 +617,29 @@ struct NewPiEditProviderSheet: View {
     private func findModelDefinition(modelID: String) -> ModelDefinition? {
         return profile.modelDefinition(for: modelID)
     }
+
+    /// 模型发现：从 provider 端点拉取可用模型，合并进当前编辑中的 profile.models。
+    private func refreshModels() async {
+        isRefreshingModels = true
+        defer { isRefreshingModels = false }
+        let result = await viewModel.fetchModels(for: profile)
+        switch result {
+        case .success(let models):
+            var added = 0
+            for model in models {
+                let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty, !profile.models.contains(trimmed) {
+                    profile.addModel(trimmed)
+                    added += 1
+                }
+            }
+            refreshMessage = added > 0
+                ? "✓ 发现 \(models.count) 个模型，新增 \(added) 个"
+                : "✓ 已是最新（\(profile.models.count) 个模型）"
+        case .failure(let error):
+            refreshMessage = "✗ \(error.localizedDescription)"
+        }
+    }
     
     private func save() {
         do {
@@ -620,9 +672,18 @@ private func formatPricing(_ pricing: ModelPricing) -> String {
         return "免费"
     }
     let symbol = pricing.currency == .cny ? "¥" : "$"
-    let inputStr = String(format: "%.1f", pricing.input)
-    let outputStr = String(format: "%.1f", pricing.output)
-    return "输入 \(symbol)\(inputStr)/M · 输出 \(symbol)\(outputStr)/M"
+    let fmt: (Double) -> String = { String(format: "%.1f", $0) }
+    var parts = [
+        "输入 \(symbol)\(fmt(pricing.input))/M",
+        "输出 \(symbol)\(fmt(pricing.output))/M",
+    ]
+    if let cacheRead = pricing.cacheRead, cacheRead > 0 {
+        parts.append("缓存读 \(symbol)\(fmt(cacheRead))/M")
+    }
+    if let cacheWrite = pricing.cacheWrite, cacheWrite > 0 {
+        parts.append("缓存写 \(symbol)\(fmt(cacheWrite))/M")
+    }
+    return parts.joined(separator: " · ")
 }
 
 

@@ -25,18 +25,18 @@ public final class ChatRoomRuntime: ObservableObject {
 @MainActor
 public final class ChatRoomLoop {
     private let store: ChatRoomStore
-    private let llmFactory: ChatRoomLLMProviderFactory
+    private let llmFactory: any ChatRoomLLMProviderFactory
     private let toolRegistry: ToolRegistry
     private let approvalHandler: ToolApprovalHandler
     
     public init(
         store: ChatRoomStore = .shared,
-        llmFactory: ChatRoomLLMProviderFactory = .shared,
+        llmFactory: (any ChatRoomLLMProviderFactory)? = nil,
         toolRegistry: ToolRegistry = .shared,
         approvalHandler: ToolApprovalHandler = .shared
     ) {
         self.store = store
-        self.llmFactory = llmFactory
+        self.llmFactory = llmFactory ?? ChatRoomLLMProviderFactoryImpl()
         self.toolRegistry = toolRegistry
         self.approvalHandler = approvalHandler
     }
@@ -191,7 +191,7 @@ public final class ChatRoomLoop {
         )
         
         // 创建 LLM provider
-        let provider = try await llmFactory.createProvider(
+        let provider = try llmFactory.createProvider(
             profileID: providerID,
             modelID: modelID
         )
@@ -200,7 +200,7 @@ public final class ChatRoomLoop {
         let response = try await provider.chat(
             systemPrompt: systemPrompt,
             messages: contextMessages,
-            tools: [], // TODO: 添加工具支持
+            tools: [],
             maxTokens: 4096
         )
         
@@ -302,22 +302,10 @@ public protocol ChatRoomLLMProvider: Sendable {
     ) async throws -> ChatRoomLLMResponse
 }
 
-// MARK: - ChatRoom LLM Provider Factory
+// MARK: - ChatRoom LLM Provider Factory Protocol
 
-public actor ChatRoomLLMProviderFactory {
-    public static let shared = ChatRoomLLMProviderFactory()
-    
-    private let configStore: ProviderConfigStore
-    
-    public init(configStore: ProviderConfigStore = ProviderConfigStore()) {
-        self.configStore = configStore
-    }
-    
-    public func createProvider(profileID: String, modelID: String) throws -> ChatRoomLLMProvider {
-        // TODO: 实际实现，复用现有的 provider 创建逻辑
-        // 这里需要桥接到现有的 OpenAICompatibleProvider 或 AnthropicProvider
-        throw ChatRoomError.roleNotConfigured(profileID)
-    }
+public protocol ChatRoomLLMProviderFactory: Sendable {
+    func createProvider(profileID: String, modelID: String) throws -> ChatRoomLLMProvider
 }
 
 // MARK: - Tool Registry (占位)
