@@ -224,13 +224,12 @@ struct NewPiRootView: View {
                     sessionDisplayLimit = recentSessionLimit
                 }
                 
-                // 聊天室功能入口（待集成）
-                // Section("聊天室") {
-                //     Button("聊天室列表") {
-                //         showingChatrooms = true
-                //     }
-                //     .disabled(viewModel.projectURL == nil)
-                // }
+                Section("聊天室") {
+                    Button("聊天室列表") {
+                        showingChatrooms = true
+                    }
+                    .disabled(viewModel.projectURL == nil)
+                }
             }
             .navigationTitle("NewPi")
         } detail: {
@@ -288,9 +287,9 @@ struct NewPiRootView: View {
             NewPiToolApprovalSheet(viewModel: viewModel, request: request)
                 .interactiveDismissDisabled()
         }
-        // .sheet(isPresented: $showingChatrooms) {
-        //     ChatRoomListView(viewModel: viewModel)
-        // }
+        .sheet(isPresented: $showingChatrooms) {
+            ChatRoomListView(viewModel: viewModel)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
                 await viewModel.startNewSession()
