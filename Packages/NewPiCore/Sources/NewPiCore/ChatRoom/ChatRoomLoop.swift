@@ -193,7 +193,8 @@ public final class ChatRoomLoop {
         // 创建 LLM provider
         let provider = try llmFactory.createProvider(
             profileID: providerID,
-            modelID: modelID
+            modelID: modelID,
+            projectPath: runtime.chatroom.projectPath
         )
         
         // 调用 LLM
@@ -305,7 +306,7 @@ public protocol ChatRoomLLMProvider: Sendable {
 // MARK: - ChatRoom LLM Provider Factory Protocol
 
 public protocol ChatRoomLLMProviderFactory: Sendable {
-    func createProvider(profileID: String, modelID: String) throws -> ChatRoomLLMProvider
+    func createProvider(profileID: String, modelID: String, projectPath: String) throws -> ChatRoomLLMProvider
 }
 
 // MARK: - Tool Registry (占位)

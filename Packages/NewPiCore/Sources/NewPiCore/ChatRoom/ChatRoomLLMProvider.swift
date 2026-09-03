@@ -4,10 +4,12 @@ import Foundation
 public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
     private let provider: LLMProvider
     private let modelConfig: ModelConfig
+    private let toolExecutor: ChatRoomToolExecutor
     
-    public init(provider: LLMProvider, modelConfig: ModelConfig) {
+    public init(provider: LLMProvider, modelConfig: ModelConfig, toolExecutor: ChatRoomToolExecutor) {
         self.provider = provider
         self.modelConfig = modelConfig
+        self.toolExecutor = toolExecutor
     }
     
     public func chat(
@@ -19,13 +21,19 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         // 转换消息格式 - 使用现有的 AgentMessage
         let agentMessages = convertToAgentMessages(messages)
         
+        // 获取工具定义
+        let toolDefinitions = ChatRoomTools.allDefinitions()
+        
         // 调用 LLM
         var responseText = ""
+        var allToolCalls: [ToolCallContent] = []
+        var allToolResults: [ChatRoomToolResult] = []
+        
         let stream = provider.stream(
             model: modelConfig,
             systemPrompt: systemPrompt,
             messages: agentMessages,
-            tools: [] // TODO: 支持工具
+            tools: toolDefinitions
         )
         
         for try await event in stream {
@@ -36,8 +44,11 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                 break
             case .thinkingSignature(_):
                 break
-            case .toolCall(_):
-                break // TODO: 支持工具调用
+            case .toolCall(let toolCall):
+                // 执行工具调用
+                allToolCalls.append(toolCall)
+                let result = try await toolExecutor.execute(toolCall: toolCall)
+                allToolResults.append(result)
             case .completed(_, _):
                 break
             }
@@ -103,7 +114,7 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
         self.credentialResolver = credentialResolver
     }
     
-    public func createProvider(profileID: String, modelID: String) throws -> ChatRoomLLMProvider {
+    public func createProvider(profileID: String, modelID: String, projectPath: String) throws -> ChatRoomLLMProvider {
         let config = try configStore.load()
         guard let profile = config.profiles.first(where: { $0.id == profileID }) else {
             throw ChatRoomError.roleNotConfigured(profileID)
@@ -122,6 +133,8 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
             maxTokens: profile.effectiveMaxTokens
         )
         
-        return ChatRoomLLMProviderImpl(provider: provider, modelConfig: modelConfig)
+        let toolExecutor = ChatRoomToolExecutor(projectPath: projectPath)
+        
+        return ChatRoomLLMProviderImpl(provider: provider, modelConfig: modelConfig, toolExecutor: toolExecutor)
     }
 }
