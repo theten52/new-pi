@@ -93,9 +93,14 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
 /// ChatRoom LLM Provider Factory 实现
 public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @unchecked Sendable {
     private let configStore: ProviderConfigStore
+    private let credentialResolver: ProviderCredentialResolver
     
-    public init(configStore: ProviderConfigStore = ProviderConfigStore()) {
+    public init(
+        configStore: ProviderConfigStore = ProviderConfigStore(),
+        credentialResolver: ProviderCredentialResolver = ProviderCredentialResolver.makeDefault()
+    ) {
         self.configStore = configStore
+        self.credentialResolver = credentialResolver
     }
     
     public func createProvider(profileID: String, modelID: String) throws -> ChatRoomLLMProvider {
@@ -104,8 +109,12 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
             throw ChatRoomError.roleNotConfigured(profileID)
         }
         
-        // 创建底层 provider
-        let provider = try createLLMProvider(from: profile)
+        // 创建底层 provider - 使用现有的工厂方法
+        let provider = try LLMProviderFactory.make(
+            profile: profile,
+            credentialResolver: credentialResolver
+        )
+        
         let modelConfig = ModelConfig(
             provider: profile.preset.rawValue,
             modelID: modelID,
@@ -114,11 +123,5 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
         )
         
         return ChatRoomLLMProviderImpl(provider: provider, modelConfig: modelConfig)
-    }
-    
-    /// 根据 profile 创建 LLMProvider
-    private func createLLMProvider(from profile: ProviderProfile) throws -> LLMProvider {
-        // TODO: 桥接到现有的 provider 创建逻辑
-        throw ChatRoomError.roleNotConfigured(profile.id)
     }
 }
