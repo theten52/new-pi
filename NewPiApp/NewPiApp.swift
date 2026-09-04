@@ -561,18 +561,47 @@ import SwiftUI
 struct CreateChatRoomView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @Environment(\.dismiss) private var dismiss
-    
+
     let onCreate: (ChatRoom) -> Void
-    
+
     @State private var name = ""
     @State private var description = ""
     @State private var projectPath = ""
     @State private var roles: [ChatRoomRole] = PresetRoleType.allCases.map { ChatRoomRole.from(preset: $0) }
+    @State private var templates: [ChatRoomTemplate] = []
+    @State private var selectedTemplateID: String?
+    @State private var invalidatedRoleIDs: [String] = []
+    @State private var showingTemplateManager = false
     @State private var errorMessage: String?
-    
+
     var body: some View {
         NavigationStack {
             Form {
+                Section("模板") {
+                    Picker("选择模板", selection: $selectedTemplateID) {
+                        Text("自定义").tag(nil as String?)
+                        ForEach(templates) { template in
+                            Text(template.name).tag(Optional(template.id))
+                        }
+                    }
+                    .onChange(of: selectedTemplateID) { _, newValue in
+                        applyTemplate(id: newValue)
+                    }
+
+                    if !invalidatedRoleNames.isEmpty {
+                        Label(
+                            "以下角色的模型绑定已失效，已重置为未配置：\(invalidatedRoleNames.joined(separator: "、"))",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+
+                    Button("管理模板…") {
+                        showingTemplateManager = true
+                    }
+                }
+
                 Section("基本信息") {
                     TextField("名称", text: $name)
                     TextField("描述", text: $description)
@@ -583,16 +612,34 @@ struct CreateChatRoomView: View {
                         }
                     }
                 }
-                
+
                 Section("角色配置") {
                     ForEach($roles) { $role in
-                        RoleConfigRow(
+                        RoleEditorRow(
                             role: $role,
-                            providerProfiles: viewModel.providerConfig.profiles
+                            providerProfiles: viewModel.providerConfig.profiles,
+                            canDelete: roles.count > 1,
+                            onDelete: {
+                                roles.removeAll { $0.id == role.id }
+                            }
                         )
                     }
+
+                    // 允许 0 配置角色创建（文档：未配置角色暂不参与发言），但提示后果
+                    if !roles.contains(where: { $0.isConfigured }) {
+                        Label(
+                            "当前没有已配置模型的角色，创建后需先绑定 provider 和 model 才能推进发言",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+
+                    Button("添加角色") {
+                        roles.append(ChatRoomRole(name: "新角色", description: "", systemPrompt: ""))
+                    }
                 }
-                
+
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
@@ -615,21 +662,77 @@ struct CreateChatRoomView: View {
                     .disabled(name.isEmpty || projectPath.isEmpty)
                 }
             }
+            .onAppear {
+                reloadTemplates(selectDefault: true)
+            }
+            .sheet(isPresented: $showingTemplateManager, onDismiss: {
+                reloadTemplates(selectDefault: false)
+            }) {
+                TemplateManagerView(viewModel: viewModel)
+            }
+            .onChange(of: roles) { _, newRoles in
+                // 用户为降级角色重新完成绑定后，移除对应的失效提示
+                invalidatedRoleIDs.removeAll { id in
+                    newRoles.first(where: { $0.id == id })?.isConfigured == true
+                }
+            }
         }
     }
-    
+
+    // MARK: - 模板
+
+    private func reloadTemplates(selectDefault: Bool) {
+        templates = (try? ChatRoomTemplateStore.shared.listAll()) ?? []
+        guard selectDefault else {
+            // 管理器关闭后仅刷新列表；选中的模板被删除则清空选择（保留当前角色编辑）
+            if let id = selectedTemplateID, !templates.contains(where: { $0.id == id }) {
+                selectedTemplateID = nil
+                applyTemplate(id: nil)
+            }
+            return
+        }
+        guard selectedTemplateID == nil else { return }
+        selectedTemplateID = templates.first(where: { $0.name == "默认四人组" })?.id ?? templates.first?.id
+        // 显式套用一次，不依赖 onChange 对 onAppear 期间赋值的触发时机
+        applyTemplate(id: selectedTemplateID)
+    }
+
+    /// 失效角色展示名（按 roleID 解析、去重）
+    private var invalidatedRoleNames: [String] {
+        var seen = Set<String>()
+        return invalidatedRoleIDs.compactMap { id in
+            roles.first(where: { $0.id == id })?.name
+        }.filter { seen.insert($0).inserted }
+    }
+
+    /// 套用模板（决策 #22：模板是起点，套用后仍可修改）。
+    /// provider 或 model 绑定失效的角色在此降级，避免保存后到发言时才报错（决策 #20）。
+    private func applyTemplate(id: String?) {
+        guard let id,
+              let template = templates.first(where: { $0.id == id }) else {
+            invalidatedRoleIDs = []
+            return
+        }
+        let profileModels = Dictionary(
+            uniqueKeysWithValues: viewModel.providerConfig.profiles.map { ($0.id, $0.models) }
+        )
+        let result = template.resolvedRoles(profileModels: profileModels)
+        roles = result.roles
+        invalidatedRoleIDs = result.invalidatedRoleIDs
+    }
+
     private func selectFolder() {
         let panel = NSOpenPanel()
         panel.title = "选择项目文件夹"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
-        
+
         if panel.runModal() == .OK, let url = panel.url {
             projectPath = url.path
         }
     }
-    
+
     private func createChatroom() {
         guard !name.isEmpty else {
             errorMessage = "请输入名称"
@@ -639,14 +742,14 @@ struct CreateChatRoomView: View {
             errorMessage = "请选择项目文件夹"
             return
         }
-        
+
         let chatroom = ChatRoom(
             name: name,
             description: description,
             roles: roles,
             projectPath: projectPath
         )
-        
+
         do {
             try ChatRoomStore.shared.save(chatroom)
             onCreate(chatroom)
@@ -657,24 +760,66 @@ struct CreateChatRoomView: View {
     }
 }
 
-/// 角色配置行
-struct RoleConfigRow: View {
+/// 角色编辑行（创建页 / 聊天室编辑 / 模板编辑共用）。
+/// 收起时显示名称与模型绑定；展开后可编辑名称、职责、systemPrompt 与图标。
+struct RoleEditorRow: View {
     @Binding var role: ChatRoomRole
     let providerProfiles: [ProviderProfile]
-    
+    var canDelete: Bool = false
+    var onDelete: () -> Void = {}
+
+    @State private var isExpanded = false
+
+    static let availableIcons = [
+        "person.fill", "person.2", "building.2", "desktopcomputer",
+        "checkmark.shield", "person.crop.rectangle.stack", "wand.and.stars",
+        "wrench.and.screwdriver", "eye", "brain.head.profile",
+        "doc.text.magnifyingglass", "lightbulb",
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: role.icon)
-                    .frame(width: 20)
-                Text(role.name)
-                    .font(.headline)
+            HStack(spacing: 8) {
+                iconMenu
+
+                if isExpanded {
+                    TextField("角色名称", text: $role.name)
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(role.name.isEmpty ? "未命名角色" : role.name)
+                            .font(.headline)
+                        if !role.description.isEmpty {
+                            Text(role.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up.circle" : "chevron.down.circle")
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "收起" : "展开编辑")
+
+                if canDelete {
+                    Button {
+                        onDelete()
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除角色")
+                }
             }
-            
-            Text(role.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            
+
             HStack {
                 // Provider 选择
                 Picker("Provider", selection: $role.providerProfileID) {
@@ -683,8 +828,8 @@ struct RoleConfigRow: View {
                         Text(profile.name).tag(profile.id as String?)
                     }
                 }
-                .frame(width: 150)
-                
+                .frame(width: 170)
+
                 // Model 选择
                 if let providerID = role.providerProfileID,
                    let profile = providerProfiles.first(where: { $0.id == providerID }) {
@@ -694,11 +839,286 @@ struct RoleConfigRow: View {
                             Text(model).tag(model as String?)
                         }
                     }
-                    .frame(width: 150)
+                    .frame(width: 170)
+                }
+            }
+
+            if isExpanded {
+                TextField("职责描述", text: $role.description)
+                    .textFieldStyle(.roundedBorder)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("System Prompt")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $role.systemPrompt)
+                        .font(.callout)
+                        .frame(minHeight: 80)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(.quaternary)
+                        )
                 }
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private var iconMenu: some View {
+        Menu {
+            ForEach(Self.availableIcons, id: \.self) { icon in
+                Button {
+                    role.icon = icon
+                } label: {
+                    Image(systemName: icon)
+                }
+            }
+        } label: {
+            Image(systemName: role.icon.isEmpty ? "person.fill" : role.icon)
+                .frame(width: 24)
+        }
+        .help("选择图标")
+    }
+}
+
+// MARK: - 模板管理
+
+/// 模板管理器（决策 #23：创建页内「管理模板…」单一入口）
+struct TemplateManagerView: View {
+    @ObservedObject var viewModel: NewPiViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var templates: [ChatRoomTemplate] = []
+    @State private var templateBeingEdited: ChatRoomTemplate?
+    @State private var templateToDelete: ChatRoomTemplate?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if templates.isEmpty {
+                    emptyState
+                } else {
+                    list
+                }
+            }
+            .padding()
+            .frame(minWidth: 460, minHeight: 380)
+            .navigationTitle("管理模板")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        templateBeingEdited = ChatRoomTemplate(name: "")
+                    } label: {
+                        Label("新建模板", systemImage: "plus")
+                    }
+                    .help("新建模板")
+                }
+            }
+            .onAppear { reload() }
+            .sheet(item: $templateBeingEdited) { template in
+                TemplateEditView(viewModel: viewModel, template: template) { _ in
+                    reload()
+                }
+            }
+            .confirmationDialog(
+                "删除模板",
+                isPresented: Binding(
+                    get: { templateToDelete != nil },
+                    set: { if !$0 { templateToDelete = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("删除「\(templateToDelete?.name ?? "")」", role: .destructive) {
+                    deleteTemplate(templateToDelete)
+                    templateToDelete = nil
+                }
+                Button("取消", role: .cancel) {
+                    templateToDelete = nil
+                }
+            } message: {
+                Text("删除模板不影响已创建的聊天室。")
+            }
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                ForEach(templates) { template in
+                    templateRow(template)
+                }
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "square.stack.3d.up.slash")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+            Text("暂无模板")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text("点击右上角 + 新建一个模板")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func templateRow(_ template: ChatRoomTemplate) -> some View {
+        Button {
+            templateBeingEdited = template
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(template.name)
+                        .font(.headline)
+                    if !template.description.isEmpty {
+                        Text(template.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                Text("\(template.roles.count) 个角色")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .background(.quaternary.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                templateBeingEdited = template
+            } label: {
+                Label("编辑", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                templateToDelete = template
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
+    private func reload() {
+        templates = (try? ChatRoomTemplateStore.shared.listAll()) ?? []
+    }
+
+    private func deleteTemplate(_ template: ChatRoomTemplate?) {
+        guard let template else { return }
+        do {
+            try ChatRoomTemplateStore.shared.delete(id: template.id)
+            reload()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// 模板编辑器（新建与编辑共用：template.name 为空即新建）
+struct TemplateEditView: View {
+    @ObservedObject var viewModel: NewPiViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    let template: ChatRoomTemplate
+    let onSave: (ChatRoomTemplate) -> Void
+
+    @State private var name: String
+    @State private var description: String
+    @State private var roles: [ChatRoomRole]
+    @State private var errorMessage: String?
+
+    init(
+        viewModel: NewPiViewModel,
+        template: ChatRoomTemplate,
+        onSave: @escaping (ChatRoomTemplate) -> Void
+    ) {
+        self.viewModel = viewModel
+        self.template = template
+        self.onSave = onSave
+        _name = State(initialValue: template.name)
+        _description = State(initialValue: template.description)
+        _roles = State(initialValue: template.roles)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("基本信息") {
+                    TextField("模板名称", text: $name)
+                    TextField("描述", text: $description)
+                }
+
+                Section("角色配置") {
+                    ForEach($roles) { $role in
+                        RoleEditorRow(
+                            role: $role,
+                            providerProfiles: viewModel.providerConfig.profiles,
+                            canDelete: roles.count > 1,
+                            onDelete: {
+                                roles.removeAll { $0.id == role.id }
+                            }
+                        )
+                    }
+                    Button("添加角色") {
+                        roles.append(ChatRoomRole(name: "新角色", description: "", systemPrompt: ""))
+                    }
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .padding()
+            .frame(minWidth: 500, minHeight: 400)
+            .navigationTitle(template.name.isEmpty ? "新建模板" : "编辑模板")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        save()
+                    }
+                    .disabled(name.isEmpty || roles.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        var updated = template
+        updated.name = name
+        updated.description = description
+        updated.roles = roles
+        updated.updatedAt = Date()
+
+        do {
+            try ChatRoomTemplateStore.shared.save(updated)
+            onSave(updated)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -762,7 +1182,7 @@ struct EditChatRoomView: View {
 
                 Section("角色配置") {
                     ForEach($roles) { $role in
-                        RoleConfigRow(
+                        RoleEditorRow(
                             role: $role,
                             providerProfiles: viewModel.providerConfig.profiles
                         )

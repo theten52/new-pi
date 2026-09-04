@@ -650,6 +650,100 @@ struct ChatRoomAgenticLoopTests {
     }
 }
 
+// MARK: - 聊天室模板
+
+@Suite("ChatRoomTemplateStore")
+struct ChatRoomTemplateStoreTests {
+    @Test("seeds builtin templates on first run")
+    func seedsOnFirstRun() throws {
+        let store = ChatRoomTemplateStore(baseDirectory: tempDirectory())
+        defer { try? FileManager.default.removeItem(at: store.baseDirectoryForTesting) }
+
+        let templates = try store.listAll()
+        #expect(templates.count == 3)
+        #expect(templates.contains { $0.name == "默认四人组" && $0.roles.count == 4 })
+        #expect(templates.contains { $0.name == "两人极速组" && $0.roles.count == 2 })
+        #expect(templates.contains { $0.name == "评审组" && $0.roles.count == 2 })
+        // seed 等价原预设流程：不预绑 provider/model
+        #expect(templates.allSatisfy { template in
+            template.roles.allSatisfy { $0.providerProfileID == nil && $0.modelID == nil }
+        })
+    }
+
+    @Test("does not re-seed after user deletes all templates")
+    func noReseedAfterDeleteAll() throws {
+        let store = ChatRoomTemplateStore(baseDirectory: tempDirectory())
+        defer { try? FileManager.default.removeItem(at: store.baseDirectoryForTesting) }
+
+        _ = try store.listAll() // 触发 seed
+        for template in try store.listAll() {
+            try store.delete(id: template.id)
+        }
+        #expect(try store.listAll().isEmpty)
+    }
+
+    @Test("save and load round trip")
+    func roundTrip() throws {
+        let store = ChatRoomTemplateStore(baseDirectory: tempDirectory())
+        defer { try? FileManager.default.removeItem(at: store.baseDirectoryForTesting) }
+
+        var template = ChatRoomTemplate(
+            name: "自定义组",
+            description: "测试模板",
+            roles: [ChatRoomRole(name: "评审员", description: "看代码", systemPrompt: "提示词", providerProfileID: "p1", modelID: "m1")]
+        )
+        try store.save(template)
+        // 已有目录（save 时创建），不应触发 seed
+        template.name = "改名组"
+        template.roles[0].modelID = "m2"
+        try store.save(template)
+
+        let loaded = try store.listAll()
+        #expect(loaded.count == 1)
+        #expect(loaded[0].name == "改名组")
+        #expect(loaded[0].roles[0].modelID == "m2")
+
+        try store.delete(id: template.id)
+        #expect(try store.listAll().isEmpty)
+    }
+
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-templates-\(UUID().uuidString)", isDirectory: true)
+    }
+}
+
+@Suite("ChatRoomTemplate 套用")
+struct ChatRoomTemplateApplyTests {
+    @Test("invalid provider or model bindings are downgraded and reported")
+    func invalidBindingsDowngraded() {
+        let bound = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "ok", modelID: "m1")
+        let providerGone = ChatRoomRole(name: "测试员", description: "", systemPrompt: "x", providerProfileID: "gone", modelID: "m2")
+        let modelGone = ChatRoomRole(name: "评审员", description: "", systemPrompt: "x", providerProfileID: "ok", modelID: "removed-model")
+        let unboundModel = ChatRoomRole(name: "自由人", description: "", systemPrompt: "x", providerProfileID: "ok")
+        let template = ChatRoomTemplate(name: "t", roles: [bound, providerGone, modelGone, unboundModel])
+
+        let result = template.resolvedRoles(profileModels: ["ok": ["m1", "m2"]])
+
+        // 有效绑定原样保留
+        #expect(result.roles[0].providerProfileID == "ok")
+        #expect(result.roles[0].modelID == "m1")
+        // provider 已删除 → 整体降级
+        #expect(result.roles[1].providerProfileID == nil)
+        #expect(result.roles[1].modelID == nil)
+        // model 已从 provider 模型列表移除 → 整体降级
+        #expect(result.roles[2].providerProfileID == nil)
+        #expect(result.roles[2].modelID == nil)
+        // provider 有效且未绑 model → 保留（等用户补选）
+        #expect(result.roles[3].providerProfileID == "ok")
+        #expect(result.roles[3].modelID == nil)
+        #expect(result.roles[3].isConfigured == false)
+
+        // 失效按 roleID 报告（provider 失效与 model 失效都算）
+        #expect(result.invalidatedRoleIDs == [providerGone.id, modelGone.id])
+    }
+}
+
 // MARK: - 路径安全（validatePath）
 
 @Suite("ChatRoomPathValidator")
