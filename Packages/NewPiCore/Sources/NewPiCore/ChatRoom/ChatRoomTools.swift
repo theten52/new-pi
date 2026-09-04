@@ -89,6 +89,39 @@ public actor ChatRoomToolExecutor {
         self.projectPath = projectPath
     }
     
+    /// 验证路径安全性（防止路径穿越）
+    private func validatePath(_ path: String) -> URL? {
+        // 拒绝绝对路径
+        if path.hasPrefix("/") {
+            return nil
+        }
+        
+        // 拒绝包含 .. 的路径（防止路径穿越）
+        if path.contains("..") {
+            return nil
+        }
+        
+        let fileURL = URL(fileURLWithPath: projectPath).appendingPathComponent(path)
+        let resolvedPath = fileURL.standardized.path
+        let projectRoot = URL(fileURLWithPath: projectPath).standardized.path
+        
+        // 确保解析后的路径在项目目录内
+        guard resolvedPath.hasPrefix(projectRoot) else {
+            return nil
+        }
+        
+        return fileURL
+    }
+    
+    /// 路径校验失败的结果
+    private func pathValidationError() -> ChatRoomToolResult {
+        ChatRoomToolResult(
+            toolCallID: "",
+            output: "路径校验失败：不允许使用绝对路径或 .. 路径",
+            isError: true
+        )
+    }
+    
     /// 执行工具调用
     public func execute(toolCall: ToolCallContent) async throws -> ChatRoomToolResult {
         switch toolCall.name {
@@ -120,7 +153,10 @@ public actor ChatRoomToolExecutor {
             )
         }
         
-        let fileURL = URL(fileURLWithPath: projectPath).appendingPathComponent(path)
+        // 路径安全校验
+        guard let fileURL = validatePath(path) else {
+            return pathValidationError()
+        }
         
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             return ChatRoomToolResult(
@@ -157,7 +193,11 @@ public actor ChatRoomToolExecutor {
             )
         }
         
-        let fileURL = URL(fileURLWithPath: projectPath).appendingPathComponent(path)
+        // 路径安全校验
+        guard let fileURL = validatePath(path) else {
+            return pathValidationError()
+        }
+        
         let directory = fileURL.deletingLastPathComponent()
         
         do {
@@ -191,7 +231,10 @@ public actor ChatRoomToolExecutor {
             )
         }
         
-        let dirURL = URL(fileURLWithPath: projectPath).appendingPathComponent(path)
+        // 路径安全校验
+        guard let dirURL = validatePath(path) else {
+            return pathValidationError()
+        }
         
         guard FileManager.default.fileExists(atPath: dirURL.path) else {
             return ChatRoomToolResult(
