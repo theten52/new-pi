@@ -18,6 +18,14 @@ public final class ChatRoomRuntime: ObservableObject {
     
     public init(chatroom: ChatRoom) {
         self.chatroom = chatroom
+        // 断点续跑：恢复发言者索引
+        self.currentSpeakerIndex = chatroom.currentSpeakerIndex
+    }
+    
+    /// 保存当前状态到聊天室配置
+    public func saveState() {
+        chatroom.currentSpeakerIndex = currentSpeakerIndex
+        chatroom.updatedAt = Date()
     }
 }
 
@@ -181,7 +189,12 @@ public final class ChatRoomLoop {
         }
         
         runtime.isRunning = true
-        defer { runtime.isRunning = false }
+        defer {
+            runtime.isRunning = false
+            // 断点续跑：保存状态
+            runtime.saveState()
+            try? store.save(runtime.chatroom)
+        }
         
         // 构建上下文
         let systemPrompt = role.systemPrompt

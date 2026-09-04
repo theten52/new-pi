@@ -181,6 +181,7 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
     public var reviewRoundCount: Int
     public var selectedOptionID: String?    // 投票选定的方案
     public var votes: [Vote]                // 投票记录
+    public var currentSpeakerIndex: Int     // 当前发言者索引（断点续跑用）
     public var createdAt: Date
     public var updatedAt: Date
     
@@ -194,6 +195,7 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         reviewRoundCount: Int = 1,
         selectedOptionID: String? = nil,
         votes: [Vote] = [],
+        currentSpeakerIndex: Int = 0,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -206,6 +208,7 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         self.reviewRoundCount = reviewRoundCount
         self.selectedOptionID = selectedOptionID
         self.votes = votes
+        self.currentSpeakerIndex = currentSpeakerIndex
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

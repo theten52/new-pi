@@ -84,9 +84,19 @@ public enum ChatRoomTools {
 /// 聊天室工具执行器
 public actor ChatRoomToolExecutor {
     private let projectPath: String
+    private let approvalManager: ChatRoomApprovalManager
+    private var currentRoleID: String = ""
+    private var currentRoleName: String = ""
     
-    public init(projectPath: String) {
+    public init(projectPath: String, approvalManager: ChatRoomApprovalManager = ChatRoomApprovalManager()) {
         self.projectPath = projectPath
+        self.approvalManager = approvalManager
+    }
+    
+    /// 设置当前发言角色
+    public func setCurrentRole(id: String, name: String) {
+        self.currentRoleID = id
+        self.currentRoleName = name
     }
     
     /// 验证路径安全性（防止路径穿越）
@@ -196,6 +206,30 @@ public actor ChatRoomToolExecutor {
         // 路径安全校验
         guard let fileURL = validatePath(path) else {
             return pathValidationError()
+        }
+        
+        // 请求审批
+        let toolCall = ToolCallContent(
+            id: UUID().uuidString,
+            name: "write_file",
+            arguments: arguments
+        )
+        
+        let result = await approvalManager.requestApproval(
+            toolCall: toolCall,
+            roleID: currentRoleID,
+            roleName: currentRoleName
+        )
+        
+        switch result {
+        case .approved:
+            break // 继续执行
+        case .rejected(let reason):
+            return ChatRoomToolResult(
+                toolCallID: "",
+                output: "写入被拒绝: \(reason)",
+                isError: true
+            )
         }
         
         let directory = fileURL.deletingLastPathComponent()
