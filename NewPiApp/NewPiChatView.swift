@@ -67,7 +67,10 @@ struct NewPiSessionPanel: View {
                     }
                 } else {
                     NewPiTranscriptDocumentView(
-                        runtime: runtime,
+                        transcript: runtime.transcript,
+                        isStreaming: runtime.isStreaming,
+                        streamingBubbleComplete: runtime.streamingBubbleComplete,
+                        storeKey: runtime.sessionID,
                         controller: docController,
                         tintHues: turnTintHues(for: runtime.transcript),
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；

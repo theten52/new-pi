@@ -45,10 +45,16 @@ final class TranscriptDocumentController: ObservableObject {
 
 /// 单文档 transcript 视图：整条会话渲染进一个 WKWebView。
 /// SwiftUI 侧只做 transcript diff → ops → JS；高度表/窗口化/预热在此路径下全部不参与。
+/// 泛化形态（CHATROOM-FLAT-MD Phase 0）：不再绑 SessionRuntime，吃显式参数，
+/// session 与聊天室（消息适配为 transcript items 后）共用同一条渲染管线。
 struct NewPiTranscriptDocumentView: NSViewRepresentable {
-    @ObservedObject var runtime: SessionRuntime
+    let transcript: [NewPiTranscriptItem]
+    let isStreaming: Bool
+    let streamingBubbleComplete: Bool
+    /// 滚动锚点持久化 key（session 用 sessionID，聊天室用 chatroom UUID；nil = 不持久化）。
+    let storeKey: UUID?
     let controller: TranscriptDocumentController
-    /// 轮对话色调：itemID → 色相度数（面板层按最近 user 锚点算好传入）。
+    /// 轮对话/角色色调：itemID → 色相度数（面板层算好传入）。
     var tintHues: [UUID: Int] = [:]
     /// 冷启动/切回时要恢复的滚动锚点（nil = 落底）。仅首个内容批次应用一次。
     var restoreEntry: ScrollPositionStore.Entry?
@@ -78,7 +84,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         // 顺序敏感：attach 会把 coordinator.sessionID 注入 controller（滚动锚点持久化依赖），
         // 必须先赋值再 attach，否则 controller.sessionID 永远为 nil、位置不落盘（冷启动无法恢复）。
-        context.coordinator.sessionID = runtime.sessionID
+        context.coordinator.sessionID = storeKey
         context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.onFork = onFork
         context.coordinator.attach(webView)
@@ -89,9 +95,9 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onFork = onFork
         context.coordinator.apply(
-            transcript: runtime.transcript,
-            isStreaming: runtime.isStreaming,
-            streamingBubbleComplete: runtime.streamingBubbleComplete,
+            transcript: transcript,
+            isStreaming: isStreaming,
+            streamingBubbleComplete: streamingBubbleComplete,
             tintHues: tintHues
         )
     }
