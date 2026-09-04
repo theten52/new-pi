@@ -150,6 +150,11 @@ public final class ChatRoomStore: Sendable {
             try FileManager.default.removeItem(at: url)
         }
     }
+
+    /// 是否已有对话记录（轻量判断：只查文件是否存在，不解析内容）
+    public func hasMessages(for chatroomID: String) -> Bool {
+        FileManager.default.fileExists(atPath: messagesURL(for: chatroomID).path)
+    }
 }
 
 // MARK: - 错误类型
@@ -157,18 +162,15 @@ public final class ChatRoomStore: Sendable {
 public enum ChatRoomError: Error, LocalizedError {
     case notFound(String)
     case invalidPhase(ChatRoomPhase)
-    case roundLimitReached
     case noSelectedOption
     case roleNotConfigured(String)
-    
+
     public var errorDescription: String? {
         switch self {
         case .notFound(let id):
             "聊天室不存在: \(id)"
         case .invalidPhase(let phase):
-            "无效的阶段: \(phase)"
-        case .roundLimitReached:
-            "已达到最大轮数限制（3轮）"
+            "当前阶段（\(phase)）不允许此操作"
         case .noSelectedOption:
             "未选择方案"
         case .roleNotConfigured(let roleID):

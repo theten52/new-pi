@@ -145,7 +145,7 @@ public struct CandidateOption: Codable, Identifiable, Sendable, Equatable {
     public var id: String
     public var title: String
     public var description: String
-    
+
     public init(
         id: String = UUID().uuidString,
         title: String,
@@ -154,6 +154,19 @@ public struct CandidateOption: Codable, Identifiable, Sendable, Equatable {
         self.id = id
         self.title = title
         self.description = description
+    }
+
+    /// 模型输出的 JSON 只有 title/description（见设计文档决策 #16），
+    /// id 缺省时自动生成，避免解码失败回退到低质量字符串解析。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        self.title = try container.decode(String.self, forKey: .title)
+        self.description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, description
     }
 }
 
@@ -182,9 +195,12 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
     public var selectedOptionID: String?    // 投票选定的方案
     public var votes: [Vote]                // 投票记录
     public var currentSpeakerIndex: Int     // 当前发言者索引（断点续跑用）
+    /// 第 3 轮 review 未通过时流程暂停，等待用户解锁（追加轮数）或标记完成。
+    /// Optional 保证旧配置文件缺字段时可正常解码。
+    public var pausedAtRoundLimit: Bool?
     public var createdAt: Date
     public var updatedAt: Date
-    
+
     public init(
         id: String = UUID().uuidString,
         name: String,
@@ -196,6 +212,7 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         selectedOptionID: String? = nil,
         votes: [Vote] = [],
         currentSpeakerIndex: Int = 0,
+        pausedAtRoundLimit: Bool? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -209,6 +226,7 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         self.selectedOptionID = selectedOptionID
         self.votes = votes
         self.currentSpeakerIndex = currentSpeakerIndex
+        self.pausedAtRoundLimit = pausedAtRoundLimit
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
