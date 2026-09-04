@@ -22,12 +22,13 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         // 所有阶段都可以使用所有工具（决策 #15）
         let toolDefinitions = ChatRoomTools.allDefinitions()
 
-        // agentic loop（决策 #14）：工具结果回传给模型继续，最多 10 轮
+        // agentic loop（决策 #14）：工具结果回传给模型继续，最多 200 轮
+        // （2026-09-05 由 10 调整，覆盖大型多步执行任务）
         var finalResponseText = ""
         var allToolCalls: [ToolCallContent] = []
         var allToolResults: [ChatRoomToolResult] = []
         var iteration = 0
-        let maxIterations = 10
+        let maxIterations = 200
 
         while iteration < maxIterations {
             iteration += 1
