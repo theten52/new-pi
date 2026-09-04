@@ -134,9 +134,15 @@ private struct SessionRow: View {
 
 struct NewPiRootView: View {
     @ObservedObject private var viewModel = NewPiRootViewModelStore.shared.viewModel
+    /// 聊天室运行时缓存（CHATROOM-FLAT-MD Phase 1）：列表数据源 + 长命 FlowController。
+    @ObservedObject private var chatroomStore = ChatRoomRuntimeStore.shared
     @Environment(\.openWindow) private var openWindow
     @State private var showLogs = false
-    @State private var showingChatrooms = false
+    /// 当前在 detail 区平铺展示的聊天室 id（nil = 显示 session 对话）。
+    @State private var selectedChatroomID: String?
+    @State private var showingCreateChatroom = false
+    @State private var chatroomToEdit: ChatRoom?
+    @State private var chatroomToDelete: ChatRoom?
     /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
     @State private var sessionDisplayLimit = 5
     @State private var renameTarget: SessionSummary?
@@ -144,6 +150,107 @@ struct NewPiRootView: View {
 
     private let recentSessionLimit = 5
     private let sessionDisplayIncrement = 5
+
+    /// Sessions sidebar section（原内联在 body；CHATROOM-FLAT-MD 加入聊天室 section 后
+    /// List 内容超出 SwiftUI 类型检查复杂度上限，抽出为独立计算属性）。
+    private var sessionsSection: some View {
+        Section("Sessions") {
+            Button("New Session") {
+                selectedChatroomID = nil
+                Task { await viewModel.startNewSession() }
+            }
+            .disabled(viewModel.projectURL == nil)
+
+            if viewModel.savedSessions.isEmpty {
+                Text("No saved sessions")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(displayedSessions) { summary in
+                    Button {
+                        selectedChatroomID = nil
+                        Task { await viewModel.resumeSession(summary) }
+                    } label: {
+                        SessionRow(
+                            summary: summary,
+                            isActive: summary.id == viewModel.activeSessionID
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Rename Session") {
+                            renameTarget = summary
+                            renameText = summary.label ?? ""
+                        }
+                        Button("Archive Session") {
+                            Task { await viewModel.archiveSession(summary) }
+                        }
+                    }
+                }
+
+                if viewModel.savedSessions.count > sessionDisplayLimit
+                    || sessionDisplayLimit > recentSessionLimit {
+                    HStack(spacing: 12) {
+                        // 增量展开：每次点击多显示 5 条，直至全部显示。
+                        if viewModel.savedSessions.count > sessionDisplayLimit {
+                            Button("Show all (\(viewModel.savedSessions.count))") {
+                                sessionDisplayLimit = min(
+                                    sessionDisplayLimit + sessionDisplayIncrement,
+                                    viewModel.savedSessions.count
+                                )
+                            }
+                        }
+                        if sessionDisplayLimit > recentSessionLimit {
+                            Button("Show less") {
+                                sessionDisplayLimit = recentSessionLimit
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onChange(of: viewModel.projectURL) { _, _ in
+            sessionDisplayLimit = recentSessionLimit
+        }
+    }
+
+    /// 聊天室 sidebar section（CHATROOM-FLAT-MD Phase 1）：平铺模式，聊天室直接列在
+    /// sidebar，点击在 detail 区全尺寸展示，不再是嵌套 sheet。抽出为独立计算属性，
+    /// 避免 List 内容超出 SwiftUI 类型检查复杂度上限。
+    private var chatroomSection: some View {
+        Section("聊天室") {
+            Button("新建聊天室") {
+                showingCreateChatroom = true
+            }
+            .disabled(viewModel.projectURL == nil)
+
+            ForEach(chatroomStore.chatrooms) { chatroom in
+                Button {
+                    selectedChatroomID = chatroom.id
+                } label: {
+                    ChatRoomSidebarRow(
+                        chatroom: chatroom,
+                        isActive: chatroom.id == selectedChatroomID
+                    )
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        chatroomToEdit = chatroom
+                    } label: {
+                        Label("编辑聊天室", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        chatroomToDelete = chatroom
+                    } label: {
+                        Label("删除聊天室", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
 
     private var displayedSessions: [SessionSummary] {
         Array(viewModel.savedSessions.prefix(max(sessionDisplayLimit, recentSessionLimit)))
@@ -165,76 +272,25 @@ struct NewPiRootView: View {
                     }
                 }
 
-                Section("Sessions") {
-                    Button("New Session") {
-                        Task { await viewModel.startNewSession() }
-                    }
-                    .disabled(viewModel.projectURL == nil)
-
-                    if viewModel.savedSessions.isEmpty {
-                        Text("No saved sessions")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(displayedSessions) { summary in
-                            Button {
-                                Task { await viewModel.resumeSession(summary) }
-                            } label: {
-                                SessionRow(
-                                    summary: summary,
-                                    isActive: summary.id == viewModel.activeSessionID
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button("Rename Session") {
-                                    renameTarget = summary
-                                    renameText = summary.label ?? ""
-                                }
-                                Button("Archive Session") {
-                                    Task { await viewModel.archiveSession(summary) }
-                                }
-                            }
-                        }
-
-                        if viewModel.savedSessions.count > sessionDisplayLimit
-                            || sessionDisplayLimit > recentSessionLimit {
-                            HStack(spacing: 12) {
-                                // 增量展开：每次点击多显示 5 条，直至全部显示。
-                                if viewModel.savedSessions.count > sessionDisplayLimit {
-                                    Button("Show all (\(viewModel.savedSessions.count))") {
-                                        sessionDisplayLimit = min(
-                                            sessionDisplayLimit + sessionDisplayIncrement,
-                                            viewModel.savedSessions.count
-                                        )
-                                    }
-                                }
-                                if sessionDisplayLimit > recentSessionLimit {
-                                    Button("Show less") {
-                                        sessionDisplayLimit = recentSessionLimit
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.projectURL) { _, _ in
-                    sessionDisplayLimit = recentSessionLimit
-                }
+                sessionsSection
                 
-                Section("聊天室") {
-                    Button("聊天室列表") {
-                        showingChatrooms = true
-                    }
-                    .disabled(viewModel.projectURL == nil)
-                }
+                chatroomSection
             }
             .navigationTitle("NewPi")
         } detail: {
-            NewPiChatView(viewModel: viewModel)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if let id = selectedChatroomID,
+                   let chatroom = chatroomStore.chatrooms.first(where: { $0.id == id }) {
+                    ChatRoomDetailView(
+                        viewModel: viewModel,
+                        controller: chatroomStore.controller(for: chatroom)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    NewPiChatView(viewModel: viewModel)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
                     Menu {
@@ -287,8 +343,41 @@ struct NewPiRootView: View {
             NewPiToolApprovalSheet(viewModel: viewModel, request: request)
                 .interactiveDismissDisabled()
         }
-        .sheet(isPresented: $showingChatrooms) {
-            ChatRoomListView(viewModel: viewModel)
+        .sheet(isPresented: $showingCreateChatroom) {
+            CreateChatRoomView(viewModel: viewModel) { chatroom in
+                chatroomStore.reload()
+                selectedChatroomID = chatroom.id
+            }
+        }
+        .sheet(item: $chatroomToEdit) { chatroom in
+            EditChatRoomView(
+                viewModel: viewModel,
+                chatroom: chatroom,
+                conversationStarted: ChatRoomStore.shared.hasMessages(for: chatroom.id)
+            ) { _ in
+                chatroomStore.reload()
+            }
+        }
+        .confirmationDialog(
+            "删除聊天室",
+            isPresented: Binding(
+                get: { chatroomToDelete != nil },
+                set: { if !$0 { chatroomToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除「\(chatroomToDelete?.name ?? "")」", role: .destructive) {
+                if let chatroom = chatroomToDelete {
+                    try? chatroomStore.delete(chatroom)
+                    if selectedChatroomID == chatroom.id { selectedChatroomID = nil }
+                }
+                chatroomToDelete = nil
+            }
+            Button("取消", role: .cancel) {
+                chatroomToDelete = nil
+            }
+        } message: {
+            Text("将删除聊天室配置与全部对话记录，不可恢复。")
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             Task {
@@ -320,197 +409,38 @@ struct NewPiRootView: View {
 import NewPiCore
 import SwiftUI
 
-/// 聊天室列表视图
-struct ChatRoomListView: View {
-    @ObservedObject var viewModel: NewPiViewModel
-    @State private var chatrooms: [ChatRoom] = []
-    @State private var showingCreateSheet = false
-    @State private var selectedChatroom: ChatRoom?
-    @State private var chatroomToEdit: ChatRoom?
-    @State private var chatroomToDelete: ChatRoom?
-    @State private var errorMessage: String?
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // 标题
-            HStack {
-                Text("聊天室")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    showingCreateSheet = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("创建聊天室")
-            }
-            
-            // 聊天室列表
-            if chatrooms.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.secondary)
-                    Text("暂无聊天室")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    Text("创建一个聊天室，让多个 AI 模型协作完成任务")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(chatrooms) { chatroom in
-                            ChatRoomRow(chatroom: chatroom) {
-                                selectedChatroom = chatroom
-                            }
-                            .contextMenu {
-                                Button {
-                                    chatroomToEdit = chatroom
-                                } label: {
-                                    Label("编辑聊天室", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    chatroomToDelete = chatroom
-                                } label: {
-                                    Label("删除聊天室", systemImage: "trash")
-                                }
-                            }
-                        }
-                    }
-                    .padding(.vertical, 8)
-                }
-                .confirmationDialog(
-                    "删除聊天室",
-                    isPresented: Binding(
-                        get: { chatroomToDelete != nil },
-                        set: { if !$0 { chatroomToDelete = nil } }
-                    ),
-                    titleVisibility: .visible
-                ) {
-                    Button("删除「\(chatroomToDelete?.name ?? "")」", role: .destructive) {
-                        deleteChatroom(chatroomToDelete)
-                        chatroomToDelete = nil
-                    }
-                    Button("取消", role: .cancel) {
-                        chatroomToDelete = nil
-                    }
-                } message: {
-                    Text("将删除聊天室配置与全部对话记录，不可恢复。")
-                }
-            }
-            
-            // 错误信息
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-        }
-        .padding()
-        .frame(minWidth: 300)
-        .onAppear {
-            loadChatrooms()
-        }
-        .sheet(isPresented: $showingCreateSheet) {
-            CreateChatRoomView(viewModel: viewModel) { chatroom in
-                chatrooms.insert(chatroom, at: 0)
-            }
-        }
-        .sheet(item: $selectedChatroom, onDismiss: {
-            // 从详情页回来刷新阶段徽章/轮数/时间
-            loadChatrooms()
-        }) { chatroom in
-            ChatRoomDetailView(viewModel: viewModel, chatroom: chatroom)
-        }
-        .sheet(item: $chatroomToEdit) { chatroom in
-            EditChatRoomView(
-                viewModel: viewModel,
-                chatroom: chatroom,
-                conversationStarted: ChatRoomStore.shared.hasMessages(for: chatroom.id)
-            ) { updated in
-                if let index = chatrooms.firstIndex(where: { $0.id == updated.id }) {
-                    chatrooms[index] = updated
-                }
-            }
-        }
-    }
-
-    private func loadChatrooms() {
-        do {
-            chatrooms = try ChatRoomStore.shared.listAll()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func deleteChatroom(_ chatroom: ChatRoom?) {
-        guard let chatroom else { return }
-        do {
-            try ChatRoomStore.shared.delete(id: chatroom.id)
-            chatrooms.removeAll { $0.id == chatroom.id }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
-/// 聊天室行视图
-struct ChatRoomRow: View {
+/// 聊天室 sidebar 行（CHATROOM-FLAT-MD Phase 1）：紧凑展示，替代原卡片式 ChatRoomRow。
+struct ChatRoomSidebarRow: View {
     let chatroom: ChatRoom
-    let onTap: () -> Void
-    
+    let isActive: Bool
+
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(chatroom.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Spacer()
-                    PhaseBadge(phase: chatroom.currentPhase)
-                }
-                
-                if !chatroom.description.isEmpty {
-                    Text(chatroom.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                
-                HStack {
-                    // 角色图标
-                    HStack(spacing: 4) {
-                        ForEach(chatroom.configuredRoles) { role in
-                            Image(systemName: role.icon)
-                                .font(.caption2)
-                                .help(role.name)
-                        }
-                    }
-                    
-                    Spacer()
-                    
-                    // 轮数
-                    if chatroom.currentPhase == .execution || chatroom.currentPhase == .review {
-                        Text("第 \(chatroom.reviewRoundCount) 轮")
+        HStack(alignment: .center, spacing: 8) {
+            if isActive {
+                Image(systemName: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.tint)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(chatroom.name)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    ForEach(chatroom.configuredRoles) { role in
+                        Image(systemName: role.icon)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .help(role.name)
                     }
-                    
-                    // 时间
                     Text(chatroom.updatedAt.formatted(.relative(presentation: .named)))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
             }
-            .padding()
-            .background(.quaternary.opacity(0.5))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Spacer()
+            PhaseBadge(phase: chatroom.currentPhase)
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 2)
     }
 }
 
@@ -550,7 +480,10 @@ struct PhaseBadge: View {
 }
 
 #Preview {
-    ChatRoomListView(viewModel: NewPiViewModel())
+    ChatRoomSidebarRow(
+        chatroom: ChatRoom(name: "测试聊天室", projectPath: "/tmp"),
+        isActive: true
+    )
 }
 
 
@@ -1238,28 +1171,18 @@ import SwiftUI
 /// 聊天室详情视图
 struct ChatRoomDetailView: View {
     @ObservedObject var viewModel: NewPiViewModel
-    let chatroom: ChatRoom
+    /// 流程控制器（CHATROOM-FLAT-MD Phase 1）：runtime/loop/审批/任务均由它持有，
+    /// 平铺模式下视图显隐不再影响讨论流程。
+    @ObservedObject var controller: ChatRoomFlowController
 
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var runtime: ChatRoomRuntime
-    @StateObject private var approvalManager: ChatRoomApprovalManager
-    @State private var loop: ChatRoomLoop
     @State private var inputText = ""
     @State private var showingVoteSheet = false
     @State private var showingRolePicker = false
     @State private var showingEndDiscussionDialog = false
     @State private var showingEditConfig = false
-    @State private var runningTask: Task<Void, Never>?
-    @State private var flowError: String?
 
-    init(viewModel: NewPiViewModel, chatroom: ChatRoom) {
-        self.viewModel = viewModel
-        self.chatroom = chatroom
-        let manager = ChatRoomApprovalManager()
-        self._approvalManager = StateObject(wrappedValue: manager)
-        self._runtime = StateObject(wrappedValue: ChatRoomRuntime(chatroom: chatroom))
-        self.loop = ChatRoomLoop(approvalManager: manager)
-    }
+    private var runtime: ChatRoomRuntime { controller.runtime }
+    private var approvalManager: ChatRoomApprovalManager { controller.approvalManager }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1282,26 +1205,18 @@ struct ChatRoomDetailView: View {
             // 输入栏
             inputBar
         }
-        .frame(minWidth: 700, minHeight: 500)
-        .onAppear {
-            loadMessages()
-        }
-        .onDisappear {
-            // 关闭详情页时取消运行中的发言/审批等待，避免审批 UI 随页面消失后
-            // continuation 无人唤醒、任务永久挂起
-            runningTask?.cancel()
-            runningTask = nil
-        }
+        // 历史消息在控制器创建时加载；runningTask 不随视图显隐取消——审批 continuation
+        // 由控制器持有的 approvalManager 承载，切走时挂起、切回时审批 sheet 自动重弹。
         .alert(
             "聊天室提示",
             isPresented: Binding(
-                get: { flowError != nil },
-                set: { if !$0 { flowError = nil } }
+                get: { controller.flowError != nil },
+                set: { if !$0 { controller.flowError = nil } }
             )
         ) {
             Button("好", role: .cancel) {}
         } message: {
-            Text(flowError ?? "")
+            Text(controller.flowError ?? "")
         }
         .sheet(item: pendingApprovalItem) { approval in
             ChatRoomApprovalSheet(
@@ -1374,17 +1289,12 @@ struct ChatRoomDetailView: View {
                 .disabled(runtime.isRunning)
                 Divider()
                 Button("停止当前运行") {
-                    runningTask?.cancel()
-                    runningTask = nil
+                    controller.cancelRunning()
                 }
                 .disabled(!runtime.isRunning)
                 Divider()
                 Button("结束流程", role: .destructive) {
-                    do {
-                        try loop.stopFlow(runtime: runtime)
-                    } catch {
-                        flowError = error.localizedDescription
-                    }
+                    controller.stopFlow()
                 }
                 .disabled(runtime.chatroom.currentPhase == .completed)
             } label: {
@@ -1451,7 +1361,7 @@ struct ChatRoomDetailView: View {
             HStack {
                 // 推进发言按钮
                 Button {
-                    runningTask = Task { await triggerNextSpeaker() }
+                    controller.triggerNextSpeaker()
                 } label: {
                     Label("推进下一发言", systemImage: "play.fill")
                 }
@@ -1545,16 +1455,12 @@ struct ChatRoomDetailView: View {
                 candidates: extractCandidates(),
                 selectedOptionID: runtime.chatroom.selectedOptionID
             ) { optionID in
-                do {
-                    try loop.userVote(optionID: optionID, runtime: runtime)
-                } catch {
-                    flowError = error.localizedDescription
-                }
+                controller.userVote(optionID: optionID)
             }
         }
         .sheet(isPresented: $showingRolePicker) {
             RolePickerSheet(roles: runtime.chatroom.configuredRoles) { roleID in
-                runningTask = Task { await triggerSpeaker(roleID: roleID) }
+                controller.triggerSpeaker(roleID: roleID)
             }
         }
     }
@@ -1570,18 +1476,10 @@ struct ChatRoomDetailView: View {
                 .font(.callout)
             Spacer()
             Button("追加一轮") {
-                do {
-                    try loop.addRoundFromPause(runtime: runtime)
-                } catch {
-                    flowError = error.localizedDescription
-                }
+                controller.addRoundFromPause()
             }
             Button("接受并完成") {
-                do {
-                    try loop.completeFromPause(runtime: runtime)
-                } catch {
-                    flowError = error.localizedDescription
-                }
+                controller.completeFromPause()
             }
         }
         .padding(.horizontal, 12)
@@ -1642,66 +1540,22 @@ struct ChatRoomDetailView: View {
     
     // MARK: - 辅助方法
 
-    private func loadMessages() {
-        do {
-            runtime.messages = try ChatRoomStore.shared.loadMessages(for: chatroom.id)
-        } catch {
-            flowError = error.localizedDescription
-        }
-    }
-
     private func sendUserMessage() {
         guard !inputText.isEmpty else { return }
-        do {
-            try loop.userSpeak(content: inputText, runtime: runtime)
-            inputText = ""
-        } catch {
-            flowError = error.localizedDescription
-        }
+        controller.userSpeak(content: inputText)
+        inputText = ""
     }
 
     private func endDiscussion(_ mode: ChatRoomDiscussionEndMode) {
-        do {
-            try loop.advancePhase(runtime: runtime, discussionEnd: mode)
-        } catch {
-            flowError = error.localizedDescription
-        }
+        controller.endDiscussion(mode)
     }
 
     private func advancePhase() {
-        do {
-            try loop.advancePhase(runtime: runtime)
-        } catch {
-            flowError = error.localizedDescription
-        }
+        controller.advancePhase()
     }
 
     private func review(approved: Bool) {
-        do {
-            try loop.handleReviewResult(runtime: runtime, approved: approved)
-        } catch {
-            flowError = error.localizedDescription
-        }
-    }
-
-    private func triggerNextSpeaker() async {
-        do {
-            try await loop.triggerNextSpeaker(runtime: runtime)
-        } catch is CancellationError {
-            // 用户停止运行，不算错误
-        } catch {
-            flowError = error.localizedDescription
-        }
-    }
-
-    private func triggerSpeaker(roleID: String) async {
-        do {
-            try await loop.triggerSpeaker(roleID: roleID, runtime: runtime)
-        } catch is CancellationError {
-            // 用户停止运行，不算错误
-        } catch {
-            flowError = error.localizedDescription
-        }
+        controller.review(approved: approved)
     }
     
     private func groupMessagesByPhase() -> [(phase: ChatRoomPhase, messages: [ChatRoomMessage])] {
@@ -2051,9 +1905,11 @@ struct RolePickerSheet: View {
 #Preview {
     ChatRoomDetailView(
         viewModel: NewPiViewModel(),
-        chatroom: ChatRoom(
-            name: "测试聊天室",
-            projectPath: "/tmp"
+        controller: ChatRoomFlowController(
+            chatroom: ChatRoom(
+                name: "测试聊天室",
+                projectPath: "/tmp"
+            )
         )
     )
 }

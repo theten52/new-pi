@@ -31,10 +31,12 @@
 		AA00000C0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB00000C0000000000000001 /* Assets.xcassets */; };
 		AA00000D0000000000000001 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = BB00000D0000000000000001 /* AppIcon.icns */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
+		AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000260000000000000001 /* NewPiChatRoomStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
+		BB0000260000000000000001 /* NewPiChatRoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomStore.swift; sourceTree = "<group>"; };
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
@@ -105,6 +107,7 @@
 				BB0000230000000000000001 /* ImageAttachmentProcessor.swift */,
 				BB0000240000000000000001 /* AttachmentSchemeHandler.swift */,
 				BB0000250000000000000001 /* AttachmentPreviewWindow.swift */,
+				BB0000260000000000000001 /* NewPiChatRoomStore.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
 				BB00000C0000000000000001 /* Assets.xcassets */,
 				BB00000D0000000000000001 /* AppIcon.icns */,
@@ -219,6 +222,7 @@
 				AA0000230000000000000001 /* ImageAttachmentProcessor.swift in Sources */,
 				AA0000240000000000000001 /* AttachmentSchemeHandler.swift in Sources */,
 				AA0000250000000000000001 /* AttachmentPreviewWindow.swift in Sources */,
+				AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
