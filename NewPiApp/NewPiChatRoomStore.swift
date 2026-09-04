@@ -21,6 +21,9 @@ final class ChatRoomFlowController: ObservableObject {
     private var runningTask: Task<Void, Never>?
     /// 流程错误（view 层 alert 展示；原 DetailView 的 @State flowError 上移）。
     @Published var flowError: String?
+    /// transcript 适配层（CHATROOM-FLAT-MD Phase 2）：派生 id 缓存随控制器存活，
+    /// 保证 diff 期间 phase 分隔行 / 工具卡的条目 id 稳定。
+    private var transcriptAdapter = ChatRoomTranscriptAdapter()
     private var cancellables: Set<AnyCancellable> = []
 
     init(chatroom: ChatRoom) {
@@ -72,6 +75,12 @@ final class ChatRoomFlowController: ObservableObject {
     func cancelRunning() {
         runningTask?.cancel()
         runningTask = nil
+    }
+
+    /// 消息 → transcript items（CHATROOM-FLAT-MD Phase 2，视图每次更新时调用；
+    /// O(n) 全量重算，聊天室消息量级小，可接受）。
+    func transcriptSnapshot() -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) {
+        transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles)
     }
 
     func userSpeak(content: String) {

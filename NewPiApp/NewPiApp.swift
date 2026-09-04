@@ -1306,49 +1306,65 @@ struct ChatRoomDetailView: View {
     }
     
     // MARK: - 消息列表
-    
-    private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    // 按阶段分组显示（同一阶段在多轮执行/Review 后会出现多次，
-                    // 用组序号做 ID，不能用 phase 本身）
-                    let groupedMessages = groupMessagesByPhase()
 
-                    ForEach(Array(groupedMessages.enumerated()), id: \.offset) { _, group in
-                        Section {
-                            ForEach(group.messages) { message in
-                                ChatRoomMessageView(message: message, roles: runtime.chatroom.roles)
-                                    .id(message.id)
-                            }
-                        } header: {
-                            PhaseHeader(phase: group.phase)
-                        }
+    /// 单文档控制器（CHATROOM-FLAT-MD Phase 2）：与 session 同一条渲染管线。
+    /// 注意：切换选择时 DetailView 被销毁，WebView 冷渲染 + restoreAnchor 恢复位置
+    /// （与 session 切换的 reset 重建同级体验；消息数据由长命 FlowController 保暖）。
+    @StateObject private var docController = TranscriptDocumentController()
+
+    private var messageList: some View {
+        // 消息 → transcript items（无流式：isStreaming 恒 false；无 fork/折叠组：
+        // 条目 messageIndex/detailTurnID 均为 nil，JS 不渲染 Fork 按钮）。
+        let snapshot = controller.transcriptSnapshot()
+        let chatroomUUID = UUID(uuidString: runtime.chatroom.id)
+        return ZStack(alignment: .bottom) {
+            NewPiTranscriptDocumentView(
+                transcript: snapshot.items,
+                isStreaming: false,
+                streamingBubbleComplete: true,
+                storeKey: chatroomUUID,
+                controller: docController,
+                tintHues: snapshot.tintHues,
+                restoreEntry: chatroomUUID.flatMap { ScrollPositionStore.shared.entry(for: $0) },
+                onFork: nil
+            )
+            .overlay(alignment: .bottom) {
+                if !docController.isNearBottom {
+                    Button {
+                        docController.scrollToBottom()
+                    } label: {
+                        Label("Jump to latest", systemImage: "arrow.down")
+                            .font(.callout.weight(.medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.regularMaterial, in: Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                            )
                     }
-                    
-                    // 当前发言者指示
-                    if runtime.isRunning {
-                        HStack {
-                            if let speaker = runtime.currentSpeaker {
-                                Image(systemName: speaker.icon)
-                                    .font(.caption)
-                                Text("\(speaker.name) 正在思考...")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal)
-                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 12)
+                    .transition(.opacity)
                 }
-                .padding()
             }
-            .onChange(of: runtime.messages.count) { _, _ in
-                if let lastMessage = runtime.messages.last {
-                    withAnimation {
-                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                    }
+
+            // 当前发言者指示：保留原生浮层，不进文档。
+            if runtime.isRunning, let speaker = runtime.currentSpeaker {
+                HStack(spacing: 6) {
+                    Image(systemName: speaker.icon)
+                        .font(.caption)
+                    Text("\(speaker.name) 正在思考...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.leading, 12)
+                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -1558,30 +1574,6 @@ struct ChatRoomDetailView: View {
         controller.review(approved: approved)
     }
     
-    private func groupMessagesByPhase() -> [(phase: ChatRoomPhase, messages: [ChatRoomMessage])] {
-        var groups: [(phase: ChatRoomPhase, messages: [ChatRoomMessage])] = []
-        var currentPhase: ChatRoomPhase?
-        var currentMessages: [ChatRoomMessage] = []
-        
-        for message in runtime.messages {
-            if message.phase != currentPhase {
-                if let phase = currentPhase {
-                    groups.append((phase: phase, messages: currentMessages))
-                }
-                currentPhase = message.phase
-                currentMessages = [message]
-            } else {
-                currentMessages.append(message)
-            }
-        }
-        
-        if let phase = currentPhase {
-            groups.append((phase: phase, messages: currentMessages))
-        }
-        
-        return groups
-    }
-    
     private func extractCandidates() -> [CandidateOption] {
         for message in runtime.messages.reversed() {
             if let candidates = message.candidates, !candidates.isEmpty {
@@ -1589,137 +1581,6 @@ struct ChatRoomDetailView: View {
             }
         }
         return []
-    }
-}
-
-// MARK: - 消息视图
-
-struct ChatRoomMessageView: View {
-    let message: ChatRoomMessage
-    let roles: [ChatRoomRole]
-    
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            // 头像
-            Image(systemName: roleIcon)
-                .font(.caption)
-                .frame(width: 24, height: 24)
-                .background(Color.accentColor.opacity(0.1))
-                .clipShape(Circle())
-            
-            VStack(alignment: .leading, spacing: 4) {
-                // 角色名
-                Text(roleName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                
-                // 内容
-                Text(message.content)
-                    .font(.body)
-                
-                // 候选方案
-                if let candidates = message.candidates, !candidates.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("候选方案:")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(candidates) { option in
-                            HStack {
-                                Image(systemName: "circle.fill")
-                                    .font(.system(size: 6))
-                                Text(option.title)
-                                    .font(.caption)
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .background(.quaternary.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-
-                // 工具调用
-                if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("工具调用:")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(toolCalls, id: \.id) { call in
-                            ToolCallRow(
-                                call: call,
-                                result: message.toolResults?.first(where: { $0.toolCallID == call.id })
-                            )
-                        }
-                    }
-                    .padding(8)
-                    .background(.quaternary.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-            }
-            
-            Spacer()
-        }
-    }
-    
-    private var roleIcon: String {
-        if message.isUserMessage {
-            return "person.fill"
-        }
-        return roles.first(where: { $0.id == message.roleID })?.icon ?? "person.fill"
-    }
-    
-    private var roleName: String {
-        if message.isUserMessage {
-            return "用户"
-        }
-        return roles.first(where: { $0.id == message.roleID })?.name ?? "未知"
-    }
-}
-
-// MARK: - 阶段标题
-
-struct PhaseHeader: View {
-    let phase: ChatRoomPhase
-    
-    var body: some View {
-        HStack {
-            Image(systemName: phaseIcon)
-            Text(phaseName)
-                .font(.caption)
-                .fontWeight(.medium)
-            Spacer()
-        }
-        .padding(.vertical, 4)
-        .foregroundStyle(phaseColor)
-    }
-    
-    private var phaseName: String {
-        switch phase {
-        case .discussion: "讨论"
-        case .voting: "投票"
-        case .execution: "执行"
-        case .review: "Review"
-        case .completed: "完成"
-        }
-    }
-    
-    private var phaseIcon: String {
-        switch phase {
-        case .discussion: "bubble.left.and.bubble.right"
-        case .voting: "checkmark.circle"
-        case .execution: "hammer"
-        case .review: "magnifyingglass"
-        case .completed: "checkmark.seal"
-        }
-    }
-    
-    private var phaseColor: Color {
-        switch phase {
-        case .discussion: .blue
-        case .voting: .orange
-        case .execution: .green
-        case .review: .purple
-        case .completed: .gray
-        }
     }
 }
 
@@ -1766,63 +1627,6 @@ struct VoteSheet: View {
     }
 }
 
-// MARK: - 工具调用行
-
-struct ToolCallRow: View {
-    let call: ChatRoomToolCall
-    let result: ChatRoomToolResult?
-    @State private var expanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Image(systemName: "wrench.and.screwdriver")
-                    .font(.caption2)
-                Text(call.name)
-                    .font(.caption.monospaced())
-                if let result {
-                    Image(systemName: result.isError ? "xmark.circle.fill" : "checkmark.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(result.isError ? .red : .green)
-                }
-                Spacer()
-                Button {
-                    expanded.toggle()
-                } label: {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
-                }
-                .buttonStyle(.plain)
-            }
-            Text(call.arguments)
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if expanded {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("参数:")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(call.arguments)
-                        .font(.caption2.monospaced())
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if let result {
-                        Text("结果\(result.isError ? "（失败）" : ""):")
-                            .font(.caption2)
-                            .foregroundStyle(result.isError ? .red : .secondary)
-                        Text(result.output)
-                            .font(.caption2.monospaced())
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .padding(6)
-                .background(.background)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
-        }
-    }
-}
 
 // MARK: - 工具审批 Sheet
 

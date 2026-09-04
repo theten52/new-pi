@@ -846,7 +846,9 @@
       card.className = "card answer";
       const hd = document.createElement("div");
       hd.className = "answer-hd";
-      hd.textContent = op.kind === "summary" ? "Summary" : "NewPi";
+      // speaker（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言显示角色名，session 路径仍为 NewPi。
+      // 注意 header 只在首次渲染创建——speaker 按条目 id 固定（消息→角色不变），无更新问题。
+      hd.textContent = op.kind === "summary" ? "Summary" : (op.speaker || "NewPi");
       const article = document.createElement("article");
       article.className = "markdown-body article";
       card.appendChild(hd);

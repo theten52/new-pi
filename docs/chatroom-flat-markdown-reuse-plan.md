@@ -162,10 +162,11 @@ tint：`hue(for roleID:)` 用 **FNV-1a 哈希**（已与需求方确认，不用
 
 **F. JS/CSS 增量（同一份 `transcript-document.js/css`，加分支不加 fork）**
 
-- op 新增可选字段 `speaker: String`；`renderAssistant` 有 speaker 时在气泡上方插一行
-  caption（角色名，`.msg-speaker` class，小字号次级色，可配 `border-left` 或色点呼应 tint）。
+- op 新增可选字段 `speaker: String`；`renderAssistant` 有 speaker 时气泡头部标签
+  （现成 `.answer-hd`，session 显示 "NewPi" 的位置）改显角色名——比新增 caption 行更简单，
+  视觉一致（实现时对方案的微调）。
 - `signature(...)` 把 speaker 纳入相等性（改角色名要触发重渲染）。
-- css 加 `.msg-speaker` 样式；不碰现有选择器。
+- 不新增 CSS（复用 `.answer-hd`）；不碰现有选择器。
 - session 路径不下发 speaker 字段 → 零影响。
 
 **G. `ChatRoomDetailView` 消息区替换**

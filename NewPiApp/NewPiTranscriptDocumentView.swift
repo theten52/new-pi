@@ -287,7 +287,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             let forkMeta = item.canFork && item.messageIndex != nil
                 ? item.messageIndex.map(String.init) ?? "-"
                 : "-"
-            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(forkMeta)|\(item.body)"
+            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(forkMeta)|\(item.speaker ?? "-")|\(item.body)"
         }
 
         private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> [String: Any] {
@@ -300,6 +300,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let tint { op["tint"] = tint }
             if let command = item.toolCommand { op["command"] = command }
             if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
+            // 发言者名字（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言专用，session 路径不下发。
+            if let speaker = item.speaker { op["speaker"] = speaker }
             // 可 fork 条目的分叉能力元数据（JS 侧据此显示 Fork 按钮）。
             if item.canFork, let messageIndex = item.messageIndex {
                 op["canFork"] = true

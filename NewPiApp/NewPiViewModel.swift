@@ -43,6 +43,9 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let detailTurnID: String?
     /// 用户消息附带的图片附件（BACKLOG-IMAGE-INPUT）；仅 user 条目非空。
     let attachments: [MessageAttachment]
+    /// 发言者名字（CHATROOM-FLAT-MD Phase 2）：仅聊天室角色发言的 assistant 条目非空，
+    /// JS 侧用它渲染气泡头部标签（替代 session 路径的 "NewPi"）。
+    let speaker: String?
 
     init(
         id: UUID = UUID(),
@@ -52,7 +55,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         messageIndex: Int? = nil,
         sessionEntryID: String? = nil,
         detailTurnID: String? = nil,
-        attachments: [MessageAttachment] = []
+        attachments: [MessageAttachment] = [],
+        speaker: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -62,6 +66,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.sessionEntryID = sessionEntryID
         self.detailTurnID = detailTurnID
         self.attachments = attachments
+        self.speaker = speaker
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
