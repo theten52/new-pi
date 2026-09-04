@@ -242,6 +242,8 @@ struct NewPiRootView: View {
                     } label: {
                         Label("编辑聊天室", systemImage: "pencil")
                     }
+                    // 运行中禁编辑（对齐 DetailView 编辑菜单的守卫；review #2）
+                    .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
                     Button(role: .destructive) {
                         chatroomToDelete = chatroom
                     } label: {
@@ -286,6 +288,10 @@ struct NewPiRootView: View {
                         controller: chatroomStore.controller(for: chatroom)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // A→B 直切时强制重建（对齐 session 按 sessionID 分视图身份的机制）：
+                    // 否则 @StateObject docController 与内部 WKWebView 复用，coordinator.sessionID
+                    // 仍是上一个聊天室的 key——滚动锚点串号且不恢复（review #1）。
+                    .id(chatroom.id)
                 } else {
                     NewPiChatView(viewModel: viewModel)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -354,8 +360,8 @@ struct NewPiRootView: View {
                 viewModel: viewModel,
                 chatroom: chatroom,
                 conversationStarted: ChatRoomStore.shared.hasMessages(for: chatroom.id)
-            ) { _ in
-                chatroomStore.reload()
+            ) { updated in
+                chatroomStore.applyEdit(updated)
             }
         }
         .confirmationDialog(

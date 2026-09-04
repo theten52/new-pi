@@ -152,6 +152,22 @@ final class ChatRoomRuntimeStore: ObservableObject {
         return controller
     }
 
+    /// 编辑后的配置同步（review #2）：除刷新列表镜像外，若该聊天室的 FlowController
+    /// 已缓存，必须同步 runtime.chatroom——否则 detail 头部显示旧配置，且下次流程动作
+    /// persistRuntimeState 会用旧副本回写、覆盖刚编辑的内容。运行中不同步（编辑入口
+    /// 在运行时应被禁用，这里亦防一手）。
+    func applyEdit(_ updated: ChatRoom) {
+        reload()
+        if let controller = controllers[updated.id], !controller.runtime.isRunning {
+            controller.runtime.chatroom = updated
+        }
+    }
+
+    /// 某聊天室是否正在运行（供 sidebar 编辑入口做禁用守卫；未缓存的控制器视为未运行）。
+    func isRunning(chatroomID: String) -> Bool {
+        controllers[chatroomID]?.runtime.isRunning ?? false
+    }
+
     /// 删除聊天室：磁盘配置 + 运行时缓存 + 列表镜像一并清理。
     func delete(_ chatroom: ChatRoom) throws {
         try ChatRoomStore.shared.delete(id: chatroom.id)
