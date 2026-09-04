@@ -313,3 +313,451 @@ struct NewPiRootView: View {
 #Preview {
     NewPiRootView()
 }
+
+// MARK: - ChatRoom List View (临时实现)
+
+struct ChatRoomListView: View {
+    @ObservedObject var viewModel: NewPiViewModel
+    @State private var chatrooms: [ChatRoom] = []
+    @State private var showingCreateSheet = false
+    @State private var selectedChatroom: ChatRoom?
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // 标题
+            HStack {
+                Text("聊天室")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showingCreateSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("创建聊天室")
+            }
+            
+            // 聊天室列表
+            if chatrooms.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("暂无聊天室")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text("创建一个聊天室，让多个 AI 模型协作完成任务")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(chatrooms) { chatroom in
+                            ChatRoomRow(chatroom: chatroom) {
+                                selectedChatroom = chatroom
+                            }
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+            
+            // 错误信息
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .frame(minWidth: 300)
+        .onAppear {
+            loadChatrooms()
+        }
+        .sheet(isPresented: $showingCreateSheet) {
+            CreateChatRoomView(viewModel: viewModel) { chatroom in
+                chatrooms.insert(chatroom, at: 0)
+            }
+        }
+        .sheet(item: $selectedChatroom) { chatroom in
+            ChatRoomDetailView(viewModel: viewModel, chatroom: chatroom)
+        }
+    }
+    
+    private func loadChatrooms() {
+        do {
+            chatrooms = try ChatRoomStore.shared.listAll()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+struct ChatRoomRow: View {
+    let chatroom: ChatRoom
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(chatroom.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Spacer()
+                    PhaseBadge(phase: chatroom.currentPhase)
+                }
+                
+                if !chatroom.description.isEmpty {
+                    Text(chatroom.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                
+                HStack {
+                    // 角色图标
+                    HStack(spacing: 4) {
+                        ForEach(chatroom.configuredRoles) { role in
+                            Image(systemName: role.icon)
+                                .font(.caption2)
+                                .help(role.name)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    // 轮数
+                    if chatroom.currentPhase == .execution || chatroom.currentPhase == .review {
+                        Text("第 \(chatroom.reviewRoundCount) 轮")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    // 时间
+                    Text(chatroom.updatedAt.formatted(.relative(presentation: .named)))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding()
+            .background(.quaternary.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct PhaseBadge: View {
+    let phase: ChatRoomPhase
+    
+    var body: some View {
+        Text(phaseName)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(phaseColor.opacity(0.2))
+            .foregroundStyle(phaseColor)
+            .clipShape(Capsule())
+    }
+    
+    private var phaseName: String {
+        switch phase {
+        case .discussion: "讨论"
+        case .voting: "投票"
+        case .execution: "执行"
+        case .review: "Review"
+        case .completed: "完成"
+        }
+    }
+    
+    private var phaseColor: Color {
+        switch phase {
+        case .discussion: .blue
+        case .voting: .orange
+        case .execution: .green
+        case .review: .purple
+        case .completed: .gray
+        }
+    }
+}
+
+// MARK: - Create ChatRoom View (临时实现)
+
+struct CreateChatRoomView: View {
+    @ObservedObject var viewModel: NewPiViewModel
+    @Environment(\.dismiss) private var dismiss
+    
+    let onCreate: (ChatRoom) -> Void
+    
+    @State private var name = ""
+    @State private var description = ""
+    @State private var projectPath = ""
+    @State private var roles: [ChatRoomRole] = PresetRoleType.allCases.map { ChatRoomRole.from(preset: $0) }
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("基本信息") {
+                    TextField("名称", text: $name)
+                    TextField("描述", text: $description)
+                    HStack {
+                        TextField("项目文件夹", text: $projectPath)
+                        Button("选择…") {
+                            selectFolder()
+                        }
+                    }
+                }
+                
+                Section("角色配置") {
+                    ForEach($roles) { $role in
+                        RoleConfigRow(
+                            role: $role,
+                            providerProfiles: viewModel.providerConfig.profiles
+                        )
+                    }
+                }
+                
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .padding()
+            .frame(minWidth: 500, minHeight: 400)
+            .navigationTitle("创建聊天室")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("创建") {
+                        createChatroom()
+                    }
+                    .disabled(name.isEmpty || projectPath.isEmpty)
+                }
+            }
+        }
+    }
+    
+    private func selectFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择项目文件夹"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            projectPath = url.path
+        }
+    }
+    
+    private func createChatroom() {
+        guard !name.isEmpty else {
+            errorMessage = "请输入名称"
+            return
+        }
+        guard !projectPath.isEmpty else {
+            errorMessage = "请选择项目文件夹"
+            return
+        }
+        
+        let chatroom = ChatRoom(
+            name: name,
+            description: description,
+            roles: roles,
+            projectPath: projectPath
+        )
+        
+        do {
+            try ChatRoomStore.shared.save(chatroom)
+            onCreate(chatroom)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+struct RoleConfigRow: View {
+    @Binding var role: ChatRoomRole
+    let providerProfiles: [ProviderProfile]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: role.icon)
+                    .frame(width: 20)
+                Text(role.name)
+                    .font(.headline)
+            }
+            
+            Text(role.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            
+            HStack {
+                // Provider 选择
+                Picker("Provider", selection: $role.providerProfileID) {
+                    Text("未选择").tag(nil as String?)
+                    ForEach(providerProfiles) { profile in
+                        Text(profile.name).tag(profile.id as String?)
+                    }
+                }
+                .frame(width: 150)
+                
+                // Model 选择
+                if let providerID = role.providerProfileID,
+                   let profile = providerProfiles.first(where: { $0.id == providerID }) {
+                    Picker("Model", selection: $role.modelID) {
+                        Text("未选择").tag(nil as String?)
+                        ForEach(profile.models, id: \.self) { model in
+                            Text(model).tag(model as String?)
+                        }
+                    }
+                    .frame(width: 150)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - ChatRoom Detail View (简化实现)
+
+struct ChatRoomDetailView: View {
+    @ObservedObject var viewModel: NewPiViewModel
+    let chatroom: ChatRoom
+    
+    @Environment(\.dismiss) private var dismiss
+    @State private var messages: [ChatRoomMessage] = []
+    @State private var inputText = ""
+    @State private var isRunning = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // 标题栏
+            HStack {
+                VStack(alignment: .leading) {
+                    Text(chatroom.name)
+                        .font(.headline)
+                    PhaseBadge(phase: chatroom.currentPhase)
+                }
+                Spacer()
+                Button("关闭") { dismiss() }
+            }
+            .padding()
+            .background(.bar)
+            
+            // 消息列表
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(messages) { message in
+                        ChatRoomMessageRow(message: message, roles: chatroom.roles)
+                    }
+                }
+                .padding()
+            }
+            
+            // 输入栏
+            HStack {
+                TextField("输入消息...", text: $inputText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        sendUserMessage()
+                    }
+                
+                Button("发送") {
+                    sendUserMessage()
+                }
+                .disabled(inputText.isEmpty)
+            }
+            .padding()
+            .background(.bar)
+        }
+        .frame(minWidth: 700, minHeight: 500)
+        .onAppear {
+            loadMessages()
+        }
+    }
+    
+    private func loadMessages() {
+        do {
+            messages = try ChatRoomStore.shared.loadMessages(for: chatroom.id)
+        } catch {
+            print("加载消息失败: \(error)")
+        }
+    }
+    
+    private func sendUserMessage() {
+        guard !inputText.isEmpty else { return }
+        
+        let message = ChatRoomMessage(
+            chatroomID: chatroom.id,
+            roleID: "user",
+            content: inputText,
+            phase: chatroom.currentPhase
+        )
+        
+        messages.append(message)
+        
+        do {
+            try ChatRoomStore.shared.appendMessage(message, to: chatroom.id)
+        } catch {
+            print("保存消息失败: \(error)")
+        }
+        
+        inputText = ""
+    }
+}
+
+struct ChatRoomMessageRow: View {
+    let message: ChatRoomMessage
+    let roles: [ChatRoomRole]
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // 头像
+            Image(systemName: roleIcon)
+                .font(.caption)
+                .frame(width: 24, height: 24)
+                .background(Color.accentColor.opacity(0.1))
+                .clipShape(Circle())
+            
+            VStack(alignment: .leading, spacing: 4) {
+                // 角色名
+                Text(roleName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                // 内容
+                Text(message.content)
+                    .font(.body)
+            }
+            
+            Spacer()
+        }
+    }
+    
+    private var roleIcon: String {
+        if message.isUserMessage {
+            return "person.fill"
+        }
+        return roles.first(where: { $0.id == message.roleID })?.icon ?? "person.fill"
+    }
+    
+    private var roleName: String {
+        if message.isUserMessage {
+            return "用户"
+        }
+        return roles.first(where: { $0.id == message.roleID })?.name ?? "未知"
+    }
+}
