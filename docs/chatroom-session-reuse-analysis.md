@@ -65,6 +65,36 @@
 
 ### Phase B：引擎级复用（架构完全体）——角色发言迁移到 AgentSession
 
+> **✅ 已实施（2026-09-06，commit 见 git log）**。实际落地与下述规划有一处
+> 偏差：**直接驱动 `AgentLoop` 而非 `AgentSession`**——AgentSession 的
+> 持久化/fork/标签等会话语义与聊天室「共享历史 + 发言间检查点」模型冲突
+> （每个角色的 AgentContext 都是每次发言重建的共享历史投影，跨发言保留
+> 会话壳只会引入分叉）。AgentLoop 直驱保留了全部目标收益。
+
+已落地：
+- **引擎工厂注入**：`ChatRoomLoop(engineProvider:mcpToolsProvider:)`，由
+  `ChatRoomFlowController` 用 providers.json 构造 `ChatRoomRoleEngine(llm:model:)`
+  （多模型 = 每角色不同组合）
+- **完整工具链**：`chatroomTools` = Read/Write/Edit/Bash（edit 快照挂项目目录）
+  + `MCPToolLoader.loadAgentTools()` 注入；不再使用聊天室自制工具集
+- **统一审批桥**：`ChatRoomApprovalManager.approvalDecision(for:roleID:roleName:)`
+  把 AgentLoop 的 `ToolApprovalRequest` 映射到聊天室审批卡片（同意 = allowOnce，
+  授权不跨发言持久化，保留决策 #10/#18 的简化语义）；
+  策略 = `requireApprovalFor: ["write", "edit", "bash"]`（读自动过，写类需审批，
+  bash 按写类处理）
+- **steering 插话**：发言进行中 `userSpeak` 双写（共享历史 + steering 队列），
+  AgentLoop 在工具批次间把插话投喂给正在发言的模型
+- **turn 内压缩**：AgentLoopConfig.compaction = recommended(minWindow)，长工具
+  循环（如 500 轮）不再撑爆上下文；发言间检查点压缩继续并存
+- **用量统计**：`ChatRoomRuntime.usage` 逐发言累加（messageEnd 事件）
+- **context 构建**：`ChatRoomContextBuilder.buildAgentContext` 产出 AgentMessage
+  形态（署名/合并/检查点/首 user 兜底逻辑与旧路径一致），触发消息由 AgentLoop
+  的 prompt 承担
+- **回退保留**：`engineProvider == nil` 时走旧 `chatWithEvents` 路径（Phase B
+  前的行为），旧路径与全部旧测试保持绿色
+
+规划中的原始条目（保留作对照）：
+
 「对话可复用」的完全体：**每个角色 = 一个 AgentSession**，发言 = 一次 `prompt` run。
 
 直接获得的能力：

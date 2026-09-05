@@ -1191,6 +1191,298 @@ struct ChatRoomCompactionTests {
     }
 }
 
+// MARK: - 引擎路径（Phase B：AgentLoop 直驱）
+
+@Suite("ChatRoomLoop 引擎路径")
+@MainActor
+struct ChatRoomEngineSpeechTests {
+    private final class StreamCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        private var seenMessageCounts: [Int] = []
+        func next(messageCount: Int) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            seenMessageCounts.append(messageCount)
+            let index = self.count
+            self.count += 1
+            return index
+        }
+        var history: [Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            return seenMessageCounts
+        }
+    }
+
+    /// LLMProvider 级 mock（引擎路径的真实输入形态）
+    private struct EngineMockLLMProvider: LLMProvider {
+        let responder: @Sendable (Int, [AgentMessage]) -> [LLMStreamEvent]
+
+        func stream(
+            model: ModelConfig,
+            systemPrompt: String,
+            messages: [AgentMessage],
+            tools: [ToolDefinition]
+        ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            AsyncThrowingStream { continuation in
+                for event in responder(messages.count, messages) {
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    private struct ThrowingLLMProvider: LLMProvider {
+        func stream(
+            model: ModelConfig,
+            systemPrompt: String,
+            messages: [AgentMessage],
+            tools: [ToolDefinition]
+        ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.finish(throwing: LLMErrorMock())
+            }
+        }
+    }
+
+    private struct LLMErrorMock: Error {}
+
+    private func makeEngineLoop(
+        llm: any LLMProvider,
+        store: ChatRoomStore
+    ) -> ChatRoomLoop {
+        ChatRoomLoop(
+            store: store,
+            llmFactory: nil,
+            engineProvider: { _ in
+                ChatRoomRoleEngine(llm: llm, model: ModelConfig(provider: "mock", modelID: "engine-model"))
+            }
+        )
+    }
+
+    @Test("engine speak streams text into provisional and finalizes")
+    func engineStreamsText() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-engine-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "引擎测试", roles: [role], projectPath: "/tmp/p")
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        let llm = EngineMockLLMProvider { callIndex, _ in
+            [
+                .textDelta("引擎"),
+                .textDelta("正文"),
+                .completed(stopReason: .stop, usage: UsageStats(inputTokens: 10, outputTokens: 5)),
+            ]
+        }
+        let loop = makeEngineLoop(llm: llm, store: store)
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        #expect(runtime.messages.count == 1)
+        #expect(runtime.messages.last?.content == "引擎正文")
+        // 用量累计（messageEnd(.assistant)）
+        #expect(runtime.usage.outputTokens == 5)
+        // 落盘一次
+        let persisted = try store.loadMessages(for: chatroom.id)
+        #expect(persisted.count == 1)
+        #expect(persisted.last?.content == "引擎正文")
+    }
+
+    @Test("engine tool events map to tool cards with results")
+    func engineToolCards() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-engine-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "引擎读到的内容".write(to: dir.appendingPathComponent("hello.txt"), atomically: true, encoding: .utf8)
+
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "引擎工具测试", roles: [role], projectPath: dir.path)
+        let storeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-engine-store-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: storeDir)
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        let llm = EngineMockLLMProvider { messageCount, _ in
+            if messageCount <= 1 {
+                return [
+                    .toolCall(ToolCallContent(
+                        id: "call-1",
+                        name: "read",
+                        arguments: .object(["path": .string("hello.txt")])
+                    ))
+                ]
+            }
+            return [
+                .textDelta("读完了"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ]
+        }
+        let loop = makeEngineLoop(llm: llm, store: store)
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // 工具卡：BuiltInTools 的 read 真实执行（读自动过）
+        #expect(runtime.messages.last?.toolCalls?.first?.name == "read")
+        #expect(runtime.messages.last?.toolResults?.first?.output.contains("引擎读到的内容") == true)
+        #expect(runtime.messages.last?.toolResults?.first?.isError == false)
+        #expect(runtime.messages.last?.content == "读完了")
+    }
+
+    @Test("steering enqueued mid-run reaches the model and lands in history")
+    func steeringReachesModel() async throws {
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "steering 测试", roles: [role], projectPath: "/tmp/p")
+        let storeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-steer-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: storeDir)
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        // 第 0 次调用先发起一次工具调用（触发 steering 轮询），
+        // 第 1 次调用回显收到的消息数（应包含插话）
+        let callIndex = StreamCounter()
+        let llm = EngineMockLLMProvider { _, messages in
+            if callIndex.next(messageCount: messages.count) == 0 {
+                return [
+                    .toolCall(ToolCallContent(
+                        id: "call-s",
+                        name: "read",
+                        arguments: .object(["path": .string("whatever.txt")])
+                    ))
+                ]
+            }
+            let labels = messages.map { message -> String in
+                switch message {
+                case .user(let u): return "user:\(u.content.prefix(12))"
+                case .assistant(let a): return "assistant:\(a.text.prefix(12))"
+                case .toolResult(let t): return "tool:\(t.content.prefix(12))"
+                case .compactionSummary: return "summary"
+                }
+            }.joined(separator: ",")
+            return [.textDelta("共收到 \(messages.count) 条[\(labels)]"), .completed(stopReason: .stop, usage: UsageStats())]
+        }
+        let loop = makeEngineLoop(llm: llm, store: store)
+
+        // 预注入 steering：等价于发言中 userSpeak 的双写（队列 + 共享历史）
+        loop.enqueueSteering(.user(UserMessage(content: "插话：优先看主文件")))
+        runtime.messages.append(ChatRoomMessage(
+            chatroomID: chatroom.id,
+            roleID: "user",
+            content: "插话：优先看主文件",
+            phase: .discussion
+        ))
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // 插话落在共享历史
+        #expect(runtime.messages.contains { $0.roleID == "user" && $0.content.contains("插话") })
+        // 模型在工具批次后的下一轮看到了插话：
+        // prompt(trigger) + assistant(工具调用) + toolResult + steering = 4 条
+        let finalContent = runtime.messages.last?.content ?? ""
+        // 模型在工具批次后的下一轮看到了插话：
+        // [user(插话+trigger 合并), assistant(toolcall), toolResult, steering] = 4 条
+        #expect(finalContent.contains("共收到 4 条"), "actual content: \(finalContent)")
+    }
+
+    @Test("trailing user history merges with the trigger (no consecutive user roles)")
+    func trailingUserMergesTrigger() async throws {
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "合并触发测试", roles: [role], projectPath: "/tmp/p")
+        let storeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-merge-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: storeDir)
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        // 共享历史以 user 结尾（插话后推进的常见形态）
+        runtime.messages.append(ChatRoomMessage(
+            chatroomID: chatroom.id,
+            roleID: "user",
+            content: "插话：用 SwiftUI 实现",
+            phase: .discussion
+        ))
+
+        final class Capture: @unchecked Sendable {
+            var labels: [String] = []
+        }
+        let capture = Capture()
+        let llm = EngineMockLLMProvider { _, messages in
+            capture.labels = messages.map { message -> String in
+                switch message {
+                case .user(let u): return "user:\(u.content)"
+                case .assistant(let a): return "assistant:\(a.text)"
+                case .toolResult: return "tool"
+                case .compactionSummary: return "summary"
+                }
+            }
+            return [.textDelta("收到"), .completed(stopReason: .stop, usage: UsageStats())]
+        }
+        let loop = makeEngineLoop(llm: llm, store: store)
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // 触发消息并入末条 user：单条消息同时含插话与身份指令，且无连续 user
+        #expect(capture.labels.count == 1)
+        #expect(capture.labels[0].contains("插话：用 SwiftUI 实现"))
+        #expect(capture.labels[0].contains("请以【程序员】的身份发言"))
+    }
+
+    @Test("LLM failure is surfaced as an error note on the finalized message")
+    func engineFailureNote() async throws {
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "失败测试", roles: [role], projectPath: "/tmp/p")
+        let storeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-fail-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: storeDir)
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        let loop = makeEngineLoop(llm: ThrowingLLMProvider(), store: store)
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // AgentLoop 把 LLM 异常转为 .error 事件 → 发言以失败标记定型（不抛出、不丢工具记录）
+        #expect(runtime.messages.last?.content.contains("发言失败") == true)
+    }
+
+    @Test("approval bridge converts decisions and resumes the loop wait")
+    func approvalBridge() async {
+        let manager = ChatRoomApprovalManager()
+        let request = ToolApprovalRequest(
+            id: "req-1",
+            toolName: "write",
+            arguments: .object(["path": .string("a.swift")]),
+            summary: "写入文件: a.swift"
+        )
+
+        let task = Task {
+            await manager.approvalDecision(for: request, roleID: "programmer", roleName: "程序员")
+        }
+        for _ in 0 ..< 1000 where manager.pendingApprovals.isEmpty {
+            await Task.yield()
+        }
+        #expect(manager.pendingApprovals.count == 1)
+
+        manager.approve(id: manager.pendingApprovals[0].id)
+        let decision = await task.value
+        #expect(decision.approved == true)
+        #expect(manager.pendingApprovals.isEmpty)
+    }
+}
+
 // MARK: - 路径安全（validatePath）
 
 @Suite("ChatRoomPathValidator")

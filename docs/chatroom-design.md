@@ -405,6 +405,10 @@ review ──(发现问题，轮次 = 3)──▶ 暂停，等用户解锁/加�
 - ChatRoom（多模型协作）
 - ChatRoomRole（角色 = provider + model + systemPrompt）
 - ChatRoomLoop（多模型协作循环：手动推进 + 阶段状态机 + 轮数上限）
+- Phase B（2026-09-06）：角色发言由 AgentLoop 引擎直驱——完整工具链
+  （read/write/edit/bash + MCP）、统一审批桥、steering 插话、turn 内压缩、
+  用量统计；engineProvider 未注入时回退自研 loop（详见
+  docs/chatroom-session-reuse-analysis.md）
 ```
 
 复用现有组件：`ProviderProfile` / 凭据解析 / 工具链 / 审批流 / compaction（后续）。

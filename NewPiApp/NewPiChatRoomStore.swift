@@ -26,7 +26,7 @@ final class ChatRoomFlowController: ObservableObject {
     private var transcriptAdapter = ChatRoomTranscriptAdapter()
     private var cancellables: Set<AnyCancellable> = []
 
-    /// providers.json 读取器：自动压缩预算需要各角色的 context window
+    /// providers.json 读取器：自动压缩预算 + 角色引擎构造都需要各角色配置
     private let configStore = ProviderConfigStore()
 
     init(chatroom: ChatRoom) {
@@ -47,7 +47,27 @@ final class ChatRoomFlowController: ObservableObject {
                     if window > 0 { limit = min(limit ?? window, window) }
                 }
                 return limit
-            }
+            },
+            // Phase B：角色发言引擎——profile → LLMProvider + ModelConfig
+            engineProvider: { [configStore] role in
+                let config = try configStore.load()
+                guard let profile = config.profiles.first(where: { $0.id == role.providerProfileID }) else {
+                    throw ChatRoomError.roleNotConfigured(role.id)
+                }
+                let llm = try LLMProviderFactory.make(
+                    profile: profile,
+                    credentialResolver: ProviderCredentialResolver.makeDefault()
+                )
+                let model = ModelConfig(
+                    provider: profile.preset.rawValue,
+                    modelID: role.modelID ?? profile.modelID,
+                    thinkingLevel: profile.thinkingLevel,
+                    maxTokens: profile.effectiveMaxTokens
+                )
+                return ChatRoomRoleEngine(llm: llm, model: model)
+            },
+            // Phase B：MCP 工具注入
+            mcpToolsProvider: { await MCPToolLoader.loadAgentTools() }
         )
         // 历史消息在控制器创建时加载一次（原 DetailView.onAppear 的 loadMessages 上移）。
         self.runtime.messages = (try? ChatRoomStore.shared.loadMessages(for: chatroom.id)) ?? []

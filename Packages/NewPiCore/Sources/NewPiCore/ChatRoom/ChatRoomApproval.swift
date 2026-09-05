@@ -91,6 +91,42 @@ public final class ChatRoomApprovalManager: ObservableObject {
         resume(id: id, result: .rejected(reason))
     }
 
+    /// Phase B：AgentLoop 审批桥——把 session 形态的 ToolApprovalRequest 映射到
+    /// 聊天室审批卡片，等待用户决定后转为 ApprovalDecision（同意一律 allowOnce，
+    /// 聊天室的授权不跨发言持久化，简化审批语义归决策 #10/#18）。
+    public func approvalDecision(
+        for request: ToolApprovalRequest,
+        roleID: String,
+        roleName: String
+    ) async -> ApprovalDecision {
+        let approval = PendingApproval(
+            toolCall: ToolCallContent(id: request.id, name: request.toolName, arguments: request.arguments),
+            roleID: roleID,
+            roleName: roleName,
+            description: request.summary
+        )
+        pendingApprovals.append(approval)
+
+        let approvalID = approval.id
+        let result: ApprovalResult = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: ApprovalResult.rejected("已取消"))
+                    return
+                }
+                self.continuations[approvalID] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.cancelPending(approvalID: approvalID)
+            }
+        }
+        if case .approved = result {
+            return .allowOnce
+        }
+        return .deny
+    }
+
     private func resume(id: String, result: ApprovalResult) {
         guard let continuation = continuations.removeValue(forKey: id) else { return }
         pendingApprovals.removeAll { $0.id == id }

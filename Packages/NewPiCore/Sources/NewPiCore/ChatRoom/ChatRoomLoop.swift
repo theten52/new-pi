@@ -8,6 +8,8 @@ public final class ChatRoomRuntime: ObservableObject {
     @Published public var isRunning = false
     @Published public var currentSpeakerIndex = 0
     @Published public var error: String?
+    /// 本聊天室累计 token 用量（Phase B：逐角色发言的 assistant 消息累加）。
+    @Published public var usage = UsageStats()
 
     /// 当前发言角色（按顺序轮转）
     public var currentSpeaker: ChatRoomRole? {
@@ -35,6 +37,18 @@ public enum ChatRoomDiscussionEndMode: Sendable {
     case proceedDirect  // 直接采用方案，跳过投票
 }
 
+/// 角色发言引擎（Phase B）：每次发言构造一个，供 AgentLoop 驱动。
+/// 多模型 = 每角色不同的 llm/model 组合。
+public struct ChatRoomRoleEngine: Sendable {
+    public let llm: any LLMProvider
+    public let model: ModelConfig
+
+    public init(llm: any LLMProvider, model: ModelConfig) {
+        self.llm = llm
+        self.model = model
+    }
+}
+
 /// 聊天室循环 - 多模型协作的核心逻辑
 @MainActor
 public final class ChatRoomLoop {
@@ -45,17 +59,39 @@ public final class ChatRoomLoop {
     /// 共享上下文预算（各角色最小 context window，tokens）。
     /// 由 UI 注入（依赖 providers.json）；返回 nil 时禁用自动压缩。
     private let contextBudgetTokens: ((ChatRoom) -> Int?)?
+    /// 角色发言引擎工厂（Phase B）：注入后 speak 走 AgentLoop 完整引擎
+    /// （BuiltInTools + MCP + steering + 统一审批桥）；nil 时回退旧 chatWithEvents 路径。
+    private let engineProvider: ((ChatRoomRole) throws -> ChatRoomRoleEngine)?
+    /// MCP 工具加载器（Phase B）：注入后角色可用 MCP 工具。
+    private let mcpToolsProvider: (@Sendable () async -> [any AgentTool])?
+    /// 发言进行中的用户插话队列（steering）：由 AgentLoop 的 steeringProvider 消费。
+    private var steeringQueue: [AgentMessage] = []
 
     public init(
         store: ChatRoomStore = .shared,
         llmFactory: (any ChatRoomLLMProviderFactory)? = nil,
         approvalManager: ChatRoomApprovalManager = ChatRoomApprovalManager(),
-        contextBudgetTokens: ((ChatRoom) -> Int?)? = nil
+        contextBudgetTokens: ((ChatRoom) -> Int?)? = nil,
+        engineProvider: ((ChatRoomRole) throws -> ChatRoomRoleEngine)? = nil,
+        mcpToolsProvider: (@Sendable () async -> [any AgentTool])? = nil
     ) {
         self.store = store
         self.llmFactory = llmFactory ?? ChatRoomLLMProviderFactoryImpl(approvalManager: approvalManager)
         self.approvalManager = approvalManager
         self.contextBudgetTokens = contextBudgetTokens
+        self.engineProvider = engineProvider
+        self.mcpToolsProvider = mcpToolsProvider
+    }
+
+    /// 发言进行中的用户插话：进入当前发言的 steering 队列，由 AgentLoop 在
+    /// 工具批次之间投喂给正在发言的模型。
+    func enqueueSteering(_ message: AgentMessage) {
+        steeringQueue.append(message)
+    }
+
+    private func dequeueSteering() -> AgentMessage? {
+        guard !steeringQueue.isEmpty else { return nil }
+        return steeringQueue.removeFirst()
     }
 
     // MARK: - 阶段流转
@@ -232,6 +268,11 @@ public final class ChatRoomLoop {
         runtime.messages.append(message)
         try store.appendMessage(message, to: runtime.chatroom.id)
 
+        // 发言进行中：同时进入 steering 队列，正在发言的模型在工具批次间即时看到
+        if runtime.isRunning {
+            enqueueSteering(.user(UserMessage(content: content)))
+        }
+
         // 列表按 updatedAt 排序，插话同样刷新
         runtime.chatroom.updatedAt = Date()
         try? store.save(runtime.chatroom)
@@ -273,7 +314,11 @@ public final class ChatRoomLoop {
 
     /// 上下文自动压缩：把检查点之后、最近 8 条之前的历史摘要成检查点。
     /// 摘要失败不阻塞发言（继续用未压缩上下文，超窗由 API 错误兜底）。
-    private func compactContextIfNeeded(runtime: ChatRoomRuntime, provider: ChatRoomLLMProvider) async {
+    /// provider 懒构造：仅在确认需要压缩时才创建。
+    private func compactContextIfNeeded(
+        runtime: ChatRoomRuntime,
+        providerMaker: () throws -> any ChatRoomLLMProvider
+    ) async {
         guard let budget = contextBudgetTokens?(runtime.chatroom), budget > 0 else { return }
         let estimate = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
         guard estimate >= Int(Double(budget) * 0.8) else { return }
@@ -285,6 +330,7 @@ public final class ChatRoomLoop {
         guard let lastSummarized = toSummarize.last else { return }
 
         do {
+            let provider = try providerMaker()
             let transcript = toSummarize.map { message -> String in
                 let speaker: String
                 if message.isUserMessage {
@@ -349,9 +395,250 @@ public final class ChatRoomLoop {
 
         runtime.isRunning = true
         defer { runtime.isRunning = false }
+        // steering 队列只在发言生命周期内有效：插话内容早已写入共享历史，
+        // 未被当轮消费（纯文本发言/多条剩余）的残留在此丢弃，避免下次发言重复投喂
+        defer { steeringQueue.removeAll() }
 
         let candidates = extractCandidates(from: runtime.messages)
 
+        if engineProvider != nil {
+            // Phase B：AgentLoop 引擎路径
+            try await speakWithEngine(role, runtime: runtime, candidates: candidates)
+        } else {
+            // 旧路径（Phase B 回退保留）：自研 agentic loop + ChatRoomTools
+            try await speakWithProvider(role, runtime: runtime, providerID: providerID, modelID: modelID, candidates: candidates)
+        }
+    }
+
+    /// Phase B：AgentLoop 引擎路径——完整工具链（read/write/edit/bash + MCP）、
+    /// 统一审批桥、steering 插话、turn 内压缩、用量统计、历史修复。
+    private func speakWithEngine(
+        _ role: ChatRoomRole,
+        runtime: ChatRoomRuntime,
+        candidates: [CandidateOption]
+    ) async throws {
+        let engine = try engineProvider?(role) ?? { throw ChatRoomError.roleNotConfigured(role.id) }()
+
+        let projectURL = URL(fileURLWithPath: runtime.chatroom.projectPath)
+
+        // 决策 #7：发言前压缩检查（摘要检查点，与旧路径一致）；provider 懒构造
+        await compactContextIfNeeded(runtime: runtime, providerMaker: {
+            try llmFactory.createProvider(
+                profileID: role.providerProfileID ?? "",
+                modelID: role.modelID ?? "",
+                projectPath: runtime.chatroom.projectPath,
+                roleID: role.id,
+                roleName: role.name
+            )
+        })
+
+        let systemPrompt = ChatRoomContextBuilder.systemPrompt(
+            role: role,
+            phase: runtime.chatroom.currentPhase,
+            reviewRoundCount: runtime.chatroom.reviewRoundCount,
+            candidates: candidates,
+            selectedOptionID: runtime.chatroom.selectedOptionID
+        )
+        let historyMessages = ChatRoomContextBuilder.buildAgentContext(
+            room: runtime.chatroom,
+            history: runtime.messages
+        )
+
+        // 触发消息与末条合并：AgentLoop 对 prompt 无条件 append 且不合并同角色，
+        // 共享历史以 user 结尾（如插话后推进）时会产生 [user, user] 被 Anthropic 拒绝
+        var runMessages = historyMessages
+        let trigger = ChatRoomContextBuilder.triggerText(for: role)
+        let promptMessage: AgentMessage
+        if case .user(let last)? = runMessages.last {
+            promptMessage = .user(UserMessage(content: last.content + "\n\n" + trigger))
+            runMessages.removeLast()
+        } else {
+            promptMessage = .user(UserMessage(content: trigger))
+        }
+
+        // 实时进度：临时消息（不落盘，事件实时改写，定型才持久化）
+        let liveMessageID = UUID().uuidString
+        runtime.messages.append(ChatRoomMessage(
+            id: liveMessageID,
+            chatroomID: runtime.chatroom.id,
+            roleID: role.id,
+            content: "",
+            phase: runtime.chatroom.currentPhase
+        ))
+        let liveIndex = runtime.messages.count - 1
+
+        // 流式增量节流（AgentLoop 不节流，节流在消费侧，120ms 攒批）
+        var pendingText = ""
+        var pendingThinking = ""
+        var lastTextFlush = Date.distantPast
+        var lastThinkingFlush = Date.distantPast
+        var lastAssistantText = ""
+        var errorMessage: String?
+        var sawAbort = false
+
+        func mutateProvisional(_ mutate: (inout ChatRoomMessage) -> Void) {
+            guard runtime.messages.indices.contains(liveIndex),
+                  runtime.messages[liveIndex].id == liveMessageID else { return }
+            mutate(&runtime.messages[liveIndex])
+        }
+
+        func flushText(force: Bool) async {
+            guard !pendingText.isEmpty else { return }
+            guard force || Date().timeIntervalSince(lastTextFlush) >= 0.12 else { return }
+            let chunk = pendingText
+            pendingText = ""
+            lastTextFlush = Date()
+            mutateProvisional { $0.content += chunk }
+        }
+
+        func flushThinking(force: Bool) async {
+            guard !pendingThinking.isEmpty else { return }
+            guard force || Date().timeIntervalSince(lastThinkingFlush) >= 0.12 else { return }
+            let chunk = pendingThinking
+            pendingThinking = ""
+            lastThinkingFlush = Date()
+            mutateProvisional { message in
+                message.reasoningContent = (message.reasoningContent ?? "") + chunk
+            }
+        }
+
+        func appendToolCall(_ call: ChatRoomToolCall) {
+            mutateProvisional { message in
+                message.toolCalls = (message.toolCalls ?? []) + [call]
+            }
+        }
+
+        func appendToolResult(_ result: ChatRoomToolResult) {
+            mutateProvisional { message in
+                message.toolResults = (message.toolResults ?? []) + [result]
+            }
+        }
+
+        func applyAgentEvent(_ event: AgentEvent) async throws {
+            switch event {
+            case .textDelta(let delta):
+                pendingText += delta
+                await flushText(force: false)
+            case .thinkingDelta(let delta):
+                pendingThinking += delta
+                await flushThinking(force: false)
+            case .toolExecutionStart(let id, let name, let arguments):
+                // 定格流式内容，再挂出 running 工具卡
+                await flushText(force: true)
+                await flushThinking(force: true)
+                appendToolCall(ChatRoomToolCall(
+                    id: id,
+                    name: name,
+                    arguments: ChatRoomLLMProviderImpl.argumentsString(arguments)
+                ))
+            case .toolExecutionEnd(let id, _, let result):
+                appendToolResult(ChatRoomToolResult(
+                    toolCallID: id,
+                    output: result.content,
+                    isError: result.isError
+                ))
+            case .messageEnd(.assistant(let assistant)):
+                // 用量累计 + 候选方案取自最后一轮 assistant 正文（决策 #16）
+                runtime.usage.add(assistant.usage)
+                if !assistant.text.isEmpty {
+                    lastAssistantText = assistant.text
+                }
+            case .error(.aborted):
+                sawAbort = true
+            case .error(let error):
+                errorMessage = error.localizedDescription
+            default:
+                break
+            }
+        }
+
+        do {
+            var mcpTools: [any AgentTool] = []
+            if let mcpToolsProvider {
+                mcpTools = await mcpToolsProvider()
+            }
+
+            let config = AgentLoopConfig(
+                model: engine.model,
+                llm: engine.llm,
+                tools: Self.chatroomTools(projectURL: projectURL, additional: mcpTools),
+                toolPolicy: ToolPolicyRules(requireApprovalFor: ["write", "edit", "bash"]),
+                compaction: contextBudgetTokens?(runtime.chatroom)
+                    .map { CompactionConfig.recommended(contextWindow: $0) } ?? CompactionConfig(),
+                maxTurns: 500,
+                requestToolApproval: { [weak approvalManager] request in
+                    guard let approvalManager else { return .deny }
+                    return await approvalManager.approvalDecision(
+                        for: request,
+                        roleID: role.id,
+                        roleName: role.name
+                    )
+                },
+                dangerEvaluator: DangerEvaluator()
+            )
+
+            let stream = AgentLoop().run(
+                prompt: promptMessage,
+                context: AgentContext(
+                    systemPrompt: systemPrompt,
+                    messages: runMessages,
+                    workingDirectory: projectURL
+                ),
+                config: config,
+                steeringProvider: { [weak self] in await self?.dequeueSteering() }
+            )
+
+            for try await event in stream {
+                try await applyAgentEvent(event)
+            }
+        } catch is CancellationError {
+            runtime.messages.remove(at: liveIndex)
+            throw CancellationError()
+        }
+
+        await flushText(force: true)
+        await flushThinking(force: true)
+
+        if sawAbort {
+            // 用户停止：移除临时消息，本轮不产出
+            runtime.messages.remove(at: liveIndex)
+            throw CancellationError()
+        }
+
+        if let errorMessage {
+            mutateProvisional { $0.content += "\n\n（发言失败：\(errorMessage)）" }
+        }
+
+        // 候选方案只在讨论阶段解析（决策 #16 的「收尾归纳」语义）
+        if runtime.chatroom.currentPhase == .discussion, !lastAssistantText.isEmpty {
+            mutateProvisional { message in
+                message.candidates = ChatRoomCandidateParser.parse(from: lastAssistantText)
+            }
+        }
+
+        try store.appendMessage(runtime.messages[liveIndex], to: runtime.chatroom.id)
+    }
+
+    /// 聊天室引擎工具集：session 的 BuiltInTools（不含 SubAgent），edit 快照挂项目目录。
+    static func chatroomTools(projectURL: URL, additional: [any AgentTool]) -> [any AgentTool] {
+        var tools: [any AgentTool] = [
+            ReadTool(),
+            WriteTool(),
+            EditTool(snapshotStore: .forProject(projectURL)),
+            BashTool(),
+        ]
+        tools.append(contentsOf: additional)
+        return tools
+    }
+
+    /// 旧路径（Phase B 回退保留）：自研 agentic loop + ChatRoomTools。
+    private func speakWithProvider(
+        _ role: ChatRoomRole,
+        runtime: ChatRoomRuntime,
+        providerID: String,
+        modelID: String,
+        candidates: [CandidateOption]
+    ) async throws {
         let provider = try llmFactory.createProvider(
             profileID: providerID,
             modelID: modelID,
@@ -362,7 +649,7 @@ public final class ChatRoomLoop {
 
         // 决策 #7（2026-09-05 调整）：上下文估算达到预算 80% 时自动压缩。
         // 必须在构建 systemPrompt/上下文之前执行，当轮发言才能用上摘要。
-        await compactContextIfNeeded(runtime: runtime, provider: provider)
+        await compactContextIfNeeded(runtime: runtime, providerMaker: { provider })
 
         let systemPrompt = ChatRoomContextBuilder.systemPrompt(
             role: role,
@@ -538,21 +825,20 @@ public enum ChatRoomContextBuilder {
         return role.systemPrompt + "\n\n" + phaseHint
     }
 
-    static func messages(
-        room: ChatRoom,
-        history: [ChatRoomMessage],
-        nextSpeaker: ChatRoomRole? = nil
-    ) -> [ChatRoomLLMMessage] {
-        var context: [ChatRoomLLMMessage] = []
+    /// 构建共享历史为 AgentMessage 上下文（Phase B：供 AgentLoop 的 AgentContext 使用）。
+    /// 与 `messages` 同一套规则：署名前缀、连续同角色合并、检查点摘要、跳过系统标记、
+    /// 首条 user 兜底。不含末尾触发消息（由 AgentLoop 的 prompt 承担）。
+    public static func buildAgentContext(room: ChatRoom, history: [ChatRoomMessage]) -> [AgentMessage] {
+        var context: [AgentMessage] = []
 
         for msg in effectiveHistory(room: room, history: history) {
             // 展示专用标记不进入模型上下文
             if msg.roleID == systemRoleID { continue }
 
-            let message: ChatRoomLLMMessage
+            let message: AgentMessage
             if msg.isUserMessage {
                 guard !msg.content.isEmpty else { continue }
-                message = .user(msg.content)
+                message = .user(UserMessage(content: msg.content))
             } else {
                 let speakerName = room.role(by: msg.roleID)?.name ?? msg.roleID
                 var text = msg.content
@@ -561,14 +847,25 @@ public enum ChatRoomContextBuilder {
                     text = "（调用工具: " + calls.map { $0.name }.joined(separator: ", ") + "）"
                 }
                 guard !text.isEmpty else { continue }
-                message = .assistant("【\(speakerName)】\(text)")
+                message = .assistant(AssistantMessage(
+                    text: "【\(speakerName)】\(text)",
+                    provider: "chatroom",
+                    modelID: msg.roleID,
+                    stopReason: .stop
+                ))
             }
 
-            if let last = context.last, last.role == message.role {
-                context[context.count - 1] = ChatRoomLLMMessage(
-                    role: last.role,
-                    content: last.content + "\n\n" + message.content
-                )
+            if case .assistant(let last)? = context.last,
+               case .assistant(let new) = message {
+                context[context.count - 1] = .assistant(AssistantMessage(
+                    text: last.text + "\n\n" + new.text,
+                    provider: new.provider,
+                    modelID: new.modelID,
+                    stopReason: .stop
+                ))
+            } else if case .user(let last)? = context.last,
+                      case .user(let new) = message {
+                context[context.count - 1] = .user(UserMessage(content: last.content + "\n\n" + new.content))
             } else {
                 context.append(message)
             }
@@ -577,33 +874,54 @@ public enum ChatRoomContextBuilder {
         // 历史摘要置于上下文开头；与首条 user 合并以保持角色交替
         if let summary = room.compactionSummary, !summary.isEmpty {
             let summaryContent = "【历史摘要】\(summary)"
-            if let first = context.first, first.role == .user {
-                context[0] = ChatRoomLLMMessage(role: .user, content: summaryContent + "\n\n" + first.content)
+            if case .user(let first)? = context.first {
+                context[0] = .user(UserMessage(content: summaryContent + "\n\n" + first.content))
             } else {
-                context.insert(.user(summaryContent), at: 0)
+                context.insert(.user(UserMessage(content: summaryContent)), at: 0)
             }
         }
 
         // Anthropic 要求首条消息必须是 user（摘要兜底后一般已满足）
-        if let first = context.first, first.role == .assistant {
+        if case .assistant? = context.first {
             let lead = room.description.isEmpty ? "（用户尚未发言，请直接开始）" : "【任务背景】\(room.description)"
-            context.insert(.user(lead), at: 0)
+            context.insert(.user(UserMessage(content: lead)), at: 0)
+        }
+
+        return context
+    }
+
+    /// 合成触发消息：追加在上下文末尾（AgentLoop 的 prompt），把「该谁发言」对模型显式化
+    public static func triggerText(for nextSpeaker: ChatRoomRole?) -> String {
+        if let nextSpeaker {
+            return "（请以【\(nextSpeaker.name)】的身份发言，不要延续其他角色的发言内容）"
+        }
+        return "（请继续发言）"
+    }
+
+    static func messages(
+        room: ChatRoom,
+        history: [ChatRoomMessage],
+        nextSpeaker: ChatRoomRole? = nil
+    ) -> [ChatRoomLLMMessage] {
+        var out = buildAgentContext(room: room, history: history).map { message -> ChatRoomLLMMessage in
+            switch message {
+            case .user(let user):
+                return .user(user.content)
+            case .assistant(let assistant):
+                return .assistant(assistant.text)
+            default:
+                return .user("")
+            }
         }
 
         // 末条不能是 assistant：Anthropic 会把结尾 assistant 当作 prefill 续写上文，
         // 而不是让新角色发言。追加一条合成触发消息（仅在本次构建的上下文里，
         // 不写入对话记录），同时把「该谁发言」对模型显式化。
-        if let last = context.last, last.role == .assistant {
-            let trigger: String
-            if let nextSpeaker {
-                trigger = "（请以【\(nextSpeaker.name)】的身份发言，不要延续其他角色的发言内容）"
-            } else {
-                trigger = "（请继续发言）"
-            }
-            context.append(.user(trigger))
+        if let last = out.last, last.role == .assistant {
+            out.append(.user(triggerText(for: nextSpeaker)))
         }
 
-        return context
+        return out
     }
 }
 
