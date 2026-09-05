@@ -396,6 +396,8 @@ public final class ChatRoomLoop {
                   runtime.messages[liveIndex].id == liveMessageID else { return }
 
             switch event {
+            case .thinkingDelta(let delta):
+                runtime.messages[liveIndex].reasoningContent = (runtime.messages[liveIndex].reasoningContent ?? "") + delta
             case .textDelta(let delta):
                 runtime.messages[liveIndex].content += delta
             case .toolStarted(let call):
@@ -419,6 +421,7 @@ public final class ChatRoomLoop {
             // 定型：以最终响应覆盖实时内容（agentic loop 多轮的中间文本以最终轮为准）
             let messageCandidates = runtime.chatroom.currentPhase == .discussion ? response.candidates : nil
             runtime.messages[liveIndex].content = response.content
+            runtime.messages[liveIndex].reasoningContent = response.reasoningContent.isEmpty ? nil : response.reasoningContent
             runtime.messages[liveIndex].candidates = messageCandidates
             runtime.messages[liveIndex].toolCalls = response.toolCalls.isEmpty ? nil : response.toolCalls
             runtime.messages[liveIndex].toolResults = response.toolResults.isEmpty ? nil : response.toolResults
@@ -636,17 +639,21 @@ public enum ChatRoomMessageRole: Sendable {
 
 public struct ChatRoomLLMResponse: Sendable {
     public var content: String
+    /// 最后一轮思考过程文本（extended thinking）；未开启思考时为空
+    public var reasoningContent: String
     public var candidates: [CandidateOption]?
     public var toolCalls: [ChatRoomToolCall]
     public var toolResults: [ChatRoomToolResult]
 
     public init(
         content: String,
+        reasoningContent: String = "",
         candidates: [CandidateOption]? = nil,
         toolCalls: [ChatRoomToolCall] = [],
         toolResults: [ChatRoomToolResult] = []
     ) {
         self.content = content
+        self.reasoningContent = reasoningContent
         self.candidates = candidates
         self.toolCalls = toolCalls
         self.toolResults = toolResults
@@ -660,11 +667,19 @@ public protocol ChatRoomLLMProvider: Sendable {
         systemPrompt: String,
         messages: [ChatRoomLLMMessage]
     ) async throws -> ChatRoomLLMResponse
+
+    /// 必须是协议要求：app 通过 `any ChatRoomLLMProvider` 存在容器调用，
+    /// 若只放在 extension 里，Swift 会静态派发到扩展默认实现、丢弃 onEvent
+    /// （2026-09-05 实时显示不生效的根因）。
+    func chatWithEvents(
+        systemPrompt: String,
+        messages: [ChatRoomLLMMessage],
+        onEvent: (@MainActor @Sendable (ChatRoomSpeechEvent) -> Void)?
+    ) async throws -> ChatRoomLLMResponse
 }
 
 public extension ChatRoomLLMProvider {
-    /// 带实时事件的发言：onEvent 在 MainActor 上按序回调（文本增量节流、
-    /// 工具开始/完成）。默认实现不产生事件，直接转发 chat。
+    /// 默认实现：无事件，转发 chat——只实现 chat 的类型（测试 mock）由此满足要求。
     func chatWithEvents(
         systemPrompt: String,
         messages: [ChatRoomLLMMessage],

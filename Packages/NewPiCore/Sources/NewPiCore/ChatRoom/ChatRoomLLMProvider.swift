@@ -2,6 +2,8 @@ import Foundation
 
 /// 发言过程中的实时事件（聊天室实时进度展示，与 Session 流式体验对齐）
 public enum ChatRoomSpeechEvent: Sendable {
+    /// 思考过程增量（extended thinking）
+    case thinkingDelta(String)
     /// 流式文本增量（agentic loop 各轮的文本都会推送）
     case textDelta(String)
     /// 工具调用开始执行
@@ -43,14 +45,17 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         // agentic loop（决策 #14）：工具结果回传给模型继续，最多 500 轮
         // （2026-09-05 由 10 调整，覆盖大型多步执行任务）
         var finalResponseText = ""
+        var finalReasoningText = ""
         var allToolCalls: [ToolCallContent] = []
         var allToolResults: [ChatRoomToolResult] = []
         var iteration = 0
         let maxIterations = 500
         var lastStopReason: StopReason = .stop
-        // 文本增量节流：攒批发送，避免每 delta 一次 MainActor 往返打爆 UI
+        // 文本/思考增量节流：攒批发送，避免每 delta 一次 MainActor 往返打爆 UI
         var pendingDelta = ""
         var lastDeltaEmit = Date.distantPast
+        var pendingThinking = ""
+        var lastThinkingEmit = Date.distantPast
 
         func flushPendingDelta(force: Bool) async {
             guard !pendingDelta.isEmpty else { return }
@@ -60,11 +65,20 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
             lastDeltaEmit = Date()
         }
 
+        func flushPendingThinking(force: Bool) async {
+            guard !pendingThinking.isEmpty else { return }
+            guard force || Date().timeIntervalSince(lastThinkingEmit) >= 0.12 else { return }
+            await onEvent?(.thinkingDelta(pendingThinking))
+            pendingThinking = ""
+            lastThinkingEmit = Date()
+        }
+
         while iteration < maxIterations {
             iteration += 1
 
             // 调用 LLM
             var responseText = ""
+            var reasoningText = ""
             var toolCalls: [ToolCallContent] = []
             var hasToolCalls = false
 
@@ -81,7 +95,11 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                     responseText += text
                     pendingDelta += text
                     await flushPendingDelta(force: false)
-                case .thinkingDelta, .thinkingSignature:
+                case .thinkingDelta(let text):
+                    reasoningText += text
+                    pendingThinking += text
+                    await flushPendingThinking(force: false)
+                case .thinkingSignature:
                     break
                 case .toolCall(let toolCall):
                     hasToolCalls = true
@@ -91,6 +109,11 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                 }
             }
             await flushPendingDelta(force: true)
+            await flushPendingThinking(force: true)
+            // 思考语义与文本一致：以最后一轮非空思考为准
+            if !reasoningText.isEmpty {
+                finalReasoningText = reasoningText
+            }
 
             // 如果没有工具调用，返回结果
             if !hasToolCalls {
@@ -157,6 +180,7 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
 
         return ChatRoomLLMResponse(
             content: finalResponseText,
+            reasoningContent: finalReasoningText,
             candidates: candidates,
             toolCalls: allToolCalls.map { call in
                 ChatRoomToolCall(

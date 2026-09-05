@@ -37,13 +37,17 @@ struct ChatRoomTranscriptAdapter {
     }
 
     /// 全量重算（聊天室消息量级小，O(n) 可接受）；调用方按 controller 生命周期持有本实例。
+    /// isRunning：实时发言期间，最后一条消息的思考条目保持流式（✦ 光标），
+    /// 正文开始后冻结——与 session 的 thinking 语义一致。
     mutating func adapt(
         messages: [ChatRoomMessage],
-        roles: [ChatRoomRole]
+        roles: [ChatRoomRole],
+        isRunning: Bool
     ) -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) {
         var items: [NewPiTranscriptItem] = []
         var tintHues: [UUID: Int] = [:]
         var lastPhase: ChatRoomPhase?
+        let lastMessageID = messages.last?.id
 
         for message in messages {
             // phase 切换处插分隔行（原 PhaseHeader 的文档内化，方案决策 4）：
@@ -62,6 +66,16 @@ struct ChatRoomTranscriptAdapter {
             if message.roleID == ChatRoomContextBuilder.systemRoleID {
                 items.append(NewPiTranscriptItem(id: messageID, kind: .system, body: message.content))
                 continue
+            }
+
+            // 思考过程：正文前补 thinking 条目（与 session 的 reasoningContent 渲染一致）；
+            // 实时发言中且正文未开始 → 流式（✦ 光标），正文开始后冻结
+            if let reasoning = message.reasoningContent, !reasoning.isEmpty {
+                items.append(NewPiTranscriptItem(
+                    id: derivedID("thinking-\(message.id)"),
+                    kind: .thinking(isStreaming: isRunning && message.id == lastMessageID && message.content.isEmpty),
+                    body: reasoning
+                ))
             }
 
             if message.isUserMessage {

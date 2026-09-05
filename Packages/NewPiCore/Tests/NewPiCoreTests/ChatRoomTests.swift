@@ -765,6 +765,87 @@ struct ChatRoomAgenticLoopTests {
         #expect(lastText == "最终回复")
     }
 
+    @Test("thinking deltas stream as events and accumulate into reasoningContent")
+    func thinkingStreamingAndAccumulation() async throws {
+        let executor = ChatRoomToolExecutor(
+            projectPath: FileManager.default.temporaryDirectory.path,
+            approvalManager: ChatRoomApprovalManager()
+        )
+
+        let counter = CallCounter()
+        let mock = MockLLMProvider(counter: counter) { _ in
+            [
+                .thinkingDelta("思考第一段"),
+                .thinkingDelta("思考第二段"),
+                .textDelta("正文"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ]
+        }
+
+        let impl = ChatRoomLLMProviderImpl(
+            provider: mock,
+            modelConfig: ModelConfig(provider: "mock", modelID: "test-model"),
+            toolExecutor: executor
+        )
+
+        let collector = SpeechEventCollector()
+        let response = try await impl.chatWithEvents(
+            systemPrompt: "测试",
+            messages: [ChatRoomLLMMessage.user("问题")],
+            onEvent: { event in collector.append(event) }
+        )
+
+        // 思考增量按序推送
+        let thinkingEvents = collector.snapshot.compactMap { event -> String? in
+            if case .thinkingDelta(let text) = event { return text }
+            return nil
+        }
+        #expect(thinkingEvents == ["思考第一段", "思考第二段"])
+        // 思考累积进响应
+        #expect(response.reasoningContent == "思考第一段思考第二段")
+        #expect(response.content == "正文")
+    }
+
+    @Test("events flow through existential dispatch (protocol requirement regression)")
+    func existentialDispatchRoutesEvents() async throws {
+        // 回归（2026-09-05）：chatWithEvents 曾只定义在 extension 里，app 通过
+        // `any ChatRoomLLMProvider` 存在容器调用时静态派发到默认实现、onEvent
+        // 被丢弃（实时显示不生效的根因）。必须通过存在容器验证。
+        let executor = ChatRoomToolExecutor(
+            projectPath: FileManager.default.temporaryDirectory.path,
+            approvalManager: ChatRoomApprovalManager()
+        )
+
+        let counter = CallCounter()
+        let mock = MockLLMProvider(counter: counter) { _ in
+            [
+                .textDelta("存在容器事件"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ]
+        }
+
+        let provider: any ChatRoomLLMProvider = ChatRoomLLMProviderImpl(
+            provider: mock,
+            modelConfig: ModelConfig(provider: "mock", modelID: "test-model"),
+            toolExecutor: executor
+        )
+
+        let collector = SpeechEventCollector()
+        let response = try await provider.chatWithEvents(
+            systemPrompt: "测试",
+            messages: [ChatRoomLLMMessage.user("问题")],
+            onEvent: { event in collector.append(event) }
+        )
+
+        #expect(response.content == "存在容器事件")
+        #expect(!collector.snapshot.isEmpty)
+        guard case .textDelta(let text)? = collector.snapshot.first else {
+            Issue.record("first event should be textDelta")
+            return
+        }
+        #expect(text == "存在容器事件")
+    }
+
     @Test("rejected write does not modify the file and error is returned to the model")
     func rejectedWriteReturnsErrorResult() async throws {
         let dir = FileManager.default.temporaryDirectory

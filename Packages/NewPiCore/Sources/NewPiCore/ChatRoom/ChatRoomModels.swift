@@ -280,17 +280,20 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
     public var chatroomID: String
     public var roleID: String          // 角色 ID（或 "user"）
     public var content: String
+    /// 思考过程（extended thinking）；仅角色发言可能非空，供思考条目展示
+    public var reasoningContent: String?
     public var phase: ChatRoomPhase
     public var candidates: [CandidateOption]?  // 讨论末尾的候选方案
     public var toolCalls: [ChatRoomToolCall]?
     public var toolResults: [ChatRoomToolResult]?
     public var timestamp: Date
-    
+
     public init(
         id: String = UUID().uuidString,
         chatroomID: String,
         roleID: String,
         content: String,
+        reasoningContent: String? = nil,
         phase: ChatRoomPhase,
         candidates: [CandidateOption]? = nil,
         toolCalls: [ChatRoomToolCall]? = nil,
@@ -301,6 +304,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         self.chatroomID = chatroomID
         self.roleID = roleID
         self.content = content
+        self.reasoningContent = reasoningContent
         self.phase = phase
         self.candidates = candidates
         self.toolCalls = toolCalls

@@ -98,7 +98,7 @@ final class ChatRoomFlowController: ObservableObject {
     /// 消息 → transcript items（CHATROOM-FLAT-MD Phase 2，视图每次更新时调用；
     /// O(n) 全量重算，聊天室消息量级小，可接受）。
     func transcriptSnapshot() -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) {
-        transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles)
+        transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles, isRunning: runtime.isRunning)
     }
 
     func userSpeak(content: String) {
