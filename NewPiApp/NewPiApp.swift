@@ -1319,15 +1319,16 @@ struct ChatRoomDetailView: View {
     @StateObject private var docController = TranscriptDocumentController()
 
     private var messageList: some View {
-        // 消息 → transcript items（无流式：isStreaming 恒 false；无 fork/折叠组：
-        // 条目 messageIndex/detailTurnID 均为 nil，JS 不渲染 Fork 按钮）。
+        // 消息 → transcript items（实时发言走增量渲染管线：isRunning 期间临时消息
+        // 为活跃流式条目（renderStreaming + ✦ 光标），结束翻 false 定型一次。
+        // 无 fork/折叠组：条目 messageIndex/detailTurnID 均为 nil，JS 不渲染 Fork 按钮）。
         let snapshot = controller.transcriptSnapshot()
         let chatroomUUID = UUID(uuidString: runtime.chatroom.id)
         return ZStack(alignment: .bottom) {
             NewPiTranscriptDocumentView(
                 transcript: snapshot.items,
-                isStreaming: false,
-                streamingBubbleComplete: true,
+                isStreaming: runtime.isRunning,
+                streamingBubbleComplete: !runtime.isRunning,
                 storeKey: chatroomUUID,
                 controller: docController,
                 tintHues: snapshot.tintHues,

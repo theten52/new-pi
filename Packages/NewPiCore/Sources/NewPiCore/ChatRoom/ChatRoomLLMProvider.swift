@@ -1,5 +1,15 @@
 import Foundation
 
+/// 发言过程中的实时事件（聊天室实时进度展示，与 Session 流式体验对齐）
+public enum ChatRoomSpeechEvent: Sendable {
+    /// 流式文本增量（agentic loop 各轮的文本都会推送）
+    case textDelta(String)
+    /// 工具调用开始执行
+    case toolStarted(ChatRoomToolCall)
+    /// 工具调用执行完成
+    case toolFinished(ChatRoomToolResult)
+}
+
 /// ChatRoom LLM Provider - 桥接现有 provider 系统
 public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
     private let provider: LLMProvider
@@ -16,6 +26,14 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         systemPrompt: String,
         messages: [ChatRoomLLMMessage]
     ) async throws -> ChatRoomLLMResponse {
+        try await chatWithEvents(systemPrompt: systemPrompt, messages: messages, onEvent: nil)
+    }
+
+    public func chatWithEvents(
+        systemPrompt: String,
+        messages: [ChatRoomLLMMessage],
+        onEvent: (@MainActor @Sendable (ChatRoomSpeechEvent) -> Void)?
+    ) async throws -> ChatRoomLLMResponse {
         // 转换消息格式
         var agentMessages = convertToAgentMessages(messages)
 
@@ -30,6 +48,17 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         var iteration = 0
         let maxIterations = 500
         var lastStopReason: StopReason = .stop
+        // 文本增量节流：攒批发送，避免每 delta 一次 MainActor 往返打爆 UI
+        var pendingDelta = ""
+        var lastDeltaEmit = Date.distantPast
+
+        func flushPendingDelta(force: Bool) async {
+            guard !pendingDelta.isEmpty else { return }
+            guard force || Date().timeIntervalSince(lastDeltaEmit) >= 0.12 else { return }
+            await onEvent?(.textDelta(pendingDelta))
+            pendingDelta = ""
+            lastDeltaEmit = Date()
+        }
 
         while iteration < maxIterations {
             iteration += 1
@@ -50,6 +79,8 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                 switch event {
                 case .textDelta(let text):
                     responseText += text
+                    pendingDelta += text
+                    await flushPendingDelta(force: false)
                 case .thinkingDelta, .thinkingSignature:
                     break
                 case .toolCall(let toolCall):
@@ -59,6 +90,7 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                     lastStopReason = reason
                 }
             }
+            await flushPendingDelta(force: true)
 
             // 如果没有工具调用，返回结果
             if !hasToolCalls {
@@ -79,7 +111,22 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
 
             // 执行每个工具调用并把结果回传
             for toolCall in toolCalls {
+                let serialized = Self.argumentsString(toolCall.arguments)
+                if let onEvent {
+                    await onEvent(.toolStarted(ChatRoomToolCall(
+                        id: toolCall.id,
+                        name: toolCall.name,
+                        arguments: serialized
+                    )))
+                }
                 let result = try await toolExecutor.execute(toolCall: toolCall)
+                if let onEvent {
+                    await onEvent(.toolFinished(ChatRoomToolResult(
+                        toolCallID: toolCall.id,
+                        output: result.output,
+                        isError: result.isError
+                    )))
+                }
                 allToolResults.append(result)
 
                 agentMessages.append(.toolResult(ToolResultMessage(

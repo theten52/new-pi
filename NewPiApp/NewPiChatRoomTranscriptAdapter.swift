@@ -87,11 +87,15 @@ struct ChatRoomTranscriptAdapter {
             }
 
             // 工具调用 → 工具卡（现成 renderCard；arguments 摘要截断防超长）。
+            // 结果未到达（实时发言进行中）→ running 状态。
             for call in message.toolCalls ?? [] {
                 let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
                 items.append(NewPiTranscriptItem(
                     id: derivedID("tool-\(call.id)"),
-                    kind: .tool(name: call.name, state: .completed(isError: result?.isError ?? false)),
+                    kind: .tool(
+                        name: call.name,
+                        state: result.map { .completed(isError: $0.isError) } ?? .running
+                    ),
                     body: result?.output ?? "",
                     toolCommand: Self.truncate(call.arguments)
                 ))

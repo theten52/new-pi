@@ -377,27 +377,61 @@ public final class ChatRoomLoop {
             nextSpeaker: role
         )
 
-        let response = try await provider.chat(
-            systemPrompt: systemPrompt,
-            messages: contextMessages
-        )
-
-        // 候选方案只在讨论阶段解析（决策 #16 的「收尾归纳」语义），
-        // 避免 Voting/Review 等阶段的回复被误当成候选方案
-        let messageCandidates = runtime.chatroom.currentPhase == .discussion ? response.candidates : nil
-
-        let message = ChatRoomMessage(
+        // 实时进度（与 Session 流式体验对齐）：先挂一条临时消息，流式增量与
+        // 工具事件实时改写它；发言结束才落盘，失败则移除临时消息。
+        // 临时消息不写入 messages.jsonl，持久化只发生在定型之后。
+        let liveMessageID = UUID().uuidString
+        runtime.messages.append(ChatRoomMessage(
+            id: liveMessageID,
             chatroomID: runtime.chatroom.id,
             roleID: role.id,
-            content: response.content,
-            phase: runtime.chatroom.currentPhase,
-            candidates: messageCandidates,
-            toolCalls: response.toolCalls.isEmpty ? nil : response.toolCalls,
-            toolResults: response.toolResults.isEmpty ? nil : response.toolResults
-        )
+            content: "",
+            phase: runtime.chatroom.currentPhase
+        ))
+        let liveIndex = runtime.messages.count - 1
 
-        runtime.messages.append(message)
-        try store.appendMessage(message, to: runtime.chatroom.id)
+        func applySpeechEvent(_ event: ChatRoomSpeechEvent) {
+            // 临时消息必须仍在原位（未被并发修改/移除）才应用事件
+            guard runtime.messages.indices.contains(liveIndex),
+                  runtime.messages[liveIndex].id == liveMessageID else { return }
+
+            switch event {
+            case .textDelta(let delta):
+                runtime.messages[liveIndex].content += delta
+            case .toolStarted(let call):
+                var calls = runtime.messages[liveIndex].toolCalls ?? []
+                calls.append(call)
+                runtime.messages[liveIndex].toolCalls = calls
+            case .toolFinished(let result):
+                var results = runtime.messages[liveIndex].toolResults ?? []
+                results.append(result)
+                runtime.messages[liveIndex].toolResults = results
+            }
+        }
+
+        do {
+            let response = try await provider.chatWithEvents(
+                systemPrompt: systemPrompt,
+                messages: contextMessages,
+                onEvent: { applySpeechEvent($0) }
+            )
+
+            // 定型：以最终响应覆盖实时内容（agentic loop 多轮的中间文本以最终轮为准）
+            let messageCandidates = runtime.chatroom.currentPhase == .discussion ? response.candidates : nil
+            runtime.messages[liveIndex].content = response.content
+            runtime.messages[liveIndex].candidates = messageCandidates
+            runtime.messages[liveIndex].toolCalls = response.toolCalls.isEmpty ? nil : response.toolCalls
+            runtime.messages[liveIndex].toolResults = response.toolResults.isEmpty ? nil : response.toolResults
+
+            try store.appendMessage(runtime.messages[liveIndex], to: runtime.chatroom.id)
+        } catch {
+            // 移除未完成的临时消息，错误向上抛给 UI
+            if runtime.messages.indices.contains(liveIndex),
+               runtime.messages[liveIndex].id == liveMessageID {
+                runtime.messages.remove(at: liveIndex)
+            }
+            throw error
+        }
     }
 
     /// 从消息中提取候选方案（取最近一条带候选方案的消息）
@@ -626,6 +660,18 @@ public protocol ChatRoomLLMProvider: Sendable {
         systemPrompt: String,
         messages: [ChatRoomLLMMessage]
     ) async throws -> ChatRoomLLMResponse
+}
+
+public extension ChatRoomLLMProvider {
+    /// 带实时事件的发言：onEvent 在 MainActor 上按序回调（文本增量节流、
+    /// 工具开始/完成）。默认实现不产生事件，直接转发 chat。
+    func chatWithEvents(
+        systemPrompt: String,
+        messages: [ChatRoomLLMMessage],
+        onEvent: (@MainActor @Sendable (ChatRoomSpeechEvent) -> Void)?
+    ) async throws -> ChatRoomLLMResponse {
+        try await chat(systemPrompt: systemPrompt, messages: messages)
+    }
 }
 
 // MARK: - ChatRoom LLM Provider Factory Protocol

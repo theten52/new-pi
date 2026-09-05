@@ -597,6 +597,21 @@ struct ChatRoomAgenticLoopTests {
         }
     }
 
+    private final class SpeechEventCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [ChatRoomSpeechEvent] = []
+        func append(_ event: ChatRoomSpeechEvent) {
+            lock.lock()
+            defer { lock.unlock() }
+            items.append(event)
+        }
+        var snapshot: [ChatRoomSpeechEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return items
+        }
+    }
+
     @Test("tool results are fed back and tool usage is recorded in the response")
     func agenticLoopRecordsToolUsage() async throws {
         let dir = FileManager.default.temporaryDirectory
@@ -675,6 +690,79 @@ struct ChatRoomAgenticLoopTests {
         )
         #expect(response.content.contains("写到一半的内容"))
         #expect(response.content.contains("[输出被截断"))
+    }
+
+    @Test("chatWithEvents streams text deltas and tool events in order")
+    func chatWithEventsSequence() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-events-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "hello chatroom".write(to: dir.appendingPathComponent("hello.txt"), atomically: true, encoding: .utf8)
+
+        let executor = ChatRoomToolExecutor(
+            projectPath: dir.path,
+            approvalManager: ChatRoomApprovalManager()
+        )
+
+        let counter = CallCounter()
+        let mock = MockLLMProvider(counter: counter) { index in
+            if index == 0 {
+                return [
+                    .textDelta("开始 "),
+                    .toolCall(ToolCallContent(
+                        id: "call-1",
+                        name: "read_file",
+                        arguments: .object(["path": .string("hello.txt")])
+                    )),
+                ]
+            }
+            return [
+                .textDelta("最终回复"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ]
+        }
+
+        let impl = ChatRoomLLMProviderImpl(
+            provider: mock,
+            modelConfig: ModelConfig(provider: "mock", modelID: "test-model"),
+            toolExecutor: executor
+        )
+
+        let collector = SpeechEventCollector()
+        let response = try await impl.chatWithEvents(
+            systemPrompt: "测试",
+            messages: [ChatRoomLLMMessage.user("读取 hello.txt")],
+            onEvent: { event in collector.append(event) }
+        )
+
+        #expect(response.content == "最终回复")
+        #expect(response.toolCalls.count == 1)
+        #expect(response.toolResults.count == 1)
+
+        // 事件顺序：文本 → 工具开始 → 工具完成 → 下一轮文本
+        let events = collector.snapshot
+        #expect(events.count == 4)
+        guard case .textDelta(let firstText)? = events.first else {
+            Issue.record("first event should be textDelta")
+            return
+        }
+        #expect(firstText.contains("开始"))
+        guard case .toolStarted(let startedCall)? = events.dropFirst().first else {
+            Issue.record("second event should be toolStarted")
+            return
+        }
+        #expect(startedCall.name == "read_file")
+        guard case .toolFinished(let finishedResult)? = events.dropFirst(2).first else {
+            Issue.record("third event should be toolFinished")
+            return
+        }
+        #expect(finishedResult.output.contains("hello chatroom"))
+        guard case .textDelta(let lastText)? = events.last else {
+            Issue.record("last event should be textDelta")
+            return
+        }
+        #expect(lastText == "最终回复")
     }
 
     @Test("rejected write does not modify the file and error is returned to the model")
@@ -823,6 +911,100 @@ struct ChatRoomTemplateApplyTests {
 
         // 失效按 roleID 报告（provider 失效与 model 失效都算）
         #expect(result.invalidatedRoleIDs == [providerGone.id, modelGone.id])
+    }
+}
+
+// MARK: - 实时发言（流式事件上屏）
+
+@Suite("ChatRoomLoop 实时发言")
+@MainActor
+struct ChatRoomLiveSpeechTests {
+    /// 覆写 chatWithEvents：推送实时事件并返回最终响应
+    private struct StreamingMockProvider: ChatRoomLLMProvider {
+        func chat(systemPrompt: String, messages: [ChatRoomLLMMessage]) async throws -> ChatRoomLLMResponse {
+            try await chatWithEvents(systemPrompt: systemPrompt, messages: messages, onEvent: nil)
+        }
+
+        func chatWithEvents(
+            systemPrompt: String,
+            messages: [ChatRoomLLMMessage],
+            onEvent: (@MainActor @Sendable (ChatRoomSpeechEvent) -> Void)?
+        ) async throws -> ChatRoomLLMResponse {
+            await onEvent?(.textDelta("流式"))
+            await onEvent?(.toolStarted(ChatRoomToolCall(id: "t1", name: "read_file", arguments: "{}")))
+            await onEvent?(.toolFinished(ChatRoomToolResult(toolCallID: "t1", output: "内容", isError: false)))
+            return ChatRoomLLMResponse(
+                content: "最终发言",
+                toolCalls: [ChatRoomToolCall(id: "t1", name: "read_file", arguments: "{}")],
+                toolResults: [ChatRoomToolResult(toolCallID: "t1", output: "内容", isError: false)]
+            )
+        }
+    }
+
+    private struct FailingProvider: ChatRoomLLMProvider {
+        struct Boom: Error {}
+        func chat(systemPrompt: String, messages: [ChatRoomLLMMessage]) async throws -> ChatRoomLLMResponse {
+            throw Boom()
+        }
+    }
+
+    private func makeLoop(
+        provider: some ChatRoomLLMProvider
+    ) throws -> (ChatRoomLoop, ChatRoomRuntime, ChatRoomStore, URL) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-live-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: dir)
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "实时发言测试", roles: [role], projectPath: "/tmp/p")
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+        let loop = ChatRoomLoop(store: store, llmFactory: MockProviderFactory(provider: provider))
+        return (loop, runtime, store, dir)
+    }
+
+    private struct MockProviderFactory: ChatRoomLLMProviderFactory {
+        let provider: ChatRoomLLMProvider
+        func createProvider(
+            profileID: String,
+            modelID: String,
+            projectPath: String,
+            roleID: String,
+            roleName: String
+        ) throws -> ChatRoomLLMProvider {
+            provider
+        }
+    }
+
+    @Test("live speech finalizes the provisional message and persists once")
+    func liveSpeechFinalizes() async throws {
+        let (loop, runtime, store, dir) = try makeLoop(provider: StreamingMockProvider())
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // 临时消息被定型为最终发言（内容以最终响应覆盖实时累积）
+        #expect(runtime.messages.count == 1)
+        #expect(runtime.messages.last?.content == "最终发言")
+        #expect(runtime.messages.last?.toolCalls?.count == 1)
+        #expect(runtime.messages.last?.toolResults?.count == 1)
+        // 只有定型后的消息落盘（实时改写过程不写 messages.jsonl）
+        let persisted = try store.loadMessages(for: runtime.chatroom.id)
+        #expect(persisted.count == 1)
+        #expect(persisted.last?.content == "最终发言")
+    }
+
+    @Test("failed speech removes the provisional message")
+    func failedSpeechCleansUp() async throws {
+        let (loop, runtime, store, dir) = try makeLoop(provider: FailingProvider())
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        await #expect(throws: (Error).self) {
+            try await loop.triggerNextSpeaker(runtime: runtime)
+        }
+
+        // 临时消息已移除，历史与落盘都不留残骸
+        #expect(runtime.messages.isEmpty)
+        #expect(try store.loadMessages(for: runtime.chatroom.id).isEmpty)
     }
 }
 
