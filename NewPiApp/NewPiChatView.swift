@@ -42,6 +42,8 @@ struct NewPiSessionPanel: View {
     @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
     @State private var draftAttachments: [DraftImageAttachment] = []
+    /// 发送成功礼花触发序号：每次 `runtime.isStreaming` 由 false→true 自增一。
+    @State private var confettiTrigger = 0
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
 
@@ -114,6 +116,21 @@ struct NewPiSessionPanel: View {
             }
 
             chatComposer
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // 小礼花层：allowsHitTesting(false)，不挡 transcript 滚动 / rail / jump 按钮；
+            // 发射原点固定在面板右下角（Send 按钮恒在最右），粒子向上飞进 transcript 区域。
+            NewPiConfettiBurstView(trigger: confettiTrigger)
+                .zIndex(10)
+        }
+        .onChange(of: runtime.isStreaming) { oldValue, newValue in
+            // 仅「false→true」触发：这是 send() 通过全部本地校验、进入发送流程的唯一翻转点
+            //（能力拦截 / 附件校验 / 落盘失败都在 isStreaming=true 之前 return）。
+            // 观察源是面板级 runtime 而非 viewModel 镜像，后台会话的礼花只在自己的面板炸开，
+            // 天然多会话隔离；onChange 默认 initial:false，切进流式会话不会误放。
+            if oldValue == false && newValue == true {
+                confettiTrigger += 1
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
