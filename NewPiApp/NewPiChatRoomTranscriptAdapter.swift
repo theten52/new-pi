@@ -58,6 +58,12 @@ struct ChatRoomTranscriptAdapter {
             }
             guard let messageID = UUID(uuidString: message.id) else { continue }
 
+            // 系统标记（自动压缩等，roleID=system）：仅展示行，不渲染成角色发言
+            if message.roleID == ChatRoomContextBuilder.systemRoleID {
+                items.append(NewPiTranscriptItem(id: messageID, kind: .system, body: message.content))
+                continue
+            }
+
             if message.isUserMessage {
                 items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content))
                 continue

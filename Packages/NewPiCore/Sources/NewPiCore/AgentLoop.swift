@@ -69,6 +69,20 @@ public struct AgentLoop: Sendable {
                             config: config,
                             continuation: continuation
                         )
+                        if assistant.stopReason == .length {
+                            // 截断可见性：此前 max_tokens 截断（StopReason.length）静默发生，
+                            // 表现为「任务没做完」却无任何线索
+                            NewPiLogger.error(
+                                category: "agent-loop",
+                                message: "Assistant output truncated at max_tokens",
+                                details: """
+                                本回合输出达到模型 max_tokens 上限被截断，内容可能不完整。
+                                textLength=\(assistant.text.count)
+                                toolCalls=\(assistant.toolCalls.count)
+                                建议：增大 provider 的 maxOutputTokens，或把任务拆分为多步。
+                                """
+                            )
+                        }
                         try appendMessage(.assistant(assistant), to: &context, continuation: continuation)
                         // 每轮完成即落盘（增量持久化），保证任何时刻切走都有已提交内容。
                         continuation.yield(.contextSnapshot(context))

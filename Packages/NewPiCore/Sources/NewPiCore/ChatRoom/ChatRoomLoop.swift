@@ -42,15 +42,20 @@ public final class ChatRoomLoop {
     private let llmFactory: any ChatRoomLLMProviderFactory
     /// 与 llmFactory 共享的审批管理器；UI 通过它观察并弹出审批卡片
     public let approvalManager: ChatRoomApprovalManager
+    /// 共享上下文预算（各角色最小 context window，tokens）。
+    /// 由 UI 注入（依赖 providers.json）；返回 nil 时禁用自动压缩。
+    private let contextBudgetTokens: ((ChatRoom) -> Int?)?
 
     public init(
         store: ChatRoomStore = .shared,
         llmFactory: (any ChatRoomLLMProviderFactory)? = nil,
-        approvalManager: ChatRoomApprovalManager = ChatRoomApprovalManager()
+        approvalManager: ChatRoomApprovalManager = ChatRoomApprovalManager(),
+        contextBudgetTokens: ((ChatRoom) -> Int?)? = nil
     ) {
         self.store = store
         self.llmFactory = llmFactory ?? ChatRoomLLMProviderFactoryImpl(approvalManager: approvalManager)
         self.approvalManager = approvalManager
+        self.contextBudgetTokens = contextBudgetTokens
     }
 
     // MARK: - 阶段流转
@@ -266,6 +271,75 @@ public final class ChatRoomLoop {
         try store.save(runtime.chatroom)
     }
 
+    /// 上下文自动压缩：把检查点之后、最近 8 条之前的历史摘要成检查点。
+    /// 摘要失败不阻塞发言（继续用未压缩上下文，超窗由 API 错误兜底）。
+    private func compactContextIfNeeded(runtime: ChatRoomRuntime, provider: ChatRoomLLMProvider) async {
+        guard let budget = contextBudgetTokens?(runtime.chatroom), budget > 0 else { return }
+        let estimate = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
+        guard estimate >= Int(Double(budget) * 0.8) else { return }
+
+        let keepRecent = 8
+        let effective = ChatRoomContextBuilder.effectiveHistory(room: runtime.chatroom, history: runtime.messages)
+        guard effective.count > keepRecent else { return }
+        let toSummarize = effective.dropLast(keepRecent).filter { $0.roleID != ChatRoomContextBuilder.systemRoleID }
+        guard let lastSummarized = toSummarize.last else { return }
+
+        do {
+            let transcript = toSummarize.map { message -> String in
+                let speaker: String
+                if message.isUserMessage {
+                    speaker = "用户"
+                } else {
+                    speaker = runtime.chatroom.role(by: message.roleID)?.name ?? message.roleID
+                }
+                return "【\(speaker)】\(message.content)"
+            }.joined(separator: "\n\n")
+
+            var prompt = "请把以下多模型协作对话压缩为要点摘要。"
+            if let existing = runtime.chatroom.compactionSummary, !existing.isEmpty {
+                prompt += "\n\n已有摘要（覆盖更早的历史，请融合进新摘要）：\n\(existing)"
+            }
+            prompt += "\n\n待压缩对话：\n\(transcript)"
+
+            let response = try await provider.chat(
+                systemPrompt: ChatRoomContextBuilder.compactionSystemPrompt,
+                messages: [.user(prompt)]
+            )
+            let summary = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty, !summary.hasPrefix("[输出被截断") else { return }
+
+            runtime.chatroom.compactionSummary = summary
+            runtime.chatroom.compactedUpToMessageID = lastSummarized.id
+            runtime.chatroom.updatedAt = Date()
+            try store.save(runtime.chatroom)
+
+            // 展示用标记：roleID = system 仅用于界面，不进入模型上下文
+            let marker = ChatRoomMessage(
+                chatroomID: runtime.chatroom.id,
+                roleID: ChatRoomContextBuilder.systemRoleID,
+                content: "🧹 上下文估算 \(estimate) tokens，已达预算阈值，自动压缩早期对话（摘要 \(summary.count) 字，保留最近 \(keepRecent) 条原文）",
+                phase: runtime.chatroom.currentPhase
+            )
+            runtime.messages.append(marker)
+            try store.appendMessage(marker, to: runtime.chatroom.id)
+
+            NewPiLogger.info(
+                category: "chatroom",
+                message: "Context auto-compacted",
+                details: """
+                estimate=\(estimate) budget=\(budget)
+                summarized=\(toSummarize.count) summaryChars=\(summary.count)
+                """
+            )
+        } catch {
+            NewPiLogger.error(
+                category: "chatroom",
+                message: "Context compaction failed, continuing without compaction",
+                details: error.localizedDescription
+            )
+        }
+    }
+
     /// 角色发言
     private func speak(role: ChatRoomRole, runtime: ChatRoomRuntime) async throws {
         guard let providerID = role.providerProfileID,
@@ -277,6 +351,19 @@ public final class ChatRoomLoop {
         defer { runtime.isRunning = false }
 
         let candidates = extractCandidates(from: runtime.messages)
+
+        let provider = try llmFactory.createProvider(
+            profileID: providerID,
+            modelID: modelID,
+            projectPath: runtime.chatroom.projectPath,
+            roleID: role.id,
+            roleName: role.name
+        )
+
+        // 决策 #7（2026-09-05 调整）：上下文估算达到预算 80% 时自动压缩。
+        // 必须在构建 systemPrompt/上下文之前执行，当轮发言才能用上摘要。
+        await compactContextIfNeeded(runtime: runtime, provider: provider)
+
         let systemPrompt = ChatRoomContextBuilder.systemPrompt(
             role: role,
             phase: runtime.chatroom.currentPhase,
@@ -288,14 +375,6 @@ public final class ChatRoomLoop {
             room: runtime.chatroom,
             history: runtime.messages,
             nextSpeaker: role
-        )
-
-        let provider = try llmFactory.createProvider(
-            profileID: providerID,
-            modelID: modelID,
-            projectPath: runtime.chatroom.projectPath,
-            roleID: role.id,
-            roleName: role.name
         )
 
         let response = try await provider.chat(
@@ -334,12 +413,52 @@ public final class ChatRoomLoop {
 
 // MARK: - 上下文构建
 
-/// 构建角色发言上下文（internal，供单元测试）
+/// 构建角色发言上下文（public，供 UI 预算提示与单元测试复用）
 ///
 /// - 各角色发言带「【角色名】」署名前缀，模型能区分发言人
 /// - 合并连续同角色消息：Anthropic Messages API 要求 user/assistant 严格交替
 /// - 阶段提示并入 systemPrompt，不再作为消息插入（避免产生连续 user 消息）
-enum ChatRoomContextBuilder {
+/// - 压缩检查点（决策 #7，2026-09-05 调整）：检查点之前的历史由摘要替代，
+///   仅影响模型上下文，messages.jsonl 的记录保持完整
+public enum ChatRoomContextBuilder {
+    /// 展示专用的系统标记消息 roleID：不进入模型上下文、不参与压缩摘要
+    public static let systemRoleID = "system"
+
+    /// 自动压缩的摘要生成提示词
+    public static let compactionSystemPrompt = """
+        你负责压缩多模型协作聊天室的历史对话。请把输入的对话压缩为要点摘要，保留：
+        - 用户的原始任务与目标
+        - 已选定的方案与关键决策（含方案标题）
+        - 各角色的重要结论、分歧与承诺
+        - 已完成的文件改动与待办事项
+        用简体中文输出纯文本摘要，不要评论，不要调用任何工具。
+        """
+
+    /// 构建模型实际收到的历史：检查点之后的消息（无检查点则为全部）。
+    /// 仅当摘要存在且检查点可定位时生效，否则回退完整历史。
+    public static func effectiveHistory(room: ChatRoom, history: [ChatRoomMessage]) -> [ChatRoomMessage] {
+        guard let summary = room.compactionSummary, !summary.isEmpty,
+              let checkpointID = room.compactedUpToMessageID, !checkpointID.isEmpty,
+              let index = history.firstIndex(where: { $0.id == checkpointID }) else {
+            return history
+        }
+        return Array(history[history.index(after: index)...])
+    }
+
+    /// 估算构建上下文的 token 占用（含摘要、检查点后的历史、systemPrompt 近似开销）。
+    /// 工具结果不跨发言重放，故不计入（与实际 API 载荷一致）。
+    public static func estimatedTokens(room: ChatRoom, history: [ChatRoomMessage]) -> Int {
+        // 角色 systemPrompt + 阶段提示 + 触发消息的近似开销
+        var total = 400
+        if let summary = room.compactionSummary, !summary.isEmpty {
+            total += ContextTokenEstimator.estimate(text: summary) + 16
+        }
+        for message in effectiveHistory(room: room, history: history) where message.roleID != systemRoleID {
+            total += ContextTokenEstimator.estimate(text: message.content) + 8
+        }
+        return total
+    }
+
     static func systemPrompt(
         role: ChatRoomRole,
         phase: ChatRoomPhase,
@@ -389,7 +508,10 @@ enum ChatRoomContextBuilder {
     ) -> [ChatRoomLLMMessage] {
         var context: [ChatRoomLLMMessage] = []
 
-        for msg in history {
+        for msg in effectiveHistory(room: room, history: history) {
+            // 展示专用标记不进入模型上下文
+            if msg.roleID == systemRoleID { continue }
+
             let message: ChatRoomLLMMessage
             if msg.isUserMessage {
                 guard !msg.content.isEmpty else { continue }
@@ -415,7 +537,17 @@ enum ChatRoomContextBuilder {
             }
         }
 
-        // Anthropic 要求首条消息必须是 user
+        // 历史摘要置于上下文开头；与首条 user 合并以保持角色交替
+        if let summary = room.compactionSummary, !summary.isEmpty {
+            let summaryContent = "【历史摘要】\(summary)"
+            if let first = context.first, first.role == .user {
+                context[0] = ChatRoomLLMMessage(role: .user, content: summaryContent + "\n\n" + first.content)
+            } else {
+                context.insert(.user(summaryContent), at: 0)
+            }
+        }
+
+        // Anthropic 要求首条消息必须是 user（摘要兜底后一般已满足）
         if let first = context.first, first.role == .assistant {
             let lead = room.description.isEmpty ? "（用户尚未发言，请直接开始）" : "【任务背景】\(room.description)"
             context.insert(.user(lead), at: 0)

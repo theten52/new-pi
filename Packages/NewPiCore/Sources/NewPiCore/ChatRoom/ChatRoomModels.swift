@@ -198,6 +198,11 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
     /// 第 3 轮 review 未通过时流程暂停，等待用户解锁（追加轮数）或标记完成。
     /// Optional 保证旧配置文件缺字段时可正常解码。
     public var pausedAtRoundLimit: Bool?
+    /// 上下文压缩摘要检查点（决策 #7，2026-09-05 调整为自动压缩）：
+    /// `compactedUpToMessageID` 之前的历史已被 `compactionSummary` 摘要替代——
+    /// 仅在构建模型上下文时生效，messages.jsonl 保持完整用于展示。
+    public var compactionSummary: String?
+    public var compactedUpToMessageID: String?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -213,6 +218,8 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         votes: [Vote] = [],
         currentSpeakerIndex: Int = 0,
         pausedAtRoundLimit: Bool? = nil,
+        compactionSummary: String? = nil,
+        compactedUpToMessageID: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -227,6 +234,8 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         self.votes = votes
         self.currentSpeakerIndex = currentSpeakerIndex
         self.pausedAtRoundLimit = pausedAtRoundLimit
+        self.compactionSummary = compactionSummary
+        self.compactedUpToMessageID = compactedUpToMessageID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

@@ -144,6 +144,61 @@ struct ChatRoomContextBuilderTests {
         #expect(context[1].content.contains("read_file"))
     }
 
+    @Test("context uses summary checkpoint and skips system markers")
+    func checkpointSummaryAndSystemSkip() {
+        let architect = ChatRoomRole.from(preset: .architect)
+        let room = makeRoom(roles: [architect])
+        let early = ChatRoomMessage(chatroomID: room.id, roleID: "user", content: "早期问题", phase: .discussion)
+        let earlyReply = ChatRoomMessage(chatroomID: room.id, roleID: architect.id, content: "早期回复", phase: .discussion)
+        let marker = ChatRoomMessage(
+            chatroomID: room.id,
+            roleID: ChatRoomContextBuilder.systemRoleID,
+            content: "🧹 已自动压缩早期对话",
+            phase: .discussion
+        )
+        let recent = ChatRoomMessage(chatroomID: room.id, roleID: "user", content: "最近问题", phase: .discussion)
+
+        var compacted = room
+        compacted.compactionSummary = "早期对话摘要"
+        compacted.compactedUpToMessageID = earlyReply.id
+
+        let context = ChatRoomContextBuilder.messages(
+            room: compacted,
+            history: [early, earlyReply, marker, recent],
+            nextSpeaker: architect
+        )
+        // 摘要置于开头并与首条 user 合并（保持角色交替）；
+        // 检查点之前的消息与系统标记都不进入上下文
+        #expect(context.count == 1)
+        #expect(context[0].role == .user)
+        #expect(context[0].content.contains("【历史摘要】早期对话摘要"))
+        #expect(context[0].content.contains("最近问题"))
+        #expect(!context[0].content.contains("早期问题"))
+        #expect(!context[0].content.contains("已自动压缩"))
+    }
+
+    @Test("estimatedTokens counts summary and post-checkpoint messages only")
+    func estimatedTokensRespectsCheckpoint() {
+        let room = makeRoom(roles: [])
+        let big = ChatRoomMessage(chatroomID: room.id, roleID: "user", content: String(repeating: "a", count: 400), phase: .discussion)
+        let small = ChatRoomMessage(chatroomID: room.id, roleID: "user", content: "你好", phase: .discussion)
+        let marker = ChatRoomMessage(chatroomID: room.id, roleID: ChatRoomContextBuilder.systemRoleID, content: "🧹 已压缩", phase: .discussion)
+
+        let full = ChatRoomContextBuilder.estimatedTokens(room: room, history: [big, small])
+        var compacted = room
+        compacted.compactionSummary = "早期摘要"
+        compacted.compactedUpToMessageID = big.id
+        let afterCompaction = ChatRoomContextBuilder.estimatedTokens(room: compacted, history: [big, small, marker])
+
+        // 压缩后估算显著下降
+        #expect(afterCompaction < full)
+        // system 标记不计入估算
+        #expect(
+            ChatRoomContextBuilder.estimatedTokens(room: room, history: [big, small])
+                == ChatRoomContextBuilder.estimatedTokens(room: room, history: [big, small, marker])
+        )
+    }
+
     @Test("systemPrompt includes phase hint, round info, and candidates for voting")
     func systemPromptVariants() {
         let programmer = ChatRoomRole.from(preset: .programmer)
@@ -595,6 +650,33 @@ struct ChatRoomAgenticLoopTests {
         #expect(response.toolResults[0].isError == false)
     }
 
+    @Test("max_tokens truncation is marked in the response content")
+    func maxTokensTruncationMarker() async throws {
+        let counter = CallCounter()
+        let mock = MockLLMProvider(counter: counter) { _ in
+            [
+                .textDelta("写到一半的内容"),
+                .completed(stopReason: .length, usage: UsageStats()),
+            ]
+        }
+
+        let impl = ChatRoomLLMProviderImpl(
+            provider: mock,
+            modelConfig: ModelConfig(provider: "mock", modelID: "test-model"),
+            toolExecutor: ChatRoomToolExecutor(
+                projectPath: FileManager.default.temporaryDirectory.path,
+                approvalManager: ChatRoomApprovalManager()
+            )
+        )
+
+        let response = try await impl.chat(
+            systemPrompt: "测试",
+            messages: [ChatRoomLLMMessage.user("写个长文件")]
+        )
+        #expect(response.content.contains("写到一半的内容"))
+        #expect(response.content.contains("[输出被截断"))
+    }
+
     @Test("rejected write does not modify the file and error is returned to the model")
     func rejectedWriteReturnsErrorResult() async throws {
         let dir = FileManager.default.temporaryDirectory
@@ -741,6 +823,108 @@ struct ChatRoomTemplateApplyTests {
 
         // 失效按 roleID 报告（provider 失效与 model 失效都算）
         #expect(result.invalidatedRoleIDs == [providerGone.id, modelGone.id])
+    }
+}
+
+// MARK: - 自动压缩（决策 #7，2026-09-05 调整）
+
+@Suite("ChatRoomLoop 自动压缩")
+@MainActor
+struct ChatRoomCompactionTests {
+    private final class ResponseQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String]
+        init(_ items: [String]) { self.items = items }
+        func next() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return items.isEmpty ? "（无回复）" : items.removeFirst()
+        }
+    }
+
+    private struct MockChatRoomProvider: ChatRoomLLMProvider {
+        let queue: ResponseQueue
+        func chat(systemPrompt: String, messages: [ChatRoomLLMMessage]) async throws -> ChatRoomLLMResponse {
+            ChatRoomLLMResponse(content: queue.next())
+        }
+    }
+
+    private struct MockFactory: ChatRoomLLMProviderFactory {
+        let queue: ResponseQueue
+        func createProvider(
+            profileID: String,
+            modelID: String,
+            projectPath: String,
+            roleID: String,
+            roleName: String
+        ) throws -> ChatRoomLLMProvider {
+            MockChatRoomProvider(queue: queue)
+        }
+    }
+
+    @Test("compacts history and records checkpoint when budget threshold is reached")
+    func compactsWhenOverBudget() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-compaction-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "压缩测试", roles: [role], projectPath: "/tmp/p")
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+        for index in 0..<12 {
+            runtime.messages.append(
+                ChatRoomMessage(chatroomID: chatroom.id, roleID: "user", content: "历史消息 \(index)", phase: .discussion)
+            )
+        }
+
+        // 第一次 chat 调用 = 压缩摘要，第二次 = 正式发言
+        let queue = ResponseQueue(["这是压缩摘要", "最终发言"])
+        let loop = ChatRoomLoop(
+            store: store,
+            llmFactory: MockFactory(queue: queue),
+            contextBudgetTokens: { _ in 50 } // 极小预算，必然触发
+        )
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        #expect(runtime.chatroom.compactionSummary == "这是压缩摘要")
+        // 检查点落在被摘要的最后一条消息上（12 条、保留最近 8 条 → 前 4 条被摘要）
+        #expect(runtime.messages.first { $0.id == runtime.chatroom.compactedUpToMessageID }?.content == "历史消息 3")
+        // 展示标记（roleID=system）落盘且不进入上下文
+        #expect(runtime.messages.contains { $0.roleID == "system" && $0.content.contains("自动压缩") })
+        #expect(runtime.messages.last?.content == "最终发言")
+
+        let reloaded = try store.load(id: chatroom.id)
+        #expect(reloaded.compactionSummary == "这是压缩摘要")
+    }
+
+    @Test("compaction is skipped when a budget is not provided")
+    func noBudgetNoCompaction() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-compaction-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "无预算", roles: [role], projectPath: "/tmp/p")
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+        for index in 0..<12 {
+            runtime.messages.append(
+                ChatRoomMessage(chatroomID: chatroom.id, roleID: "user", content: "历史消息 \(index)", phase: .discussion)
+            )
+        }
+
+        let queue = ResponseQueue(["最终发言"])
+        let loop = ChatRoomLoop(store: store, llmFactory: MockFactory(queue: queue))
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        #expect(runtime.chatroom.compactionSummary == nil)
+        #expect(!runtime.messages.contains { $0.roleID == "system" })
+        #expect(runtime.messages.last?.content == "最终发言")
     }
 }
 

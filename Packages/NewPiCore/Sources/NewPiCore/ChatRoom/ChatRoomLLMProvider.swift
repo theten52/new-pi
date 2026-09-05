@@ -29,6 +29,7 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
         var allToolResults: [ChatRoomToolResult] = []
         var iteration = 0
         let maxIterations = 500
+        var lastStopReason: StopReason = .stop
 
         while iteration < maxIterations {
             iteration += 1
@@ -54,8 +55,8 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                 case .toolCall(let toolCall):
                     hasToolCalls = true
                     toolCalls.append(toolCall)
-                case .completed:
-                    break
+                case let .completed(reason, _):
+                    lastStopReason = reason
                 }
             }
 
@@ -100,6 +101,12 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
 
         // 解析候选方案（决策 #16：JSON 优先，回退字符串）
         let candidates = ChatRoomCandidateParser.parse(from: finalResponseText)
+
+        // max_tokens 截断可见性：StopReason.length（OpenAI finish_reason=length /
+        // Anthropic max_tokens）表示输出被截断，不做标记的话「输出没做完」无从察觉
+        if lastStopReason == .length {
+            finalResponseText += "\n\n[输出被截断：达到模型 max_tokens 上限]"
+        }
 
         return ChatRoomLLMResponse(
             content: finalResponseText,

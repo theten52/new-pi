@@ -26,11 +26,29 @@ final class ChatRoomFlowController: ObservableObject {
     private var transcriptAdapter = ChatRoomTranscriptAdapter()
     private var cancellables: Set<AnyCancellable> = []
 
+    /// providers.json 读取器：自动压缩预算需要各角色的 context window
+    private let configStore = ProviderConfigStore()
+
     init(chatroom: ChatRoom) {
         let manager = ChatRoomApprovalManager()
         self.approvalManager = manager
         self.runtime = ChatRoomRuntime(chatroom: chatroom)
-        self.loop = ChatRoomLoop(approvalManager: manager)
+        self.loop = ChatRoomLoop(
+            approvalManager: manager,
+            // 决策 #7（2026-09-05 调整）：自动压缩预算 = 各角色最小 context window
+            contextBudgetTokens: { [configStore] room in
+                guard let config = try? configStore.load() else { return nil }
+                var limit: Int?
+                for role in room.configuredRoles {
+                    guard let profileID = role.providerProfileID,
+                          let modelID = role.modelID,
+                          let profile = config.profiles.first(where: { $0.id == profileID }) else { continue }
+                    let window = profile.contextWindow(for: modelID)
+                    if window > 0 { limit = min(limit ?? window, window) }
+                }
+                return limit
+            }
+        )
         // 历史消息在控制器创建时加载一次（原 DetailView.onAppear 的 loadMessages 上移）。
         self.runtime.messages = (try? ChatRoomStore.shared.loadMessages(for: chatroom.id)) ?? []
         // 转发 runtime / approvalManager 的变更，view 侧只需 @ObservedObject 本控制器。

@@ -24,4 +24,16 @@ public struct CompactionConfig: Sendable, Equatable {
     public var triggerTokenCount: Int {
         max(1, Int(Double(contextTokenLimit) * triggerRatio))
     }
+
+    /// 已知模型上下文窗口时的推荐预算：窗口 × 0.8（留 20% 给本轮输出与压缩摘要）。
+    /// 固定 96k 预算与模型窗口脱钩：大窗口模型被过早压缩丢上下文，
+    /// 小窗口模型压缩太晚直接超窗（2026-09-05 限制调研结论）。
+    public static func recommended(contextWindow: Int) -> CompactionConfig {
+        CompactionConfig(
+            enabled: true,
+            contextTokenLimit: max(1, Int(Double(contextWindow) * 0.8)),
+            triggerRatio: 0.75,
+            keepRecentMessages: 8
+        )
+    }
 }

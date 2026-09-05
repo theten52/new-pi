@@ -1534,14 +1534,8 @@ struct ChatRoomDetailView: View {
         }
         guard let cap = limit, cap > 0 else { return nil }
 
-        let chars = runtime.messages.reduce(0) { sum, message in
-            // 工具结果与参数也是上下文开销的一部分（决策 #7 预算）
-            var total = sum + message.content.count
-            total += message.toolResults?.reduce(0) { $0 + $1.output.count } ?? 0
-            total += message.toolCalls?.reduce(0) { $0 + $1.arguments.count } ?? 0
-            return total
-        }
-        let usedTokens = chars / 2 // 中英混合粗略估算：约 2 字符/token
+        // 与自动压缩共用核心估算器（摘要检查点 + 检查点后消息，与实际 API 载荷一致）
+        let usedTokens = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
         let ratio = Double(usedTokens) / Double(cap)
         guard ratio >= 0.8 else { return nil }
         return ContextBudget(usedRatio: ratio, limitTokens: cap)

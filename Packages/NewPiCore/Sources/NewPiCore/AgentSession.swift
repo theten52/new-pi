@@ -357,7 +357,8 @@ public enum AgentSessionFactory {
         model: ModelConfig,
         toolPolicy: ToolPolicyRules = .codingAgentDefault,
         restoredMessages: [AgentMessage] = [],
-        additionalTools: [any AgentTool] = []
+        additionalTools: [any AgentTool] = [],
+        contextWindow: Int? = nil
     ) -> AgentSession {
         let tools = codingTools(
             workingDirectory: workingDirectory,
@@ -371,6 +372,8 @@ public enum AgentSessionFactory {
             llm: llm,
             tools: tools,
             toolPolicy: toolPolicy,
+            // 调用方提供模型窗口时按窗口推导压缩预算，否则用通用默认值
+            compaction: contextWindow.map { CompactionConfig.recommended(contextWindow: $0) } ?? CompactionConfig(),
             dangerEvaluator: DangerEvaluator(
                 policy: approvalPolicy,
                 llmSupplementEnabled: approvalPolicy.llmSupplementEnabled

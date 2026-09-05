@@ -10,6 +10,31 @@ struct ContextTokenEstimatorTests {
         let long = ContextTokenEstimator.estimate(.user(String(repeating: "a", count: 400)))
         #expect(long > short)
     }
+
+    @Test("CJK text is weighted ~1 token per character, ASCII ~4 characters per token")
+    func cjkWeightedEstimation() {
+        // 200 个汉字 ≈ 200 token；旧实现（count/4）会低估成 50
+        let cjk = ContextTokenEstimator.estimate(text: String(repeating: "你好", count: 100))
+        #expect(cjk >= 190 && cjk <= 210)
+
+        // 400 个 ASCII 字符 ≈ 100 token
+        let ascii = ContextTokenEstimator.estimate(text: String(repeating: "a", count: 400))
+        #expect(ascii >= 95 && ascii <= 105)
+    }
+}
+
+@Suite("CompactionConfig")
+struct CompactionConfigTests {
+    @Test("recommended budget derives from model context window")
+    func recommendedBudget() {
+        let config = CompactionConfig.recommended(contextWindow: 200_000)
+        #expect(config.contextTokenLimit == 160_000)
+        #expect(config.triggerTokenCount == 120_000)
+
+        // 小窗口模型预算同步收窄，避免压缩触发太晚
+        let small = CompactionConfig.recommended(contextWindow: 32_000)
+        #expect(small.contextTokenLimit == 25_600)
+    }
 }
 
 @Suite("CompactionService partition")

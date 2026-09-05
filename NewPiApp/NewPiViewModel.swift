@@ -777,7 +777,11 @@ final class NewPiViewModel: ObservableObject {
                     model: profile.modelConfig,
                     additionalTools: mcpTools
                 ),
-                toolPolicy: .codingAgentDefault
+                toolPolicy: .codingAgentDefault,
+                // 按当前模型窗口推导压缩预算，与新建会话保持一致
+                compaction: CompactionConfig.recommended(
+                    contextWindow: profile.contextWindow(for: profile.modelID)
+                )
             )
             await session?.updateConfig(newConfig)
 
@@ -1180,7 +1184,8 @@ final class NewPiViewModel: ObservableObject {
                         llm: llm,
                         model: profile.modelConfig,
                         restoredMessages: restoredMessages,
-                        additionalTools: mcpTools
+                        additionalTools: mcpTools,
+                        contextWindow: profile.contextWindow(for: profile.modelID)
                     )
                     let h = restoredHeader ?? SessionHeader(workingDirectory: projectURL)
                     await built.attachPersistence(fileURL: fileURL, header: h)
@@ -1197,7 +1202,8 @@ final class NewPiViewModel: ObservableObject {
                         workingDirectory: projectURL,
                         llm: llm,
                         model: profile.modelConfig,
-                        additionalTools: mcpTools
+                        additionalTools: mcpTools,
+                        contextWindow: profile.contextWindow(for: profile.modelID)
                     )
                     await built.attachPersistence(fileURL: created.fileURL, header: created.context.header)
                     session = built
