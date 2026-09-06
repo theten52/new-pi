@@ -1240,6 +1240,7 @@ struct ChatRoomDetailView: View {
         }
         // 历史消息在控制器创建时加载；runningTask 不随视图显隐取消——审批 continuation
         // 由控制器持有的 approvalManager 承载，切走时挂起、切回时审批 sheet 自动重弹。
+        // 发言收尾的落底对齐在渲染器 JS 侧完成（forkLock 翻转时的 RAF 追平）。
         .alert(
             "聊天室提示",
             isPresented: Binding(
@@ -1540,7 +1541,8 @@ struct ChatRoomDetailView: View {
 
     // MARK: - 状态栏（CHATROOM-STATUS-BAR）
 
-    /// 状态栏主标签：等待审批 > 发言中（角色名 + 正在思考）> 就绪
+    /// 状态栏主标签：等待审批 > 发言中（角色名 + 正在思考）> 就绪。
+    /// 发言角色取 speakingRoleID（@指定时轮转索引尚未推进，currentSpeaker 会显示错）。
     private var chatroomStatusPresentation: NewPiAgentStatusPresentation {
         if !approvalManager.pendingApprovals.isEmpty {
             return NewPiAgentStatusPresentation(
@@ -1549,10 +1551,19 @@ struct ChatRoomDetailView: View {
                 isActive: true
             )
         }
-        if runtime.isRunning, let speaker = runtime.currentSpeaker {
+        if runtime.isRunning {
+            let speaker = runtime.speakingRoleID.flatMap { runtime.chatroom.role(by: $0) }
+                ?? runtime.currentSpeaker
+            if let speaker {
+                return NewPiAgentStatusPresentation(
+                    systemImage: speaker.icon,
+                    label: "\(speaker.name) 正在思考…",
+                    isActive: true
+                )
+            }
             return NewPiAgentStatusPresentation(
-                systemImage: speaker.icon,
-                label: "\(speaker.name) 正在思考…",
+                systemImage: "sparkles",
+                label: "发言中…",
                 isActive: true
             )
         }

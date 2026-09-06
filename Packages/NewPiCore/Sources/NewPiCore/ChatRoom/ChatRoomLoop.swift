@@ -7,6 +7,9 @@ public final class ChatRoomRuntime: ObservableObject {
     @Published public var messages: [ChatRoomMessage] = []
     @Published public var isRunning = false
     @Published public var currentSpeakerIndex = 0
+    /// 正在发言的角色（发言期间由 loop 设置）。与 currentSpeaker（轮转索引推导）
+    /// 不同：@指定发言时索引尚未推进，状态栏需要这个显式字段才能显示正确角色。
+    @Published public var speakingRoleID: String?
     @Published public var error: String?
     /// 本聊天室累计 token 用量（Phase B：逐角色发言的 assistant 消息累加）。
     @Published public var usage = UsageStats()
@@ -394,7 +397,11 @@ public final class ChatRoomLoop {
         }
 
         runtime.isRunning = true
-        defer { runtime.isRunning = false }
+        runtime.speakingRoleID = role.id
+        defer {
+            runtime.isRunning = false
+            runtime.speakingRoleID = nil
+        }
         // steering 队列只在发言生命周期内有效：插话内容早已写入共享历史，
         // 未被当轮消费（纯文本发言/多条剩余）的残留在此丢弃，避免下次发言重复投喂
         defer { steeringQueue.removeAll() }

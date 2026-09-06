@@ -67,6 +67,9 @@
     // restoringAnchor 模式下的目标锚点与截止期限（有界校正，防无限跟随）。
     restoreTarget: null,
     restoreDeadline: 0,
+    // 最近一次程序滚动的时刻：scroll 事件据此区分「程序钉底/锚点校正」与
+    // 「滚动条拖拽」（后者不发 wheel，必须靠 scroll 事件识别用户接管）。
+    lastProgrammaticScrollAt: 0,
 
     isNearBottom: function () {
       return (document.documentElement.scrollHeight - window.scrollY - window.innerHeight) < nearBottomThreshold;
@@ -95,6 +98,7 @@
       if (!el) {
         return false;
       }
+      this.lastProgrammaticScrollAt = Date.now();
       const target = el.getBoundingClientRect().top + window.scrollY + anchor.delta;
       if (Math.abs(window.scrollY - target) >= 1) {
         window.scrollTo(0, target);
@@ -103,6 +107,7 @@
     },
 
     pinBottom: function () {
+      this.lastProgrammaticScrollAt = Date.now();
       window.scrollTo(0, document.documentElement.scrollHeight);
     },
 
@@ -121,6 +126,9 @@
       if (this.intent === "restoringAnchor") {
         return { anchor: this.restoreTarget };
       }
+      // 流式钉底的维持不在 beginBatch：onScrollSettled 保证 pinnedBottom 在流式
+      // 期间不降级（大块内容后布局导致的「未近底」不再误释放），本分支保持原
+      // 语义——jumpTo 落点/锚点恢复位置不被迫拽回底部。
       if (this.intent === "userScrolling" || !this.isNearBottom()) {
         return { anchor: this.topAnchor() };
       }
@@ -154,6 +162,12 @@
         // 只有用户滚动输入（onUserScrollInput）能提前接管。
         return;
       }
+      // 流式期间钉底不因「内容长高导致的未近底」而释放：立即追平新长出的高度，
+      // 保持刷屏观感；用户滚轮/触控/按键/滚动条拖拽（userScrolling）仍可接管。
+      if (forkLocked && this.intent === "pinnedBottom") {
+        this.pinBottom();
+        return;
+      }
       this.intent = this.isNearBottom() ? "pinnedBottom" : "idle";
     },
 
@@ -163,12 +177,15 @@
         return;
       }
       this.intent = "jumpingToTarget";
+      // 平滑滚动持续数百毫秒：期间抑制用户接管误判（时间戳写到未来）
+      this.lastProgrammaticScrollAt = Date.now() + 700;
       state.el.scrollIntoView({ block: "start", behavior: "smooth" });
     },
 
     scrollToBottom: function (smooth) {
       this.intent = "pinnedBottom";
       if (smooth) {
+        this.lastProgrammaticScrollAt = Date.now() + 600;
         window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
       } else {
         this.pinBottom();
@@ -441,6 +458,18 @@
 
   window.addEventListener("scroll", function () {
     Poller.arm();
+    // 滚动条拖拽识别（不发 wheel/touch 事件）：距上次程序滚动超过窗口期的
+    // 视口位移视为用户接管。
+    // 流式钉底期间必须跳过该判定：scroll anchoring（视口上方内容定稿/预热时
+    // 浏览器的 scrollY 微调）也走 scroll 事件，会被误判为拖拽而释放钉底——
+    // 输出越快高度抖动越大，误判越频繁（钉不住的根因）。滚轮/触控/键盘的
+    // onUserScrollInput 不受影响，仍是即时接管通道。
+    const streamingPinned = forkLocked && Scroll.intent === "pinnedBottom";
+    if (!streamingPinned
+        && Date.now() - Scroll.lastProgrammaticScrollAt > 150
+        && Scroll.intent !== "userScrolling") {
+      Scroll.onUserScrollInput();
+    }
     // scroll 事件在当帧布局后、绘制前分发：这里直接轮询一次，高度平移可同帧抵消，
     // 避免 rAF（下一帧布局前才跑）晚一拍留下单帧闪动。
     if (Scroll.intent === "userScrolling" || Scroll.intent === "idle") {
@@ -989,6 +1018,7 @@
       } else if (op.op === "forkLock") {
         // 全局 fork 锁切换（FORK-LOCK-GLOBAL）：更新所有已有 fork 按钮的禁用态。
         // 锁住（进入流式）或解锁（流式结束）都只影响 fork 按钮，历史条目自身 streaming 位不变。
+        const wasLocked = forkLocked;
         forkLocked = !!op.locked;
         const forkButtons = main.querySelectorAll(".ti-action-fork");
         for (let i = 0; i < forkButtons.length; i += 1) {
@@ -997,6 +1027,24 @@
           const state = ti ? items.get(ti.getAttribute("data-iid")) : null;
           const selfStreaming = state ? !!state.streaming : false;
           btn.disabled = selfStreaming || forkLocked;
+        }
+        // 收尾对齐（CHATROOM-STREAM-PIN）：流式结束的同一批里发生 renderFinal
+        // 重排、候选块追加、详情组收起；流式光标还会停留 ~1.4s 后移除（再次
+        // 引起高度变化），hljs 高亮也有异步布局——全部落在最后一次钉底之后。
+        // 若此前处于钉底跟随，在窗口期内逐帧无条件钉底（到点即停）；
+        // 用户上滚（intent 变 userScrolling）立即退出，不打扰阅读。
+        if (wasLocked && !forkLocked && Scroll.intent === "pinnedBottom") {
+          const catchUpDeadline = Date.now() + 1600;
+          const catchUp = function () {
+            if (Scroll.intent !== "pinnedBottom") {
+              return;
+            }
+            Scroll.pinBottom();
+            if (Date.now() < catchUpDeadline) {
+              window.requestAnimationFrame(catchUp);
+            }
+          };
+          window.requestAnimationFrame(catchUp);
         }
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));

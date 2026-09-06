@@ -108,21 +108,8 @@ struct ChatRoomTranscriptAdapter {
                 ))
             }
 
-            for call in chatroomToolCalls {
-                let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
-                items.append(NewPiTranscriptItem(
-                    id: derivedID("tool-\(call.id)"),
-                    kind: .tool(
-                        name: call.name,
-                        state: result.map { .completed(isError: $0.isError) } ?? .running
-                    ),
-                    body: result?.output ?? "",
-                    toolCommand: Self.truncate(call.arguments),
-                    detailTurnID: speechKey
-                ))
-            }
-
             // 角色发言正文 + 候选方案（决策 5：v1 拼进 markdown，不新增 kind）。
+            // 时序：一次迭代内文本先流式、工具后执行——正文在工具卡之前（CHATROOM-CHRONO-SEGMENTS）。
             // 有工具调用的段 = 中间解说（组内）；无工具调用 = 最终答复（组外）。
             var body = message.content
             if let candidates = message.candidates, !candidates.isEmpty {
@@ -139,6 +126,20 @@ struct ChatRoomTranscriptAdapter {
                     speaker: roleName
                 ))
                 tintHues[messageID] = Self.hue(for: message.roleID)
+            }
+
+            for call in chatroomToolCalls {
+                let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
+                items.append(NewPiTranscriptItem(
+                    id: derivedID("tool-\(call.id)"),
+                    kind: .tool(
+                        name: call.name,
+                        state: result.map { .completed(isError: $0.isError) } ?? .running
+                    ),
+                    body: result?.output ?? "",
+                    toolCommand: Self.truncate(call.arguments),
+                    detailTurnID: speechKey
+                ))
             }
         }
         return (items, tintHues)
