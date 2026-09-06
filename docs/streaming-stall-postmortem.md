@@ -116,7 +116,30 @@ Session 流式渲染主链路在 main..feat/chatroom 间实质零变化。
 其它验证：bcast/consumed 序号两端时间戳逐对对齐（生产→后台消费零延迟）；
 150 行长文完整渲染（截图）；token 速率/状态栏正常；`swift test` 180 全过。
 
-## 七、遗留与后续项
+## 七、钉底回归（PIN-FIX，`74663c8`）
+
+STALL-FIX 合入后用户反馈「输出钉到底部」在 Session 与聊天室双双失效。
+加 PIN-PROBE（scrollState 上报 JS 意图转迁）后定位到两层原因：
+
+1. **钉底意图空窗期不受保护**：发送时 `scrollToBottom` 置 `pinnedBottom`，但
+   流式首批 `forkLock` 要数百毫秒后才到（Release/忙主线更长）。空窗内 scroll
+   事件监听的两条路径都可能误贬意图——拖拽误判（>150ms 无程序滚动即视为用户
+   接管；scroll anchoring 的布局微调也走 scroll 事件）与 `onScrollSettled` 的
+   「未近底即降级」。意图一旦被贬为 userScrolling/idle，Session 与聊天室都
+   **没有任何重新武装机制**，整轮不再跟随。
+2. **聊天室发送从不钉底**：`sendUserMessage` 自初始集成（28996ec）起就没有
+   `scrollToBottom`（Session 的 `sendComposerInput` 有），只靠「idle + 近底」
+   兜底，噪声降级后同样永久失效。
+
+修复：钉底宽限期 1.5s（空窗内跳过拖拽误判与 settle 降级；过期恢复拖拽识别；
+流式中仍由 forkLock 路径保护；滚轮/触控/键盘接管通道不受影响）+ 聊天室发送
+补 `scrollToBottom`。验证：Release 120 行流式全程 `pinnedBottom` 零降级。
+
+**残余认知**：Release 重负载下 WebView 绘制仍可能滞后数秒（可见内容冻结在旧帧，
+flush 节奏与意图都健康——是 WebContent 渲染/表面分配跟不上），追平时直接落在
+钉底位置。观感像「没钉住」，实为遗留项 #1/#2 的 surface churn，需独立治理。
+
+## 八、遗留与后续项
 
 1. **surface churn 未根治**：主线程的同步表面分配等待机制还在，修复只是
    让事件流对它免疫。若想进一步降低卡顿概率，方向是减少流式期间
@@ -133,7 +156,7 @@ Session 流式渲染主链路在 main..feat/chatroom 间实质零变化。
    每 120ms flush 做全量消息→条目重适配 O(n) + SwiftUI 全 body 重估 +
    全量指纹 diff O(总字符)，没有 Session 侧的增量缓冲；长讨论下会显现
 
-## 八、复盘要点（给未来的自己）
+## 九、复盘要点（给未来的自己）
 
 - 「UI 卡」先分清是**渲染慢**还是**事件流积压**——两者修法完全不同；
   本次三轮渲染向修复无效就是因为病灶在事件消费调度
