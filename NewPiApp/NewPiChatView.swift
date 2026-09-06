@@ -74,7 +74,7 @@ struct NewPiSessionPanel: View {
                         streamingBubbleComplete: runtime.streamingBubbleComplete,
                         storeKey: runtime.sessionID,
                         controller: docController,
-                        tintHues: turnTintHues(for: runtime.transcript),
+                        tintHues: NewPiViewModel.transcriptTintHues(for: runtime.transcript),
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；
                         // 无记录则落底。文档内同步锚定，无「高度未回」中间态。
                         restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID),
@@ -83,24 +83,28 @@ struct NewPiSessionPanel: View {
                         }
                     )
                     .overlay(alignment: .bottom) {
-                        if runtime.isStreaming && !docController.isNearBottom {
-                            Button {
-                                docController.scrollToBottom()
-                            } label: {
-                                Label("Jump to latest", systemImage: "arrow.down")
-                                    .font(.callout.weight(.medium))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 8)
-                                    .background(.regularMaterial, in: Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, 12)
-                            .transition(.opacity)
+                        // 常驻挂载 + 透明度开关（STREAMING-LAYOUT-ISOLATION）：条件插入/移除
+                        // 会在流式中途制造结构性布局失效并向 WKWebView 子树传播；
+                        // 恒定结构 + opacity 翻转零布局成本，动画观感与原 transition 等价。
+                        let jumpVisible = runtime.isStreaming && !docController.isNearBottom
+                        Button {
+                            docController.scrollToBottom()
+                        } label: {
+                            Label("Jump to latest", systemImage: "arrow.down")
+                                .font(.callout.weight(.medium))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(.regularMaterial, in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                                )
                         }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 12)
+                        .opacity(jumpVisible ? 1 : 0)
+                        .allowsHitTesting(jumpVisible)
+                        .animation(.easeInOut(duration: 0.15), value: jumpVisible)
                     }
                 }
 
@@ -123,6 +127,11 @@ struct NewPiSessionPanel: View {
             NewPiConfettiBurstView(trigger: confettiTrigger)
                 .zIndex(10)
         }
+        .onAppear {
+            // 流式直连通道（STREAMING-LAYOUT-ISOLATION）：runtime ↔ 本面板控制器结对。
+            // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
+            runtime.docController = docController
+        }
         .onChange(of: runtime.isStreaming) { oldValue, newValue in
             // 仅「false→true」触发：这是 send() 通过全部本地校验、进入发送流程的唯一翻转点
             //（能力拦截 / 附件校验 / 落盘失败都在 isStreaming=true 之前 return）。
@@ -135,21 +144,7 @@ struct NewPiSessionPanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 轮对话色调：只给用户气泡与助手正文卡片传色相，工具/思考卡保持中性色。
-    private func turnTintHues(for transcript: [NewPiTranscriptItem]) -> [UUID: Int] {
-        var result: [UUID: Int] = [:]
-        var currentAnchor: UUID?
-        for item in transcript {
-            if item.kind == .user {
-                currentAnchor = item.id
-            }
-            guard let anchor = currentAnchor else { continue }
-            if item.kind == .user || item.isAssistantMarkdown {
-                result[item.id] = Color.bubbleTintHueDegrees(for: anchor)
-            }
-        }
-        return result
-    }
+    /// 轮对话色调已上移为 NewPiViewModel.transcriptTintHues（流式直连路径共用）。
 
     private var chatComposer: some View {
         VStack(spacing: 0) {

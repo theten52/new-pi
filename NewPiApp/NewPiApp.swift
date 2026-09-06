@@ -28,6 +28,11 @@ struct NewPiApp: App {
         Window("UI Architecture Spike", id: "ui-arch-spike") {
             NewPiSpikeTranscriptView()
         }
+        // API 监控：独立非模态窗口（单实例），可与主窗口并行——边监控边使用 APP。
+        Window("API 监控", id: "api-metrics") {
+            NewPiMetricsView()
+        }
+        .defaultSize(width: 860, height: 580)
         Settings {
             NewPiSettingsView(viewModel: sharedViewModel)
         }
@@ -322,6 +327,14 @@ struct NewPiRootView: View {
                         Label("Logs", systemImage: "list.bullet.rectangle")
                     }
                     .help("Debug Logs")
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        openWindow(id: "api-metrics")
+                    } label: {
+                        Label("API 监控", systemImage: "chart.bar")
+                    }
+                    .help("API 性能监控（独立窗口，可边监控边使用）")
                 }
             }
         }

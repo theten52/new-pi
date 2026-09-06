@@ -210,6 +210,13 @@ final class SessionRuntime: ObservableObject {
     var detailTurnID: String?
     var detailGroupMarkerID: UUID?
     var detailMarkerIDs: [String: UUID] = [:]
+    // —— 流式直连（STREAMING-LAYOUT-ISOLATION）——
+    /// 流式期间 transcript 变异落在影子数组（不触发 @Published，面板不 re-diff），
+    /// 由 ViewModel 经 docController 直达 WebView；边界事件时 commitLiveTranscript 发布。
+    var liveTranscript: [NewPiTranscriptItem]?
+    /// 面板挂载的 transcript 控制器（NewPiSessionPanel onAppear 注入；keep-alive 常驻有效）。
+    /// nil = 无直连通道（面板未挂载），流式 flush 退回 @Published 路径。
+    weak var docController: TranscriptDocumentController?
     /// live turn 的用户消息条目 id → 当时的 live turnID（"live-..."）。
     /// 从单槽改为映射表：每轮 send 都登记一条，历史轮次在后续 agentEnd 的 rebuildTranscript
     /// 里也能通过 preservedID 查回原来的 live turnID，保证 turnID 跨多轮稳定（不翻成
@@ -607,6 +614,8 @@ final class NewPiViewModel: ObservableObject {
             await reloadProviders()
             await restoreLastProjectIfNeeded()
         }
+        // 启动时从今日 JSONL 尾部恢复最近指标（跨会话留存 → 面板重启后仍可见）。
+        Task { await LLMMetricsRecorder.shared.loadRecentFromDisk() }
     }
 
     func pickProject() {
@@ -1494,6 +1503,7 @@ final class NewPiViewModel: ObservableObject {
         NewPiLogger.info(category: "app", message: "User aborted agent run")
         guard let runtime = activeRuntime else { return }
         flushStreamingDelta(on: runtime)
+        commitLiveTranscript(on: runtime)
         runtime.pendingToolApproval = nil
         runtime.agentActivity = .idle
         reflectActive()
@@ -1794,6 +1804,8 @@ final class NewPiViewModel: ObservableObject {
         on runtime: SessionRuntime,
         preservedPrefixCount: Int = 0
     ) {
+        // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：rebuild 前先并影子，防丢流式尾部。
+        commitLiveTranscript(on: runtime)
         // 方案 A（compaction 后）保留前缀时，index 空间会重叠：被压缩旧历史的 messageIndex
         // 是压缩前原始 position（0..N-1），而重建的 summary+尾巴在 messages 里从 0 重新排。
         // 若用整个 transcript 构建 existingByMessageIndex，重建 summary（index=0）会误命中
@@ -2153,6 +2165,8 @@ final class NewPiViewModel: ObservableObject {
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
     @discardableResult
     private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], on runtime: SessionRuntime) -> UUID {
+        // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：追加前先并影子。
+        commitLiveTranscript(on: runtime)
         let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments)
         runtime.transcript.append(item)
         if runtime === activeRuntime {
@@ -2166,12 +2180,13 @@ final class NewPiViewModel: ObservableObject {
     /// 用更少的渲染提交换主线程喘息，避免 backlog 雪崩（实测：40ms 固定节流时
     /// LLM 流完后 UI 还要 4 分钟排空积压，run wall time 272s）。
     private func streamingFlushIntervalMS(for runtime: SessionRuntime) -> UInt64 {
-        // 平滑斜坡：随积压线性增加（40ms 起、每 150 字符 +1ms、600ms 封顶），
+        // 平滑斜坡：随积压线性增加（200ms 起、每 150 字符 +1ms、600ms 封顶），
         // 避免硬档位切换造成的「顺畅→突然卡一下→涌一大段」观感。
-        // 实测（sample）：主线程 ~44% 时间阻塞在每次渲染提交的 CA 表面分配同步上，
-        // 单次提交成本 0.5~1s；积压越深就要把提交降得越稀，否则 backlog 雪崩。
+        // 200ms 下限（BACKLOG-STALL）：实测两家 provider 都是 ~1 token/事件，40ms 下限
+        // ≈ 每秒 25 次渲染提交；每提交的异步 PAINT/表面分配成本随文档增大（采样：单次
+        // 阻塞最高 20s+），提交次数是排空时长的乘数——5Hz 出字观感依旧流畅。
         let backlog = runtime.pendingStreamingDelta.count
-        return UInt64(min(40 + backlog / 150, 600))
+        return UInt64(min(200 + backlog / 150, 600))
     }
 
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
@@ -2202,31 +2217,125 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 立即把未合并的流式增量写入 transcript（在状态边界 / abort 前调用，防止文本丢失与乱序）。
+    ///
+    /// STREAMING-LAYOUT-ISOLATION：有直连通道（面板已挂载）时，变异写入影子数组并经
+    /// controller 直达 WebView，不触发 runtime.transcript 的 @Published——面板不再每 flush
+    /// re-diff，WKWebView 从 SwiftUI 布局传播中隔离。边界事件（handle 状态分支 / abort）
+    /// 经 commitLiveTranscript 发布一次。无通道时退回 @Published 路径，行为与旧版一致。
     private func flushStreamingDelta(on runtime: SessionRuntime) {
         runtime.streamingFlushTask?.cancel()
         runtime.streamingFlushTask = nil
+        let liveDriven = runtime.docController != nil
+        var items = liveDriven ? (runtime.liveTranscript ?? runtime.transcript) : runtime.transcript
+        var mutated = false
         // 思考增量先于正文 flush：时序上 thinkingDelta 总是先于同轮 textDelta 到达。
         if !runtime.pendingThinkingDelta.isEmpty {
             let delta = runtime.pendingThinkingDelta
             runtime.pendingThinkingDelta = ""
-            appendOrUpdateThinking(delta, on: runtime)
+            appendOrUpdateThinking(delta, into: &items, on: runtime)
+            mutated = true
         }
-        guard !runtime.pendingStreamingDelta.isEmpty else { return }
+        guard !runtime.pendingStreamingDelta.isEmpty else {
+            // 仅思考增量被冲刷时才落地；两者皆空（纯状态边界重入）不发布、不投递。
+            if mutated { storeFlushTarget(items, live: liveDriven, on: runtime) }
+            return
+        }
         let delta = runtime.pendingStreamingDelta
         runtime.pendingStreamingDelta = ""
-        // 诊断：flush 本身（字符串拼接 + transcript 更新 + SwiftUI 提交）若过慢会卡事件循环。
+        // 诊断：flush 本身（字符串拼接 + 影子更新 + 直连投递）若过慢会卡事件循环。
         let start = Date()
-        appendOrUpdateAssistant(delta, on: runtime)
+        appendOrUpdateAssistant(delta, into: &items, on: runtime)
         let elapsed = Date().timeIntervalSince(start)
+        storeFlushTarget(items, live: liveDriven, on: runtime)
+        // PROBE（BACKLOG-STALL 定位）：flush 派发时刻。与「PROBE dom applied」
+        // （JS 执行完成时刻）、stall gap 三者对齐即可定位阻塞段。
+        NewPiLogger.info(
+            category: "app",
+            message: "PROBE stream flush",
+            details: "chars=\(delta.count) mergeMs=\(String(format: "%.0f", elapsed * 1000)) live=\(liveDriven)"
+        )
+        // UI 侧指标：每次 flush 的耗时，供「API 监控」区分模型慢 vs UI 渲染慢。
+        Task {
+            await LLMMetricsRecorder.shared.record(UIFlushMetric(
+                duration: elapsed,
+                deltaLength: delta.count
+            ))
+        }
         if elapsed > 0.1 {
             NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(delta.count)")
         }
     }
 
-    private func appendOrUpdateThinking(_ delta: String, on runtime: SessionRuntime) {
-        if let last = runtime.transcript.last, case .thinking(true) = last.kind {
-            let index = runtime.transcript.count - 1
-            runtime.transcript[index] = NewPiTranscriptItem(
+    /// flush 结果落地：直连模式存影子 + 投递 WebView；否则发布 @Published（旧路径）。
+    private func storeFlushTarget(_ items: [NewPiTranscriptItem], live: Bool, on runtime: SessionRuntime) {
+        guard live else {
+            runtime.transcript = items
+            return
+        }
+        runtime.liveTranscript = items
+        runtime.docController?.applyLive(
+            items: items,
+            isStreaming: true,
+            streamingBubbleComplete: runtime.streamingBubbleComplete,
+            tintHues: Self.transcriptTintHues(for: items)
+        )
+    }
+
+    /// 边界提交：影子内容并入 @Published（面板 re-diff 一次），解除 WebView 直连独占。
+    /// 边界路径的 transcript 变异（freeze/marker/append/rebuild/abort）前都会调用。
+    private func commitLiveTranscript(on runtime: SessionRuntime) {
+        guard let live = runtime.liveTranscript else { return }
+        runtime.docController?.endLiveApply()
+        runtime.liveTranscript = nil
+        runtime.transcript = live
+    }
+
+    /// 轮对话色调（面板渲染与流式直连共用）：只给用户气泡与助手正文卡片传色相。
+    static func transcriptTintHues(for transcript: [NewPiTranscriptItem]) -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        var currentAnchor: UUID?
+        for item in transcript {
+            if item.kind == .user {
+                currentAnchor = item.id
+            }
+            guard let anchor = currentAnchor else { continue }
+            if item.kind == .user || item.isAssistantMarkdown {
+                result[item.id] = Color.bubbleTintHueDegrees(for: anchor)
+            }
+        }
+        return result
+    }
+
+    private func appendOrUpdateAssistant(_ delta: String, into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        // 正文开始 = 思考阶段结束。
+        freezeStreamingThinking(into: &items)
+        if let last = items.last, last.kind == .assistant {
+            let index = items.count - 1
+            items[index] = NewPiTranscriptItem(
+                id: last.id,
+                kind: .assistant,
+                body: last.body + delta,
+                messageIndex: last.messageIndex,
+                sessionEntryID: last.sessionEntryID,
+                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
+            )
+        } else {
+            ensureDetailGroupMarker(into: &items, on: runtime)
+            items.append(NewPiTranscriptItem(
+                kind: .assistant,
+                body: delta,
+                detailTurnID: runtime.detailTurnID
+            ))
+        }
+        // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
+        // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着
+        // 重评估。viewModel.transcript 在 agentEnd 的 rebuildTranscript 时统一同步。
+    }
+
+    private func appendOrUpdateThinking(_ delta: String, into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        if let last = items.last, case .thinking(true) = last.kind {
+            let index = items.count - 1
+            items[index] = NewPiTranscriptItem(
                 id: last.id,
                 kind: .thinking(isStreaming: true),
                 body: last.body + delta,
@@ -2235,8 +2344,8 @@ final class NewPiViewModel: ObservableObject {
                 detailTurnID: last.detailTurnID ?? runtime.detailTurnID
             )
         } else {
-            ensureDetailGroupMarker(on: runtime)
-            runtime.transcript.append(NewPiTranscriptItem(
+            ensureDetailGroupMarker(into: &items, on: runtime)
+            items.append(NewPiTranscriptItem(
                 kind: .thinking(isStreaming: true),
                 body: delta,
                 detailTurnID: runtime.detailTurnID
@@ -2245,10 +2354,18 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 思考阶段结束（正文开始 / 工具开始 / 消息或 run 结束）：把尾部流式 thinking 条目冻结为完成态。
+    /// 边界路径（handle 状态分支）：先并影子再操作真实 transcript。
     private func freezeStreamingThinking(on runtime: SessionRuntime) {
-        guard let last = runtime.transcript.last, case .thinking(true) = last.kind else { return }
-        let index = runtime.transcript.count - 1
-        runtime.transcript[index] = NewPiTranscriptItem(
+        commitLiveTranscript(on: runtime)
+        var items = runtime.transcript
+        freezeStreamingThinking(into: &items)
+        runtime.transcript = items
+    }
+
+    private func freezeStreamingThinking(into items: inout [NewPiTranscriptItem]) {
+        guard let last = items.last, case .thinking(true) = last.kind else { return }
+        let index = items.count - 1
+        items[index] = NewPiTranscriptItem(
             id: last.id,
             kind: .thinking(isStreaming: false),
             body: last.body,
@@ -2261,7 +2378,9 @@ final class NewPiViewModel: ObservableObject {
     /// marker 懒创建（BACKLOG-DETAIL-GROUP）：当前 turn 尚未创建 disclosure 行时，
     /// 在组内第一条条目之前插入 marker 条目（collapsed=false，流式期间展开），
     /// 并缓存其 id 到 detailMarkerIDs 跨 rebuild 复用。
+    /// 边界路径（handle 状态分支）：先并影子再操作真实 transcript。
     private func ensureDetailGroupMarker(on runtime: SessionRuntime) {
+        commitLiveTranscript(on: runtime)
         guard let turnID = runtime.detailTurnID, runtime.detailGroupMarkerID == nil else { return }
         let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
         runtime.detailMarkerIDs[turnID] = markerID
@@ -2275,6 +2394,19 @@ final class NewPiViewModel: ObservableObject {
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
+    }
+
+    private func ensureDetailGroupMarker(into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        guard let turnID = runtime.detailTurnID, runtime.detailGroupMarkerID == nil else { return }
+        let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
+        runtime.detailMarkerIDs[turnID] = markerID
+        runtime.detailGroupMarkerID = markerID
+        items.append(NewPiTranscriptItem(
+            id: markerID,
+            kind: .detailGroup(collapsed: false),
+            body: "",
+            detailTurnID: turnID
+        ))
     }
 
     /// 最终答复落定（BACKLOG-DETAIL-GROUP，决策 1+2）：把 turn 内最后一个 assistant 条目
@@ -2324,29 +2456,4 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
-        // 正文开始 = 思考阶段结束。
-        freezeStreamingThinking(on: runtime)
-        if let last = runtime.transcript.last, last.kind == .assistant {
-            let index = runtime.transcript.count - 1
-            runtime.transcript[index] = NewPiTranscriptItem(
-                id: last.id,
-                kind: .assistant,
-                body: last.body + delta,
-                messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID,
-                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
-            )
-        } else {
-            ensureDetailGroupMarker(on: runtime)
-            runtime.transcript.append(NewPiTranscriptItem(
-                kind: .assistant,
-                body: delta,
-                detailTurnID: runtime.detailTurnID
-            ))
-        }
-        // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
-        // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着
-        // 重评估。viewModel.transcript 在 agentEnd 的 rebuildTranscript 时统一同步。
-    }
 }

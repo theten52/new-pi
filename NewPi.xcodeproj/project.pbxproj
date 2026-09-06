@@ -33,6 +33,7 @@
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
 		AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000260000000000000001 /* NewPiChatRoomStore.swift */; };
 		AA0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */; };
+		AA0000290000000000000001 /* NewPiMetricsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000290000000000000001 /* NewPiMetricsView.swift */; };
 		AA0000280000000000000001 /* NewPiConfettiBurst.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000280000000000000001 /* NewPiConfettiBurst.swift */; };
 /* End PBXBuildFile section */
 
@@ -40,6 +41,7 @@
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000260000000000000001 /* NewPiChatRoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomStore.swift; sourceTree = "<group>"; };
 		BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomTranscriptAdapter.swift; sourceTree = "<group>"; };
+		BB0000290000000000000001 /* NewPiMetricsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMetricsView.swift; sourceTree = "<group>"; };
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
@@ -113,6 +115,7 @@
 				BB0000250000000000000001 /* AttachmentPreviewWindow.swift */,
 				BB0000260000000000000001 /* NewPiChatRoomStore.swift */,
 				BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */,
+				BB0000290000000000000001 /* NewPiMetricsView.swift */,
 				BB0000280000000000000001 /* NewPiConfettiBurst.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
 				BB00000C0000000000000001 /* Assets.xcassets */,
@@ -230,6 +233,7 @@
 				AA0000250000000000000001 /* AttachmentPreviewWindow.swift in Sources */,
 				AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */,
 				AA0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift in Sources */,
+				AA0000290000000000000001 /* NewPiMetricsView.swift in Sources */,
 				AA0000280000000000000001 /* NewPiConfettiBurst.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

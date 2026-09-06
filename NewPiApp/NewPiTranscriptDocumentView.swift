@@ -24,6 +24,29 @@ final class TranscriptDocumentController: ObservableObject {
         coordinator?.scrollToBottom()
     }
 
+    // MARK: - 流式直连（STREAMING-LAYOUT-ISOLATION）
+
+    /// 流式 flush 绕过 SwiftUI 直达 WebView：面板不再因 @Published 每 flush re-diff，
+    /// WKWebView 从布局传播中隔离。由 ViewModel 在流式 flush 时调用。
+    func applyLive(
+        items: [NewPiTranscriptItem],
+        isStreaming: Bool,
+        streamingBubbleComplete: Bool,
+        tintHues: [UUID: Int]
+    ) {
+        coordinator?.applyLive(
+            transcript: items,
+            isStreaming: isStreaming,
+            streamingBubbleComplete: streamingBubbleComplete,
+            tintHues: tintHues
+        )
+    }
+
+    /// 边界提交后解除直连独占：SwiftUI 恢复为唯一驱动（下次 updateNSView 的 diff 为空操作）。
+    func endLiveApply() {
+        coordinator?.endLiveApply()
+    }
+
     fileprivate func updateScrollState(nearBottom: Bool, anchorID: String?, anchorDelta: CGFloat, scrollTop: CGFloat) {
         isNearBottom = nearBottom
         // 滚动锚点即改即存（内存表；磁盘写由 store 自带 2s 防抖），
@@ -75,6 +98,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
         configuration.userContentController.add(context.coordinator, name: "attachmentTap")
+        configuration.userContentController.add(context.coordinator, name: "uiTiming")
         // 附件图片受控读取通道（BACKLOG-IMAGE-INPUT）：pi-att:// 仅经 SessionAttachments.resolve
         // 放行附件根目录内路径，WebView 不获得任意本地文件读取能力。
         configuration.setURLSchemeHandler(AttachmentSchemeHandler(), forURLScheme: AttachmentSchemeHandler.scheme)
@@ -109,6 +133,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "attachmentTap")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "uiTiming")
         webView.navigationDelegate = nil
     }
 
@@ -171,7 +196,47 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             let tintHues: [UUID: Int]
         }
 
+        /// SwiftUI 路径（updateNSView 驱动）。直连独占期间忽略：内容已由 applyLive
+        /// 投递，此路径只剩其它 @Published 变化触发的重复调用，避免陈旧快照回写。
         func apply(
+            transcript: [NewPiTranscriptItem],
+            isStreaming: Bool,
+            streamingBubbleComplete: Bool,
+            tintHues: [UUID: Int]
+        ) {
+            guard !liveDriven else { return }
+            applyInternal(
+                transcript: transcript,
+                isStreaming: isStreaming,
+                streamingBubbleComplete: streamingBubbleComplete,
+                tintHues: tintHues
+            )
+        }
+
+        /// 流式直连入口（STREAMING-LAYOUT-ISOLATION）：ViewModel 绕过 SwiftUI 直达 WebView。
+        func applyLive(
+            transcript: [NewPiTranscriptItem],
+            isStreaming: Bool,
+            streamingBubbleComplete: Bool,
+            tintHues: [UUID: Int]
+        ) {
+            liveDriven = true
+            applyInternal(
+                transcript: transcript,
+                isStreaming: isStreaming,
+                streamingBubbleComplete: streamingBubbleComplete,
+                tintHues: tintHues
+            )
+        }
+
+        /// 边界提交后解除直连独占：SwiftUI 恢复为唯一驱动。
+        func endLiveApply() {
+            liveDriven = false
+        }
+
+        private var liveDriven = false
+
+        private func applyInternal(
             transcript: [NewPiTranscriptItem],
             isStreaming: Bool,
             streamingBubbleComplete: Bool,
@@ -191,6 +256,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         }
 
         private func applyLoaded(_ snapshot: TranscriptSnapshot) {
+            let diffStart = Date()
             var ops: [[String: Any]] = []
             var newOrder: [UUID] = []
             var newSignatures: [UUID: String] = [:]
@@ -224,6 +290,15 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if lastForkLocked != snapshot.isStreaming {
                 lastForkLocked = snapshot.isStreaming
                 ops.append(["op": "forkLock", "locked": snapshot.isStreaming])
+            }
+
+            // UI 侧指标：diff 计算耗时（每次 flush 都会触发；transcript 越大越贵）。
+            let diffDuration = Date().timeIntervalSince(diffStart)
+            Task {
+                await LLMMetricsRecorder.shared.record(UITranscriptDiffMetric(
+                    duration: diffDuration,
+                    opsCount: ops.count
+                ))
             }
 
             guard !ops.isEmpty else { return }
@@ -356,6 +431,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                     NewPiLogger.error(category: "app", message: "Transcript doc apply failed", details: "\(error)")
                 }
             }
+            // PAINT-GATE（STREAMING-LAYOUT-ISOLATION 的回归修复）：布局隔离移除了
+            // 每 flush 的 @Published → 窗口不再有原生失效 → display cycle 不跑 →
+            // WKWebView 的远程图层事务无人合成、画面冻结（滚动能救活同因）。
+            // 派发 ops 后主动弄脏视图，把合成调度回来。代价为标记脏，实际绘制在下一 vsync。
+            webView.setNeedsDisplay(.infinite)
         }
 
         // MARK: - WKNavigationDelegate
@@ -451,6 +531,24 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                     }
                 }
                 controller?.updateMarkerPositions(positions)
+            case "uiTiming":
+                // JS applyOps 耗时（DOM 应用 + 批量提交）回传 → 上报 UI 指标。
+                guard let body = message.body as? [String: Any] else { return }
+                let duration = (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
+                let opsCount = (body["opsCount"] as? NSNumber)?.intValue ?? 0
+                // PROBE（BACKLOG-STALL 定位）：JS 执行完成时刻。与「PROBE stream flush」
+                // 的差值 = JS 队列等待 + 执行；此后到下一事件消费的间隔 = PAINT/表面分配阻塞。
+                NewPiLogger.info(
+                    category: "app",
+                    message: "PROBE dom applied",
+                    details: "ms=\(String(format: "%.0f", duration)) ops=\(opsCount)"
+                )
+                Task {
+                    await LLMMetricsRecorder.shared.record(UIDomApplyMetric(
+                        duration: duration / 1000,
+                        opsCount: opsCount
+                    ))
+                }
             default:
                 break
             }

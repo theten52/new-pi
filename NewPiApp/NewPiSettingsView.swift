@@ -6,6 +6,7 @@ struct NewPiSettingsView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @StateObject private var mcpBridge = MCPPluginManagerBridge()
     @StateObject private var approvalBridge = ApprovalPolicySettingsBridge()
+    @Environment(\.openWindow) private var openWindow
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
     @State private var showLogs = false
@@ -87,6 +88,9 @@ struct NewPiSettingsView: View {
             Section("Debug") {
                 Button("View Logs") {
                     showLogs = true
+                }
+                Button("API 监控") {
+                    openWindow(id: "api-metrics")
                 }
             }
         }

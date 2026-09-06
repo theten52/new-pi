@@ -8,6 +8,8 @@ public actor AgentSession {
     private let approvalGate = ToolApprovalGate()
     private let approvalTracker = ToolApprovalTracker()
     private var runTask: Task<Void, Never>?
+    /// PROBE（BACKLOG-STALL）：本 run 已 broadcast 的 textDelta 计数（见 broadcast 前探针）。
+    private var probeTextCount = 0
     private var eventContinuations: [UUID: AsyncStream<AgentEvent>.Continuation] = [:]
     private var steeringQueue: [AgentMessage] = []
     private var persistenceFileURL: URL?
@@ -106,6 +108,23 @@ public actor AgentSession {
                             details: "elapsed=\(String(format: "%.2f", persistElapsed))s messages=\(snapshot.messages.count)"
                         )
                     }
+                }
+                // PROBE（BACKLOG-STALL 定位）：事件到达 broadcast 的时刻。
+                // 与 metrics 的 firstTextAt（provider yield 时刻）、UI 侧 stall/flush
+                // 日志三方对齐，锁定中段 20s+ 延迟发生在哪一跳。
+                switch event {
+                case .agentStart:
+                    probeTextCount = 0
+                    NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "agentStart")
+                case .textDelta:
+                    probeTextCount += 1
+                    if probeTextCount <= 3 || probeTextCount % 200 == 0 {
+                        NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "text#\(probeTextCount)")
+                    }
+                case .messageStart, .messageEnd, .agentEnd, .error:
+                    NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "\(event.diagnosticName)")
+                default:
+                    break
                 }
                 // 诊断：事件从 loop 到 broadcast 的处理耗时（>0.2s 记日志）。
                 let broadcastStart = Date()

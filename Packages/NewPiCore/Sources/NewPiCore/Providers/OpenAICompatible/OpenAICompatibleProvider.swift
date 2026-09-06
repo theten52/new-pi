@@ -280,6 +280,9 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
     ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                // do / catch 共享的指标计时器与状态码（catch 分支也要上报）。
+                var perf = LLMRequestTiming()
+                var httpStatus: Int?
                 do {
                     let endpoint = try OpenAICompatibleEndpoint.resolveURL(for: profile)
                     let apiKey = try await apiKeyProvider()
@@ -336,12 +339,24 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     )
 
                     let (bytes, response) = try await session.bytes(for: request)
+                    perf.markResponse()
+                    httpStatus = (response as? HTTPURLResponse)?.statusCode
                     if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
                         var errorData = Data()
                         for try await byte in bytes {
                             errorData.append(byte)
                         }
                         let message = String(data: errorData, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                        perf.markEnd()
+                        await LLMMetricsRecorder.shared.record(metric(
+                            timing: perf,
+                            statusCode: http.statusCode,
+                            usage: UsageStats(),
+                            errorType: "http_error",
+                            errorMessage: String(message.prefix(500)),
+                            model: model,
+                            hasTools: !tools.isEmpty
+                        ))
                         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
                         NewPiLogger.logLLMResponse(
                             category: "openai-compatible",
@@ -376,6 +391,11 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         for block in sseParser.feed(byte) {
                             let parsed = parser.parse(events: decoder.decodeLines(block))
                             for event in parsed {
+                                switch event {
+                                case .textDelta: perf.markText()
+                                case .thinkingDelta: perf.markThinking()
+                                default: break
+                                }
                                 if case let .completed(_, usage) = event {
                                     lastUsage = usage
                                     didComplete = true
@@ -389,6 +409,11 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     for block in sseParser.finish() {
                         let parsed = parser.parse(events: decoder.decodeLines(block))
                         for event in parsed {
+                            switch event {
+                            case .textDelta: perf.markText()
+                            case .thinkingDelta: perf.markThinking()
+                            default: break
+                            }
                             if case let .completed(_, usage) = event {
                                 lastUsage = usage
                             }
@@ -396,9 +421,24 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         }
                     }
                     for event in parser.finish() {
+                        switch event {
+                        case .textDelta: perf.markText()
+                        case .thinkingDelta: perf.markThinking()
+                        default: break
+                        }
                         continuation.yield(event)
                     }
 
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: lastUsage,
+                        errorType: nil,
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.logLLMStreamFinished(
                         category: "openai-compatible",
                         model: model.modelID,
@@ -406,8 +446,28 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     )
                     continuation.finish()
                 } catch is CancellationError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "cancelled",
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     continuation.finish(throwing: AgentError.aborted)
                 } catch let error as AgentError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "llm_error",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "openai-compatible",
                         message: "LLM request failed",
@@ -415,6 +475,16 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     )
                     continuation.finish(throwing: error)
                 } catch {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "network",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "openai-compatible",
                         message: "LLM request failed",
@@ -426,6 +496,52 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
 
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// 构造一次请求的指标（供流式循环各出口上报）。
+    private func metric(
+        timing: LLMRequestTiming,
+        statusCode: Int?,
+        usage: UsageStats,
+        errorType: String?,
+        errorMessage: String?,
+        model: ModelConfig,
+        hasTools: Bool
+    ) -> LLMRequestMetric {
+        let cost = LLMRequestMetric.estimatedCost(
+            inputTokens: usage.inputTokens,
+            cachedTokens: usage.cacheReadTokens,
+            cacheCreation: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            pricing: profile.modelDefinition(for: model.modelID)?.pricing
+        )
+        return LLMRequestMetric(
+            startedAt: timing.startedAt,
+            providerName: profile.name,
+            preset: profile.preset.rawValue,
+            vendor: LLMMetricVendor.name(for: profile.preset.rawValue, baseURL: profile.option(.baseURL), model: model.modelID),
+            model: model.modelID,
+            mode: profile.apiMode == .responses ? "responses" : "chat",
+            thinkingLevel: model.thinkingLevel == .off ? nil : model.thinkingLevel.rawValue,
+            hasTools: hasTools,
+            responseAt: timing.responseAt,
+            firstThinkingAt: timing.firstThinkingAt,
+            lastThinkingAt: timing.lastThinkingAt,
+            firstTextAt: timing.firstTextAt,
+            endedAt: timing.endedAt,
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cacheReadTokens,
+            cacheCreationTokens: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            contextWindow: profile.contextWindow(for: model.modelID),
+            textDeltaCount: timing.textDeltaCount,
+            thinkingDeltaCount: timing.thinkingDeltaCount,
+            statusCode: statusCode,
+            errorType: errorType,
+            errorMessage: errorMessage,
+            costAmount: cost?.amount,
+            costCurrency: cost?.currency
+        )
     }
 }
 

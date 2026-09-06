@@ -162,10 +162,12 @@
         // 只有用户滚动输入（onUserScrollInput）能提前接管。
         return;
       }
-      // 流式期间钉底不因「内容长高导致的未近底」而释放：立即追平新长出的高度，
-      // 保持刷屏观感；用户滚轮/触控/按键/滚动条拖拽（userScrolling）仍可接管。
+      // 流式期间钉底不因「内容长高导致的未近底」而释放（bd92de0 的意图），
+      // 但也不在此补钉：settle→pinBottom 会形成「每次 flush 都多一轮强制布局 +
+      // scroll 事件 → Poller/Warmer 重武装」的持续活跃链，页面在流式期间
+      // 永不间断地跑渲染更新（STALL 回归根因）。下一批内容的 endBatch(pin)
+      // 自会追平新高度（间隔即 flush 节奏，不可感知）。
       if (forkLocked && this.intent === "pinnedBottom") {
-        this.pinBottom();
         return;
       }
       this.intent = this.isNearBottom() ? "pinnedBottom" : "idle";
@@ -354,6 +356,14 @@
         this.schedule();
         return;
       }
+      // 流式期间暂停预热（实验：BACKLOG-STALL 根因验证）。
+      // Warmer 的 setTimeout(0) 链连续强制布局会占据 WebContent 的 JS 线程，
+      // 让 applyOps 排队等待，表现就是「输出暂停、滚动一泵就续上」。
+      // 流式结束后（forkLocked=false）恢复预热；代价是流式期间滚动条高度略虚。
+      if (forkLocked) {
+        this.schedule();
+        return;
+      }
       const kids = main.children;
       if (kids.length === 0) {
         return;
@@ -457,14 +467,19 @@
   }
 
   window.addEventListener("scroll", function () {
-    Poller.arm();
+    // 程序钉底的 scroll 不武装 Poller（STALL 回归根因另一半）：流式期间
+    // 每次 flush 的 pin 都走这里，持续 arm 会让 rAF 轮询链整场 60fps 空转，
+    // 页面失去 flush 间的安静。用户真滚动（intent 已是 userScrolling）照常武装。
+    const streamingPinned = forkLocked && Scroll.intent === "pinnedBottom";
+    if (!streamingPinned) {
+      Poller.arm();
+    }
     // 滚动条拖拽识别（不发 wheel/touch 事件）：距上次程序滚动超过窗口期的
     // 视口位移视为用户接管。
     // 流式钉底期间必须跳过该判定：scroll anchoring（视口上方内容定稿/预热时
     // 浏览器的 scrollY 微调）也走 scroll 事件，会被误判为拖拽而释放钉底——
     // 输出越快高度抖动越大，误判越频繁（钉不住的根因）。滚轮/触控/键盘的
     // onUserScrollInput 不受影响，仍是即时接管通道。
-    const streamingPinned = forkLocked && Scroll.intent === "pinnedBottom";
     if (!streamingPinned
         && Date.now() - Scroll.lastProgrammaticScrollAt > 150
         && Scroll.intent !== "userScrolling") {
@@ -968,8 +983,32 @@
     // detailTurnID 有 → 标记为 detail-item（遵守组折叠状态）；无 → 移除（最终答复移出组）。
     applyDetailGroupClass(el, op, state);
 
+    applyStreamingHeightStep(el, op, state);
+
     state.kind = op.kind;
     return el;
+  }
+
+  // ===== 流式高度量化（STREAM-HEIGHT-STEP）=====
+  // ccbb69e 在旧 per-message 路径上的等价实现（该路径随 e173f11 删除而丢失，回归根因）：
+  // 实测（sample，两次独立确认）主线程大比例阻塞在 RBLayer display →
+  // wait_for_allocations——内容每次真实长高都触发底部 tile/表面重分配，秒级阻塞。
+  // 高度量化到 160pt 向上步进：未越档不改 height（零布局成本），重分配次数降
+  // 一到两个数量级。多余空隙 ≤160pt（视口钉底时文本略高于底缘），完成态落回自然高度。
+  const streamingHeightStep = 160;
+  function applyStreamingHeightStep(el, op, state) {
+    if (op.streaming) {
+      const natural = el.offsetHeight;
+      const stepped = Math.ceil(Math.max(1, natural) / streamingHeightStep) * streamingHeightStep;
+      if (stepped > (state.steppedHeight || 0)) {
+        state.steppedHeight = stepped;
+        el.style.height = stepped + "px";
+      }
+    } else if (state.steppedHeight) {
+      // 完成态（renderFinal 已重渲染）：去除量化占位，高度落回内容自然值。
+      state.steppedHeight = 0;
+      el.style.height = "";
+    }
   }
 
   // 按 op.detailTurnID 维护条目的 detail-item / data-turn-id / detail-hidden class。
@@ -1000,6 +1039,8 @@
   }
 
   function applyOps(ops) {
+    // UI 侧指标：本批 DOM 应用耗时（原生侧测不到，回传 uiTiming 供「API 监控」定位 JS/DOM 渲染）。
+    const renderStart = performance.now();
     // 滚动纪律：批次开始时按意图决定本批的视口策略，结束后同步执行——
     // 保存锚点 → 变更 → 恢复在同一执行块内，不存在高度未回的中间态。
     // 显式滚动 op（jumpTo/scrollToBottom/restoreAnchor）优先于批次策略。
@@ -1087,6 +1128,10 @@
     // 新内容入场后安排空闲预热。
     if (touchedEls.length > 0) {
       Warmer.schedule();
+    }
+    const renderMs = performance.now() - renderStart;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.uiTiming) {
+      window.webkit.messageHandlers.uiTiming.postMessage({ durationMs: renderMs, opsCount: ops.length });
     }
     reportScrollState();
     scheduleTurnOffsetsReport();
