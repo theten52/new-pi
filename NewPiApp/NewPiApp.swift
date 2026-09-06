@@ -420,16 +420,21 @@ struct ChatRoomSidebarRow: View {
     let chatroom: ChatRoom
     let isActive: Bool
 
+    @State private var isHovering = false
+
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if isActive {
                 Image(systemName: "sparkles")
                     .font(.caption)
                     .foregroundStyle(.tint)
+                    .padding(.top, 1)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(chatroom.name)
                     .font(.subheadline)
+                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+                    .fontWeight(isActive ? .semibold : .regular)
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     ForEach(chatroom.configuredRoles) { role in
@@ -446,7 +451,25 @@ struct ChatRoomSidebarRow: View {
             Spacer()
             PhaseBadge(phase: chatroom.currentPhase)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            // 高亮样式与 SessionRow 对齐：选中 accent 色 > 悬浮毛玻璃
+            if isActive {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.15))
+            } else if isHovering {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.13))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+                    )
+            }
+        }
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 }
 
