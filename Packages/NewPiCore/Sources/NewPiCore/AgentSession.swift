@@ -17,6 +17,8 @@ public actor AgentSession {
     private var jsonlStore = JSONLSessionStore()
     /// 当前未落盘的 assistant 流式文本（用于生成途中被中断时保留部分输出）。
     private var inFlightText = ""
+    /// STALL-VERIFY 探针：broadcast 端 textDelta 序号计数。
+    private var probeBcastTextCount = 0
 
     public init(context: AgentContext, config: AgentLoopConfig) {
         self.context = context
@@ -104,6 +106,18 @@ public actor AgentSession {
                             category: "agent-session",
                             message: "Slow session persist",
                             details: "elapsed=\(String(format: "%.2f", persistElapsed))s messages=\(snapshot.messages.count)"
+                        )
+                    }
+                }
+                // STALL-VERIFY：广播端打点（每 100 个 textDelta 记一条），
+                // 与 UI 消费端的 consumed 计数对齐，锁定延迟发生在 producer 还是投递段。
+                if case .textDelta = event {
+                    probeBcastTextCount += 1
+                    if probeBcastTextCount % 100 == 0 {
+                        NewPiLogger.info(
+                            category: "agent-session",
+                            message: "STALL-VERIFY bcast",
+                            details: "text#\(probeBcastTextCount)"
                         )
                     }
                 }
