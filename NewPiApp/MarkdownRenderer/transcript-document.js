@@ -170,6 +170,14 @@
       if (forkLocked && this.intent === "pinnedBottom") {
         return;
       }
+      // PIN-FIX：钉底宽限期内同样不降级——发送→forkLock 空窗（数百毫秒~数秒）内
+      // 布局噪声（分组收起/估算高校正）可让 settle 瞬间未近底，按旧逻辑会把
+      // pinnedBottom 误贬为 idle，钉底永久丢失（与拖拽误判同一根因的另一条路径）。
+      // 宽限过期后恢复「不近底即降级」，用户拖走仍能正常脱离钉底。
+      if (this.intent === "pinnedBottom"
+          && Date.now() - this.lastProgrammaticScrollAt < 1500) {
+        return;
+      }
       this.intent = this.isNearBottom() ? "pinnedBottom" : "idle";
     },
 
@@ -480,7 +488,16 @@
     // 浏览器的 scrollY 微调）也走 scroll 事件，会被误判为拖拽而释放钉底——
     // 输出越快高度抖动越大，误判越频繁（钉不住的根因）。滚轮/触控/键盘的
     // onUserScrollInput 不受影响，仍是即时接管通道。
+    // PIN-FIX：保护范围增加「钉底宽限期」——发送时的 scrollToBottom 到流式首批
+    // forkLock 到达之间有数百毫秒空窗（Release/忙主线下更长），空窗内任何
+    // scroll 事件（布局微调/锚定噪声）都会经此路径把 pinnedBottom 误贬为
+    // userScrolling，钉底永久丢失且无任何机制重新武装（「发送后不跟随」根因）。
+    // 宽限期取 1.5s（覆盖发送→流式起点），过后恢复拖拽识别；流式中仍由
+    // streamingPinned 接管保护（与 bd92de0 一致）。
+    const pinGrace = Scroll.intent === "pinnedBottom"
+        && Date.now() - Scroll.lastProgrammaticScrollAt < 1500;
     if (!streamingPinned
+        && !pinGrace
         && Date.now() - Scroll.lastProgrammaticScrollAt > 150
         && Scroll.intent !== "userScrolling") {
       Scroll.onUserScrollInput();

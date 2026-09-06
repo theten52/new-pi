@@ -1725,6 +1725,10 @@ struct ChatRoomDetailView: View {
         guard !content.isEmpty else { return }
         controller.userSpeak(content: content)
         inputText = ""
+        // 发送 = 明确要看最新内容的意图（与 Session 面板 sendComposerInput 对齐，
+        // PIN-FIX）：显式钉底。否则用户停在中部时讨论输出按保锚纪律不跟随，
+        // 看起来像没反应；且发言到流式首批 forkLock 之间没有任何重新武装机制。
+        docController.scrollToBottom()
     }
 
     private func endDiscussion(_ mode: ChatRoomDiscussionEndMode) {

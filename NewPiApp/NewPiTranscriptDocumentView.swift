@@ -154,6 +154,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         /// 分叉意图回传（由视图在 make/update 时注入）。
         var onFork: ((Int) -> Void)?
         private var didApplyRestore = false
+        /// PIN-PROBE：最近一次上报的 JS 滚动意图（变化才记日志）。
+        private var lastReportedIntent: String?
         /// 上一次下发的全局 fork 锁状态（会话是否正在流式），变化时才发 forkLock op。
         private var lastForkLocked: Bool?
 
@@ -506,6 +508,17 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 let anchorID = body["anchorID"] as? String
                 let anchorDelta = (body["anchorDelta"] as? NSNumber)?.doubleValue ?? 0
                 let scrollTop = (body["scrollTop"] as? NSNumber)?.doubleValue ?? 0
+                // PIN-PROBE：JS 滚动意图变化观测（钉底回归定位），转迁时记一条。
+                let intent = body["intent"] as? String ?? "?"
+                if intent != lastReportedIntent {
+                    let prev = lastReportedIntent
+                    lastReportedIntent = intent
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "PROBE scroll intent",
+                        details: "\(prev ?? "nil") -> \(intent) nearBottom=\(nearBottom) scrollTop=\(Int(scrollTop))"
+                    )
+                }
                 controller?.updateScrollState(
                     nearBottom: nearBottom,
                     anchorID: anchorID,
