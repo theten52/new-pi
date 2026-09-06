@@ -172,7 +172,8 @@ struct NewPiRootView: View {
                     } label: {
                         SessionRow(
                             summary: summary,
-                            isActive: summary.id == viewModel.activeSessionID
+                            // 聊天室被选中时 session 行不再高亮（两侧互斥，用户要求）
+                            isActive: summary.id == viewModel.activeSessionID && selectedChatroomID == nil
                         )
                     }
                     .buttonStyle(.plain)
@@ -386,6 +387,7 @@ struct NewPiRootView: View {
             Text("将删除聊天室配置与全部对话记录，不可恢复。")
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
+            selectedChatroomID = nil
             Task {
                 await viewModel.startNewSession()
             }
