@@ -483,6 +483,21 @@ struct NewPiEditProviderSheet: View {
                     }
                 }
 
+                // 思考档位（Provider 级默认）：off=关闭思考（快）；low/medium/high=按档位思考。
+                // 会话中可在状态栏模型菜单临时覆盖。对不支持思考控制的模型（如 Ollama）无效。
+                if profile.preset != .ollama {
+                    Section("思考级别") {
+                        Picker("思考档位", selection: $profile.thinkingLevel) {
+                            ForEach(ThinkingLevel.allCases) { level in
+                                Text(level.displayName).tag(level)
+                            }
+                        }
+                        Text("off=关闭思考（快）；极低~高=按档位思考（慢但更准）。支持模型见各厂商预设；当前会话可在状态栏模型菜单临时切换。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if !profile.preset.optionFields.isEmpty {
                     Section("Options") {
                         ForEach(profile.preset.optionFields, id: \.key) { field in

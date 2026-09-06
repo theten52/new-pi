@@ -317,11 +317,10 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         body["tools"] = OpenAIMessageEncoder.encodeTools(tools)
                     }
 
-                    OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
+                    OpenAICompatibleRequestPolicy.applyThinkingPolicy(
                         body: &body,
                         model: model,
-                        profile: profile,
-                        hasTools: !tools.isEmpty
+                        profile: profile
                     )
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -450,16 +449,69 @@ enum OpenAICompatibleRequestPolicy {
         return max(model.maxTokens, deepSeekMinimumMaxTokens)
     }
 
-    /// DeepSeek V4 thinking tokens share the completion budget with content/tool calls.
-    /// Disable thinking for tool-using coding-agent requests so output budget remains usable.
-    static func applyDeepSeekThinkingPolicy(
+    /// OpenAI 兼容 chat 路径的思考控制（兼容/特化各家语言，均经实测）：
+    /// - GLM（bigmodel.cn）：`reasoning_effort` low/medium/high 真分档；`thinking disabled` 可关
+    /// - MiMo（xiaomimimo.com）：`thinking disabled` 可关；`reasoning_effort` 被接受
+    /// - DeepSeek（deepseek.com）：chat 兼容端点同支持 `reasoning_effort` 分档 + `thinking disabled`
+    ///   （V4/legacy 都接受，实测 effort high 会显著增加思考量并占满 completion 预算）
+    /// - unknown：保守不发，避免个别服务端对未知字段报错
+    ///
+    /// ThinkingLevel=off → 关闭思考；low/medium/high → reasoning_effort 档位。
+    /// 不做「带工具就禁用」的一刀切（旧 DeepSeek hack 已移除），思考档位完全由用户配置决定。
+    ///
+    /// 注：DeepSeek 走 Responses API 时由 `ResponsesRequestPolicy.reasoningEffort` 处理
+    /// （`reasoning.effort`），本 policy 只覆盖 OpenAI 兼容 chat 端点。
+    static func applyThinkingPolicy(
         body: inout [String: Any],
         model: ModelConfig,
-        profile: ProviderProfile,
-        hasTools: Bool
+        profile: ProviderProfile
     ) {
-        guard isDeepSeekModel(model.modelID, profile: profile), hasTools else { return }
-        body["thinking"] = ["type": "disabled"]
+        switch detectVendor(model.modelID, profile: profile) {
+        case .glm, .mimo, .deepseek:
+            if model.thinkingLevel == .off {
+                body["thinking"] = ["type": "disabled"]
+            } else if let effort = model.thinkingLevel.reasoningEffort {
+                body["reasoning_effort"] = effort
+            }
+        case .unknown:
+            break
+        }
+    }
+
+    /// OpenAI 兼容 chat 厂商嗅探：baseURL 优先，modelID 兜底。
+    static func detectVendor(_ modelID: String, profile: ProviderProfile) -> OpenAICompatibleVendor {
+        let model = modelID.lowercased()
+        let base = profile.option(.baseURL)?.lowercased() ?? ""
+        if base.contains("bigmodel.cn") || base.contains("z.ai") {
+            return .glm
+        }
+        if base.contains("xiaomimimo.com") || model.contains("mimo") {
+            return .mimo
+        }
+        if base.contains("deepseek.com") || model.contains("deepseek") {
+            return .deepseek
+        }
+        return .unknown
+    }
+}
+
+/// OpenAI 兼容 chat 厂商分类（思考参数语言不同，需要特化）。
+public enum OpenAICompatibleVendor: Sendable {
+    case deepseek
+    case glm
+    case mimo
+    case unknown
+}
+
+extension ThinkingLevel {
+    /// OpenAI 兼容 `reasoning_effort` 档位（minimal 并入 low）。off 无档位（走关闭）。
+    var reasoningEffort: String? {
+        switch self {
+        case .off: nil
+        case .minimal, .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        }
     }
 }
 

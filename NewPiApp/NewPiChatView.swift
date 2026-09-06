@@ -171,9 +171,13 @@ struct NewPiSessionPanel: View {
                             groups: viewModel.providerModelGroups,
                             activeProfileID: viewModel.activeProviderID,
                             activeModelID: viewModel.activeProviderModel,
+                            thinkingLevel: viewModel.activeThinkingLevel,
                             isDisabled: runtime.isStreaming,
                             onSelect: { profileID, modelID in
                                 Task { await viewModel.switchModel(profileID: profileID, modelID: modelID) }
+                            },
+                            onThinkingSelect: { level in
+                                Task { await viewModel.setThinkingLevel(level) }
                             }
                         )
                     )

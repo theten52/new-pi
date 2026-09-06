@@ -807,6 +807,18 @@ struct RoleEditorRow: View {
                 }
             }
 
+            // 思考级别（角色级，可选）：nil = 跟随所绑 Provider 的默认档位。
+            if role.providerProfileID != nil {
+                Picker("思考级别", selection: $role.thinkingLevel) {
+                    Text("跟随 Provider 默认").tag(nil as ThinkingLevel?)
+                    ForEach(ThinkingLevel.allCases) { level in
+                        Text(level.displayName).tag(level as ThinkingLevel?)
+                    }
+                }
+                .frame(width: 220, alignment: .leading)
+                .help("该角色的思考档位；「跟随 Provider 默认」则用所绑 Provider 配置的档位（off=关闭思考；极低~高=按档位思考）")
+            }
+
             if isExpanded {
                 TextField("职责描述", text: $role.description)
                     .textFieldStyle(.roundedBorder)

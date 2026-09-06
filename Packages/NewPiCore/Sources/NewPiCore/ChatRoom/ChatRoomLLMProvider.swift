@@ -293,7 +293,8 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
         modelID: String,
         projectPath: String,
         roleID: String,
-        roleName: String
+        roleName: String,
+        thinkingLevel: ThinkingLevel?
     ) throws -> ChatRoomLLMProvider {
         let config = try configStore.load()
         guard let profile = config.profiles.first(where: { $0.id == profileID }) else {
@@ -309,7 +310,8 @@ public final class ChatRoomLLMProviderFactoryImpl: ChatRoomLLMProviderFactory, @
         let modelConfig = ModelConfig(
             provider: profile.preset.rawValue,
             modelID: modelID,
-            thinkingLevel: profile.thinkingLevel,
+            // 角色级档位优先；nil = 跟随所绑 provider 的默认档位。
+            thinkingLevel: thinkingLevel ?? profile.thinkingLevel,
             maxTokens: profile.effectiveMaxTokens
         )
 

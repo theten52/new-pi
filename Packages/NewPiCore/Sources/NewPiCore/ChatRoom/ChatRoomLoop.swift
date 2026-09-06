@@ -435,7 +435,8 @@ public final class ChatRoomLoop {
                 modelID: role.modelID ?? "",
                 projectPath: runtime.chatroom.projectPath,
                 roleID: role.id,
-                roleName: role.name
+                roleName: role.name,
+                thinkingLevel: role.thinkingLevel
             )
         })
 
@@ -669,7 +670,8 @@ public final class ChatRoomLoop {
             modelID: modelID,
             projectPath: runtime.chatroom.projectPath,
             roleID: role.id,
-            roleName: role.name
+            roleName: role.name,
+            thinkingLevel: role.thinkingLevel
         )
 
         // 决策 #7（2026-09-05 调整）：上下文估算达到预算 80% 时自动压缩。
@@ -1040,6 +1042,7 @@ public protocol ChatRoomLLMProviderFactory: Sendable {
         modelID: String,
         projectPath: String,
         roleID: String,
-        roleName: String
+        roleName: String,
+        thinkingLevel: ThinkingLevel?
     ) throws -> ChatRoomLLMProvider
 }

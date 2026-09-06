@@ -1050,7 +1050,8 @@ struct ChatRoomLiveSpeechTests {
             modelID: String,
             projectPath: String,
             roleID: String,
-            roleName: String
+            roleName: String,
+            thinkingLevel: ThinkingLevel?
         ) throws -> ChatRoomLLMProvider {
             provider
         }
@@ -1119,7 +1120,8 @@ struct ChatRoomCompactionTests {
             modelID: String,
             projectPath: String,
             roleID: String,
-            roleName: String
+            roleName: String,
+            thinkingLevel: ThinkingLevel?
         ) throws -> ChatRoomLLMProvider {
             MockChatRoomProvider(queue: queue)
         }

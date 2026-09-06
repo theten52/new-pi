@@ -253,22 +253,62 @@ struct OpenAICompatibleRequestPolicyTests {
         #expect(OpenAICompatibleRequestPolicy.effectiveMaxTokens(model: model, profile: profile) == 16_384)
     }
 
-    @Test("disables DeepSeek thinking when tools are present")
-    func disableThinkingForTools() {
-        var body: [String: Any] = ["model": "deepseek-v4-flash"]
-        let profile = ProviderProfile(
-            name: "DeepSeek",
-            preset: .openaiCompatible,
-            modelID: "deepseek-v4-flash",
-            options: ["baseURL": "https://api.deepseek.com/v1/chat/completions"]
-        )
-        OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
-            body: &body,
-            model: profile.modelConfig,
-            profile: profile,
-            hasTools: true
-        )
-        #expect((body["thinking"] as? [String: String])?["type"] == "disabled")
+    @Test("thinking policy: off disables, high/low map to reasoning_effort by vendor")
+    func thinkingPolicyByVendor() {
+        func makeBody(model: String, url: String, level: ThinkingLevel) -> [String: Any] {
+            var b: [String: Any] = ["model": model]
+            let profile = ProviderProfile(
+                name: "t",
+                preset: .openaiCompatible,
+                modelID: model,
+                thinkingLevel: level,
+                options: ["baseURL": url]
+            )
+            OpenAICompatibleRequestPolicy.applyThinkingPolicy(body: &b, model: profile.modelConfig, profile: profile)
+            return b
+        }
+
+        // DeepSeek chat + off → 关闭思考；+ high → reasoning_effort（chat 端点同样可调）
+        let ds = makeBody(model: "deepseek-v4-pro", url: "https://api.deepseek.com/v1/chat/completions", level: .off)
+        #expect((ds["thinking"] as? [String: String])?["type"] == "disabled")
+        let dsHigh = makeBody(model: "deepseek-v4-pro", url: "https://api.deepseek.com/v1/chat/completions", level: .high)
+        #expect(dsHigh["reasoning_effort"] as? String == "high")
+
+        // GLM + off → 关闭；minimal/low/medium/high → reasoning_effort
+        let glmOff = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .off)
+        #expect((glmOff["thinking"] as? [String: String])?["type"] == "disabled")
+        let glmMin = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .minimal)
+        #expect(glmMin["reasoning_effort"] as? String == "low")
+        let glmLow = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .low)
+        #expect(glmLow["reasoning_effort"] as? String == "low")
+        let glmMed = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .medium)
+        #expect(glmMed["reasoning_effort"] as? String == "medium")
+        let glmHigh = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .high)
+        #expect(glmHigh["reasoning_effort"] as? String == "high")
+
+        // MiMo + low → reasoning_effort low
+        let mimo = makeBody(model: "mimo-v2.5-pro", url: "https://api.xiaomimimo.com/v1/chat/completions", level: .low)
+        #expect(mimo["reasoning_effort"] as? String == "low")
+
+        // unknown 厂商 + off → 保守不发，避免个别服务端 400
+        let unknown = makeBody(model: "some-model", url: "https://api.example.com/v1/chat/completions", level: .off)
+        #expect(unknown["thinking"] == nil)
+        #expect(unknown["reasoning_effort"] == nil)
+
+        // Responses API 路径（DeepSeek V4）：off→none，minimal/low→low，medium→medium，high→high
+        func effort(_ level: ThinkingLevel) -> String {
+            ResponsesRequestPolicy.reasoningEffort(model: ModelConfig(
+                provider: "openaiCompatible",
+                modelID: "deepseek-v4-pro",
+                thinkingLevel: level,
+                maxTokens: 8192
+            ))
+        }
+        #expect(effort(.off) == "none")
+        #expect(effort(.minimal) == "low")
+        #expect(effort(.low) == "low")
+        #expect(effort(.medium) == "medium")
+        #expect(effort(.high) == "high")
     }
 
     @Test("DeepSeek Responses preset defaults to higher max tokens")

@@ -61,7 +61,8 @@ final class ChatRoomFlowController: ObservableObject {
                 let model = ModelConfig(
                     provider: profile.preset.rawValue,
                     modelID: role.modelID ?? profile.modelID,
-                    thinkingLevel: profile.thinkingLevel,
+                    // 角色级档位优先；未单独设置则跟随所绑 provider 的默认档位。
+                    thinkingLevel: role.thinkingLevel ?? profile.thinkingLevel,
                     maxTokens: profile.effectiveMaxTokens
                 )
                 return ChatRoomRoleEngine(llm: llm, model: model)

@@ -99,7 +99,9 @@ public struct ChatRoomRole: Codable, Identifiable, Sendable, Equatable {
     public var presetType: PresetRoleType?
     public var providerProfileID: String?  // 关联的 provider
     public var modelID: String?            // 关联的模型
-    
+    /// 角色级思考档位；nil = 跟随所绑 provider profile 的默认档位。
+    public var thinkingLevel: ThinkingLevel?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
@@ -108,7 +110,8 @@ public struct ChatRoomRole: Codable, Identifiable, Sendable, Equatable {
         icon: String = "person.fill",
         presetType: PresetRoleType? = nil,
         providerProfileID: String? = nil,
-        modelID: String? = nil
+        modelID: String? = nil,
+        thinkingLevel: ThinkingLevel? = nil
     ) {
         self.id = id
         self.name = name
@@ -118,6 +121,7 @@ public struct ChatRoomRole: Codable, Identifiable, Sendable, Equatable {
         self.presetType = presetType
         self.providerProfileID = providerProfileID
         self.modelID = modelID
+        self.thinkingLevel = thinkingLevel
     }
     
     /// 是否已配置模型

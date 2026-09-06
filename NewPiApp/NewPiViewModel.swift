@@ -444,6 +444,9 @@ final class NewPiViewModel: ObservableObject {
     @Published var activeProviderID: String?
     @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
+    /// 状态栏临时思考档位（会话级覆盖；nil = 用当前 provider profile 的默认档位）。
+    /// 与 profile.thinkingLevel 不同：不持久化，换会话即复位（见 beginSession）。
+    @Published var thinkingLevelOverride: ThinkingLevel?
     @Published var branchPointCount = 0
     @Published var isForkedBranch = false
     /// 正在切换 session（后台构建中），UI 据此显示加载指示。
@@ -524,6 +527,48 @@ final class NewPiViewModel: ObservableObject {
     var activeProfile: ProviderProfile? {
         guard let id = activeProviderID else { return nil }
         return providerConfig.profiles.first(where: { $0.id == id })
+    }
+
+    /// 当前生效的思考档位：状态栏临时覆盖优先，否则回落到活跃 provider 的默认档位。
+    var activeThinkingLevel: ThinkingLevel {
+        thinkingLevelOverride ?? activeProfile?.thinkingLevel ?? .off
+    }
+
+    /// 给 profile 应用会话级思考档位覆盖（不改写 profile 本身，不持久化）。
+    private func effectiveModelConfig(for profile: ProviderProfile) -> ModelConfig {
+        var config = profile.modelConfig
+        if let override = thinkingLevelOverride {
+            config.thinkingLevel = override
+        }
+        return config
+    }
+
+    /// 重建当前会话的 AgentLoopConfig（切模型 / 切思考档位共用）。
+    /// 返回 MCP 工具数量（供日志）。
+    @discardableResult
+    private func rebuildAgentConfig(profile: ProviderProfile, projectURL: URL) async throws -> Int {
+        let llm = try LLMProviderFactory.make(
+            profile: profile,
+            credentialResolver: providerCredentialResolver
+        )
+        let mcpTools = await loadMCPTools()
+        let mc = effectiveModelConfig(for: profile)
+        let newConfig = AgentLoopConfig(
+            model: mc,
+            llm: llm,
+            tools: AgentSessionFactory.codingTools(
+                workingDirectory: projectURL,
+                llm: llm,
+                model: mc,
+                additionalTools: mcpTools
+            ),
+            toolPolicy: .codingAgentDefault,
+            compaction: CompactionConfig.recommended(
+                contextWindow: profile.contextWindow(for: profile.modelID)
+            )
+        )
+        await session?.updateConfig(newConfig)
+        return mcpTools.count
     }
 
     /// 状态栏「上下文占用」文本：`上下文 9.2% / 1.0M`。
@@ -756,6 +801,12 @@ final class NewPiViewModel: ObservableObject {
         // 目标与当前一致：无副作用，直接返回。
         if activeProviderID == profileID, activeProviderModel == trimmedModel { return }
 
+        // 换到另一家 provider 时清会话级思考覆盖（回到新 provider 的默认档位）；
+        // 同 provider 内切模型保留覆盖（用户显式选的档位不因换模型而丢）。
+        if profileID != activeProviderID {
+            thinkingLevelOverride = nil
+        }
+
         do {
             profile.modelID = trimmedModel
             profile.addModel(trimmedModel)
@@ -763,27 +814,7 @@ final class NewPiViewModel: ObservableObject {
             // 同步设为默认 provider（否则状态栏会回落显示旧默认）。
             try providerConfigStore.upsertProfile(profile, in: &providerConfig, setAsDefault: session == nil)
 
-            let llm = try LLMProviderFactory.make(
-                profile: profile,
-                credentialResolver: providerCredentialResolver
-            )
-            let mcpTools = await loadMCPTools()
-            let newConfig = AgentLoopConfig(
-                model: profile.modelConfig,
-                llm: llm,
-                tools: AgentSessionFactory.codingTools(
-                    workingDirectory: projectURL,
-                    llm: llm,
-                    model: profile.modelConfig,
-                    additionalTools: mcpTools
-                ),
-                toolPolicy: .codingAgentDefault,
-                // 按当前模型窗口推导压缩预算，与新建会话保持一致
-                compaction: CompactionConfig.recommended(
-                    contextWindow: profile.contextWindow(for: profile.modelID)
-                )
-            )
-            await session?.updateConfig(newConfig)
+            let toolCount = try await rebuildAgentConfig(profile: profile, projectURL: projectURL)
 
             NewPiLogger.info(
                 category: "app",
@@ -791,7 +822,7 @@ final class NewPiViewModel: ObservableObject {
                 details: """
                 provider=\(profile.name)
                 model=\(profile.modelID)
-                mcpTools=\(mcpTools.count)
+                mcpTools=\(toolCount)
                 """
             )
 
@@ -805,6 +836,21 @@ final class NewPiViewModel: ObservableObject {
 
             await refreshProviderList()
             await setActiveProviderState(profile)
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
+    /// 状态栏临时切换思考档位（BACKLOG：可调节思考）。
+    /// 会话级覆盖：不写回 profile；与 provider 默认档位一致时清空覆盖（回落默认）。
+    func setThinkingLevel(_ level: ThinkingLevel) async {
+        guard !isStreaming else { return }
+        guard let projectURL else { return }
+        guard let profile = activeProfile else { return }
+        // 与 profile 默认一致 → 清覆盖（否则保持覆盖，切会话时在 beginSession 复位）。
+        thinkingLevelOverride = (level == profile.thinkingLevel) ? nil : level
+        do {
+            try await rebuildAgentConfig(profile: profile, projectURL: projectURL)
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)
         }
@@ -1128,6 +1174,8 @@ final class NewPiViewModel: ObservableObject {
     private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
         guard let projectURL else { return }
         isSwitchingSession = true
+        // 会话级思考档位覆盖只在单次会话期间有效：切换会话即回到各 provider 的默认档位。
+        thinkingLevelOverride = nil
         defer { isSwitchingSession = false }
 
         // 切换序号（GLM review 意见2）：每次发起取号，冷恢复 await 后校验，防同项目连点竞态。

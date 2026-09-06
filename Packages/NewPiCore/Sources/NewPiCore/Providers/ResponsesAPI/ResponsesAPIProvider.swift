@@ -46,11 +46,7 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                             profile: profile
                         ),
                         "reasoning": [
-                            "effort": ResponsesRequestPolicy.reasoningEffort(
-                                model: model,
-                                profile: profile,
-                                hasTools: !tools.isEmpty
-                            ),
+                            "effort": ResponsesRequestPolicy.reasoningEffort(model: model),
                         ],
                     ]
 

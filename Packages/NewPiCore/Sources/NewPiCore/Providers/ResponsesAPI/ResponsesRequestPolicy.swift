@@ -19,18 +19,19 @@ enum ResponsesRequestPolicy {
         return max(model.maxTokens, deepSeekMinimumMaxOutputTokens)
     }
 
-    static func reasoningEffort(model: ModelConfig, profile: ProviderProfile, hasTools: Bool) -> String {
-        if isDeepSeekProfile(profile, modelID: model.modelID), hasTools {
-            return "none"
-        }
-
+    /// 把 ThinkingLevel 映射为 Responses API 的 reasoning effort。
+    /// DeepSeek V4 实测支持 none/low/medium/high（reasoning token 递增），
+    /// 不再是「工具场景一刀切 none」——思考档位完全由用户配置决定。
+    static func reasoningEffort(model: ModelConfig) -> String {
         switch model.thinkingLevel {
         case .off:
-            return "none"
+            "none"
         case .minimal, .low:
-            return "low"
-        case .medium, .high:
-            return "high"
+            "low"
+        case .medium:
+            "medium"
+        case .high:
+            "high"
         }
     }
 
