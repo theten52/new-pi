@@ -109,17 +109,17 @@ public actor AgentSession {
                         )
                     }
                 }
-                // PROBE（BACKLOG-STALL 定位）：事件到达 broadcast 的时刻。
-                // 与 metrics 的 firstTextAt（provider yield 时刻）、UI 侧 stall/flush
-                // 日志三方对齐，锁定中段 20s+ 延迟发生在哪一跳。
+                // PROBE（BACKLOG-STALL / STALL-VERIFY 定位）：事件到达 broadcast 的时刻。
+                // textDelta 每 100 个一条（与 UI 消费端 consumed 探针 cadence 对齐，
+                // 同序号两端时间差 = 投递/调度延迟）；边界事件全记。
                 switch event {
                 case .agentStart:
                     probeTextCount = 0
                     NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "agentStart")
                 case .textDelta:
                     probeTextCount += 1
-                    if probeTextCount <= 3 || probeTextCount % 200 == 0 {
-                        NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "text#\(probeTextCount)")
+                    if probeTextCount % 100 == 0 {
+                        NewPiLogger.info(category: "agent-session", message: "STALL-VERIFY bcast", details: "text#\(probeTextCount)")
                     }
                 case .messageStart, .messageEnd, .agentEnd, .error:
                     NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "\(event.diagnosticName)")

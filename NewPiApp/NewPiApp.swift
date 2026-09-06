@@ -14,8 +14,64 @@ final class NewPiAppDelegate: NSObject, NSApplicationDelegate {
 struct NewPiApp: App {
     @NSApplicationDelegateAdaptor(NewPiAppDelegate.self) private var appDelegate
 
+    /// 主 runloop 看门狗（STALL-VERIFY 排查用，零交互、只读）：每 0.5s 在
+    /// RunLoop.main 上打点，实际触发时刻晚于预期 >1s 即记一条日志。
+    /// 用途：区分「MainActor 事件循环被饿死」与「主线程被同步工作（布局/CA 提交）
+    /// 阻塞」——watchdog 漂移量就是主线程不可用的总时长，与 stall gap 对齐即可定论。
+    enum MainRunloopWatchdog {
+        static func install() {
+            let interval: TimeInterval = 0.5
+            var expected = Date().addingTimeInterval(interval)
+            // .common 模式：滚动/拖拽 tracking 期间也照常打点（否则用户滚动会误报漂移）。
+            let timer = Timer(timeInterval: interval, repeats: true) { _ in
+                let now = Date()
+                let drift = now.timeIntervalSince(expected)
+                if drift > 1.0 {
+                    NewPiLogger.error(
+                        category: "app",
+                        message: "STALL-VERIFY main runloop blocked",
+                        details: "drift=\(String(format: "%.2f", drift))s（主线程这段时间完全不可用）"
+                    )
+                }
+                // 以实际触发时刻重排预期，避免追赶期连报。
+                expected = now.addingTimeInterval(interval)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+
+            // 对照探针 A：MainActor 调度延迟。runloop 定时器走 CFRunLoopTimer，
+            // MainActor 任务走主 dispatch queue——两条路分开测才能区分
+            // 「主线程阻塞」与「MainActor executor 饿死」。
+            Task { @MainActor in
+                var expectedAt = Date().addingTimeInterval(interval)
+                while true {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    let now = Date()
+                    let drift = now.timeIntervalSince(expectedAt)
+                    if drift > 1.0 {
+                        NewPiLogger.error(
+                            category: "app",
+                            message: "STALL-VERIFY MainActor hop delayed",
+                            details: "drift=\(String(format: "%.2f", drift))s（runloop 活着但 MainActor 任务拿不到调度）"
+                        )
+                    }
+                    expectedAt = now.addingTimeInterval(interval)
+                }
+            }
+
+            // 对照探针 B：活性心跳（60s 一条），证明看门狗本身在跑——
+            // 没有 blocked 日志时能区分「真的不卡」与「看门狗没装上」。
+            Task { @MainActor in
+                while true {
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    NewPiLogger.info(category: "app", message: "STALL-VERIFY watchdog alive")
+                }
+            }
+        }
+    }
+
     init() {
         _ = NewPiLogStore.shared
+        MainRunloopWatchdog.install()
     }
 
     var body: some Scene {

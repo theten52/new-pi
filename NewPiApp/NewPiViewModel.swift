@@ -225,13 +225,13 @@ final class SessionRuntime: ObservableObject {
     var detailLiveTurnIDByUser: [UUID: String] = [:]
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
+    /// 流式增量合并缓冲（STALL-FIX）：后台事件循环把 delta 直接追加进来（锁保护），
+    /// 不再每事件跳 MainActor；MainActor 侧的节流 flush 到点一次性 drain。
+    /// 根因背景：旧实现每事件一次 MainActor 跳，主线程被 CA 提交同步等待
+    /// （RenderBox wait_for_synchronize）占住时，消费速度 << 生产速度，事件积压数分钟。
+    let streamBuffer = StreamingDeltaBuffer()
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
     var lastUsedAt = Date()
-    /// 流式文本增量合并缓冲：textDelta 先累积到这里，按节流间隔一次性合并进 transcript，
-    /// 避免每个 delta 都触发 O(n) 字符串拼接与全量 UI 重渲染（见流式渲染优化）。
-    var pendingStreamingDelta = ""
-    /// 流式思考增量缓冲：与 pendingStreamingDelta 同管线同节流，flush 时先入 thinking 条目。
-    var pendingThinkingDelta = ""
     var streamingFlushTask: Task<Void, Never>?
     /// 流式输出 token 速率追踪（BACKLOG-TOKEN-RATE）：累计 textDelta 估算的
     /// 输出 token 数 + 时间戳，滑动窗口计算 tokens/s，仅流式期间显示。
@@ -241,6 +241,55 @@ final class SessionRuntime: ObservableObject {
         self.session = session
         self.fileURL = fileURL
         self.sessionID = sessionID
+    }
+}
+
+/// 流式增量合并缓冲（STALL-FIX）：锁保护、Sendable，后台事件循环直接写入。
+/// 正文与思考分通道；drain 一次性取走并清脏标记。脏标记 false→true 才需要
+/// poke MainActor 调度 flush——绝大多数 delta 零 MainActor hop。
+final class StreamingDeltaBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var text = ""
+    private var thinking = ""
+    private var dirty = false
+
+    /// 追加正文增量；返回 true 表示脏标记发生 false→true（调用方需调度一次 flush）。
+    func appendText(_ delta: String) -> Bool {
+        lock.lock()
+        let needsSchedule = !dirty
+        text += delta
+        dirty = true
+        lock.unlock()
+        return needsSchedule
+    }
+
+    /// 追加思考增量；语义同 appendText。
+    func appendThinking(_ delta: String) -> Bool {
+        lock.lock()
+        let needsSchedule = !dirty
+        thinking += delta
+        dirty = true
+        lock.unlock()
+        return needsSchedule
+    }
+
+    /// 一次性取走全部累积并清脏标记（MainActor flush / 边界事件前对齐用）。
+    func drain() -> (text: String, thinking: String) {
+        lock.lock()
+        let t = text
+        let k = thinking
+        text = ""
+        thinking = ""
+        dirty = false
+        lock.unlock()
+        return (t, k)
+    }
+
+    /// 当前积压字符数（自适应节流用）。
+    var pendingCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return text.count + thinking.count
     }
 }
 
@@ -1517,35 +1566,79 @@ final class NewPiViewModel: ObservableObject {
     /// 为某个 runtime 建立常驻事件循环：持续读取该 AgentSession 的事件，更新它自己
     /// 的转录与状态。**不会**因 UI 切到其它 session 而取消，从而保证后台 session 的
     /// 输出一直累积在自己名下。
+    ///
+    /// STALL-FIX：消费循环跑在后台线程（Task.detached），不再整环挂 MainActor。
+    /// 旧实现每个事件一次 MainActor hop；流式 100+ delta/s 时，主线程一旦被渲染提交
+    /// 的同步表面分配等待（RenderBox wait_for_synchronize，实测单次可达数秒）占住，
+    /// 消费速度 << 生产速度，AsyncStream 无界积压，流结束后还要排空数分钟（卡顿根因）。
+    /// 现在：textDelta/thinkingDelta 在后台实时追加进 streamBuffer（锁保护合并），
+    /// 只在脏标记 false→true 时 poke 一次 MainActor 调度节流 flush；边界事件才逐条
+    /// hop（handle 入口先 drain 缓冲，内容顺序不变）。主线程卡顿只延迟上屏，不再积压。
     private func startRuntimeEventLoop(_ runtime: SessionRuntime) {
         runtime.eventTask?.cancel()
         let session = runtime.session
-        runtime.eventTask = Task { @MainActor in
+        runtime.eventTask = Task.detached { [weak self] in
             let stream = await session.events()
-            // 诊断：记录 agent 起点与上一事件的处理间隔，定位「LLM 已完、UI 未更新」的延迟。
+            // 诊断：记录 agent 起点（接收侧），agentEnd 到达时的时长即真实流式时长。
             var runStartedAt: Date?
-            var lastEventHandledAt = Date()
+            // STALL-VERIFY：消费端（后台）textDelta 序号，与 AgentSession bcast 序号对齐，
+            // 两端时间差 = 生产→后台消费的投递延迟（已不含 MainActor 变量）。
+            var probeConsumedTextCount = 0
             for await event in stream {
-                let now = Date()
-                let gap = now.timeIntervalSince(lastEventHandledAt)
-                if gap > 0.5 {
-                    NewPiLogger.info(
-                        category: "app",
-                        message: "UI event loop stall",
-                        details: "gap=\(String(format: "%.2f", gap))s nextEvent=\(event.diagnosticName)"
-                    )
+                if Task.isCancelled { return }
+                switch event {
+                case let .textDelta(delta):
+                    probeConsumedTextCount += 1
+                    if probeConsumedTextCount % 100 == 0 {
+                        NewPiLogger.info(
+                            category: "app",
+                            message: "STALL-VERIFY consumed",
+                            details: "text#\(probeConsumedTextCount)"
+                        )
+                    }
+                    // 后台合并 + 按需 poke；agentActivity/streamingBubbleComplete 等
+                    // 状态迁移由 flush（MainActor）按节流节奏统一执行。
+                    if runtime.streamBuffer.appendText(delta) {
+                        self?.pokeStreamingFlushFromBackground(on: runtime)
+                    }
+                case let .thinkingDelta(delta):
+                    if runtime.streamBuffer.appendThinking(delta) {
+                        self?.pokeStreamingFlushFromBackground(on: runtime)
+                    }
+                default:
+                    if case .agentStart = event { runStartedAt = Date() }
+                    if case .agentEnd = event, let runStartedAt {
+                        NewPiLogger.info(
+                            category: "app",
+                            message: "UI: run wall time",
+                            details: "elapsed=\(String(format: "%.2f", Date().timeIntervalSince(runStartedAt)))s（接收侧口径=真实流式时长）"
+                        )
+                    }
+                    // 边界事件逐条 hop MainActor：hop 滞后即主线程不可用时长（卡顿探针）。
+                    let enqueuedAt = Date()
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        let hopLag = Date().timeIntervalSince(enqueuedAt)
+                        if hopLag > 0.5 {
+                            NewPiLogger.info(
+                                category: "app",
+                                message: "UI event loop stall",
+                                details: "hopLag=\(String(format: "%.2f", hopLag))s event=\(event.diagnosticName)（边界事件等 MainActor 调度的时长）"
+                            )
+                        }
+                        handle(event, on: runtime)
+                    }
                 }
-                if case .agentStart = event { runStartedAt = now }
-                if case .agentEnd = event, let runStartedAt {
-                    NewPiLogger.info(
-                        category: "app",
-                        message: "UI: run wall time",
-                        details: "elapsed=\(String(format: "%.2f", now.timeIntervalSince(runStartedAt)))s"
-                    )
-                }
-                handle(event, on: runtime)
-                lastEventHandledAt = Date()
             }
+        }
+    }
+
+    /// 后台消费循环的 flush 调度入口（STALL-FIX）：仅脏标记 false→true 时被调用，
+    /// 跳一次 MainActor 走既有单飞节流；其余 delta 零 hop。
+    private nonisolated func pokeStreamingFlushFromBackground(on runtime: SessionRuntime) {
+        Task { @MainActor [weak self, weak runtime] in
+            guard let self, let runtime else { return }
+            self.scheduleStreamingFlush(on: runtime)
         }
     }
 
@@ -1653,24 +1746,15 @@ final class NewPiViewModel: ObservableObject {
             // messageEnd 默认不触发镜像刷新；最终答复落定（状态栏翻 ready）时除外。
             hasVisibleStateChange = runtime.finalAnswerComplete
         case let .textDelta(delta):
-            runtime.agentActivity = .writing
-            // 新一轮正文开始（多轮 run 的后续 turn）：气泡切回流式渲染。
-            runtime.streamingBubbleComplete = false
-            runtime.finalAnswerComplete = false
-            runtime.tokenRateTracker.record(delta: delta)
+            // STALL-FIX：事件循环已在后台拦截 delta 直写 streamBuffer，正常不会走到这里；
+            // 保留兼容其它入口。状态迁移（agentActivity/.writing 等）由 flush 统一执行。
             enqueueStreamingDelta(delta, on: runtime)
-            if runtime === activeRuntime, agentActivity != .writing {
-                agentActivity = .writing
-            }
             hasVisibleStateChange = false
         case let .thinkingDelta(delta):
             // 思考过程入转录：缓冲后按与正文相同的节流节奏合并进 thinking 条目。
+            // STALL-FIX：同 textDelta，正常被后台拦截；且移除了逐 delta 的 DEBUG 日志
+            //（旧日志每思考 delta 产生一次 MainActor 日志 hop，百次/秒，本身就是卡顿源）。
             enqueueThinkingDelta(delta, on: runtime)
-            NewPiLogger.debug(
-                category: "app",
-                message: "UI: reasoning delta",
-                details: "length=\(delta.count)"
-            )
             hasVisibleStateChange = false
         case let .toolApprovalRequired(request):
             runtime.pendingToolApproval = request
@@ -2180,25 +2264,29 @@ final class NewPiViewModel: ObservableObject {
     /// 用更少的渲染提交换主线程喘息，避免 backlog 雪崩（实测：40ms 固定节流时
     /// LLM 流完后 UI 还要 4 分钟排空积压，run wall time 272s）。
     private func streamingFlushIntervalMS(for runtime: SessionRuntime) -> UInt64 {
-        // 平滑斜坡：随积压线性增加（200ms 起、每 150 字符 +1ms、600ms 封顶），
+        // 平滑斜坡：随积压线性增加（40ms 起、每 150 字符 +1ms、600ms 封顶），
         // 避免硬档位切换造成的「顺畅→突然卡一下→涌一大段」观感。
-        // 200ms 下限（BACKLOG-STALL）：实测两家 provider 都是 ~1 token/事件，40ms 下限
-        // ≈ 每秒 25 次渲染提交；每提交的异步 PAINT/表面分配成本随文档增大（采样：单次
-        // 阻塞最高 20s+），提交次数是排空时长的乘数——5Hz 出字观感依旧流畅。
-        let backlog = runtime.pendingStreamingDelta.count
-        return UInt64(min(200 + backlog / 150, 600))
+        // 实测（sample）：主线程 ~44% 时间阻塞在每次渲染提交的 CA 表面分配同步上，
+        // 单次提交成本 0.5~1s；积压越深就要把提交降得越稀，否则 backlog 雪崩。
+        // 注：wip 曾把下限提到 200ms（BACKLOG-STALL 缓解）；STALL-FIX 后事件消费已
+        // 不依赖主线程可用性，40ms 下限恢复——积压只来自渲染慢，不再雪崩。
+        let backlog = runtime.streamBuffer.pendingCount
+        return UInt64(min(40 + backlog / 150, 600))
     }
 
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
-    private func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
-        runtime.pendingStreamingDelta += delta
-        scheduleStreamingFlush(on: runtime)
+    /// STALL-FIX：任意线程可调（后台事件循环直接用）；仅脏标记 false→true 才调度 flush。
+    private nonisolated func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
+        if runtime.streamBuffer.appendText(delta) {
+            pokeStreamingFlushFromBackground(on: runtime)
+        }
     }
 
     /// 缓冲一个流式思考增量（与正文共用同一刷新任务与节流节奏）。
-    private func enqueueThinkingDelta(_ delta: String, on runtime: SessionRuntime) {
-        runtime.pendingThinkingDelta += delta
-        scheduleStreamingFlush(on: runtime)
+    private nonisolated func enqueueThinkingDelta(_ delta: String, on runtime: SessionRuntime) {
+        if runtime.streamBuffer.appendThinking(delta) {
+            pokeStreamingFlushFromBackground(on: runtime)
+        }
     }
 
     private func scheduleStreamingFlush(on runtime: SessionRuntime) {
@@ -2222,29 +2310,38 @@ final class NewPiViewModel: ObservableObject {
     /// controller 直达 WebView，不触发 runtime.transcript 的 @Published——面板不再每 flush
     /// re-diff，WKWebView 从 SwiftUI 布局传播中隔离。边界事件（handle 状态分支 / abort）
     /// 经 commitLiveTranscript 发布一次。无通道时退回 @Published 路径，行为与旧版一致。
+    ///
+    /// STALL-FIX：delta 由后台事件循环实时合并进 streamBuffer，这里整体 drain——
+    /// 主线程被渲染提交阻塞期间事件零积压（后台照收），只延迟上屏。
     private func flushStreamingDelta(on runtime: SessionRuntime) {
         runtime.streamingFlushTask?.cancel()
         runtime.streamingFlushTask = nil
         let liveDriven = runtime.docController != nil
         var items = liveDriven ? (runtime.liveTranscript ?? runtime.transcript) : runtime.transcript
         var mutated = false
+        let drained = runtime.streamBuffer.drain()
         // 思考增量先于正文 flush：时序上 thinkingDelta 总是先于同轮 textDelta 到达。
-        if !runtime.pendingThinkingDelta.isEmpty {
-            let delta = runtime.pendingThinkingDelta
-            runtime.pendingThinkingDelta = ""
-            appendOrUpdateThinking(delta, into: &items, on: runtime)
+        if !drained.thinking.isEmpty {
+            appendOrUpdateThinking(drained.thinking, into: &items, on: runtime)
             mutated = true
         }
-        guard !runtime.pendingStreamingDelta.isEmpty else {
+        guard !drained.text.isEmpty else {
             // 仅思考增量被冲刷时才落地；两者皆空（纯状态边界重入）不发布、不投递。
             if mutated { storeFlushTarget(items, live: liveDriven, on: runtime) }
             return
         }
-        let delta = runtime.pendingStreamingDelta
-        runtime.pendingStreamingDelta = ""
+        // 原 handle(.textDelta) 里的逐事件状态迁移，STALL-FIX 后按 flush 节奏统一执行
+        //（@Published 同值不重复发布，SwiftUI 无额外刷新）。
+        runtime.agentActivity = .writing
+        runtime.streamingBubbleComplete = false
+        runtime.finalAnswerComplete = false
+        runtime.tokenRateTracker.record(delta: drained.text)
+        if runtime === activeRuntime, agentActivity != .writing {
+            agentActivity = .writing
+        }
         // 诊断：flush 本身（字符串拼接 + 影子更新 + 直连投递）若过慢会卡事件循环。
         let start = Date()
-        appendOrUpdateAssistant(delta, into: &items, on: runtime)
+        appendOrUpdateAssistant(drained.text, into: &items, on: runtime)
         let elapsed = Date().timeIntervalSince(start)
         storeFlushTarget(items, live: liveDriven, on: runtime)
         // PROBE（BACKLOG-STALL 定位）：flush 派发时刻。与「PROBE dom applied」
@@ -2252,17 +2349,17 @@ final class NewPiViewModel: ObservableObject {
         NewPiLogger.info(
             category: "app",
             message: "PROBE stream flush",
-            details: "chars=\(delta.count) mergeMs=\(String(format: "%.0f", elapsed * 1000)) live=\(liveDriven)"
+            details: "chars=\(drained.text.count) mergeMs=\(String(format: "%.0f", elapsed * 1000)) live=\(liveDriven)"
         )
         // UI 侧指标：每次 flush 的耗时，供「API 监控」区分模型慢 vs UI 渲染慢。
         Task {
             await LLMMetricsRecorder.shared.record(UIFlushMetric(
                 duration: elapsed,
-                deltaLength: delta.count
+                deltaLength: drained.text.count
             ))
         }
         if elapsed > 0.1 {
-            NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(delta.count)")
+            NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(drained.text.count)")
         }
     }
 

@@ -24,6 +24,15 @@ public struct CompactionService: Sendable {
         )
         guard estimatedTokens >= compaction.triggerTokenCount else { return }
 
+        // 卡顿排查（STALL-VERIFY）：压缩触发即记日志——压缩期间无流式输出，
+        // 与「输出暂停」观感的唯一权威区分点。
+        let compactStart = Date()
+        NewPiLogger.info(
+            category: "compaction",
+            message: "STALL-VERIFY compaction triggered",
+            details: "estimatedTokens=\(estimatedTokens) trigger=\(compaction.triggerTokenCount) messages=\(context.messages.count)"
+        )
+
         guard let (toCompact, toKeep) = Self.partition(
             messages: context.messages,
             keepRecent: compaction.keepRecentMessages
@@ -37,6 +46,12 @@ public struct CompactionService: Sendable {
             llm: config.llm
         )
         guard !summary.isEmpty else { return }
+
+        NewPiLogger.info(
+            category: "compaction",
+            message: "STALL-VERIFY compaction finished",
+            details: "elapsed=\(String(format: "%.1f", Date().timeIntervalSince(compactStart)))s summaryChars=\(summary.count)"
+        )
 
         let summaryMessage = AgentMessage.compactionSummary(summary)
         continuation.yield(.messageStart(summaryMessage))
