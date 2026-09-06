@@ -58,6 +58,17 @@
 
 ### Phase A：组件级复用（低成本、直接收益）
 
+> **✅ 已实施（2026-09-06）**：三项全部落地——
+> ① 详情组折叠：`ChatRoomTranscriptAdapter` 把同一发言的工具卡收进
+> `.detailGroup` 组（`detailTurnID = "speak-<messageID>"`），实时发言展开、
+> 完成自动收起，长工具循环不再刷屏；thinking 卡保持内联（讨论期的思考
+> 是该发言的主要内容，不折叠）。
+> ② Composer：聊天室输入框替换为 Session 的 `NewPiComposerTextView`
+> （多行、自动增高、Return 发送 / Shift+Return 换行）；发言进行中保持
+> 可输入——发送即插话（steering），这是与 Session 语义的有意差异。
+> ③ 用量显示：输入栏空闲态展示 `runtime.usage.newPiCompactText` 累计
+> token（逐发言由 messageEnd 事件累加）。
+
 1. **详情组折叠**（收益最大）：把 adapter 的 `detailTurnID` 从恒 nil 改为按「同一发言内的 thinking/工具卡」分组复用 Session 的详情组渲染——一次发言几十张工具卡（如 500 轮那次）会折叠成一行「处理详情」，彻底解决刷屏。
 2. **Composer 输入框复用**：多行 + 高度自适应 + 图片附件，聊天室插话体验直接对齐 Session。
 3. **token 用量显示**：`ChatRoomLLMResponse` 透传 `UsageStats`，角色气泡/状态栏展示，与预算横幅互为补充。

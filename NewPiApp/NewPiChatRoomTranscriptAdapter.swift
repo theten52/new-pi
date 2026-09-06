@@ -100,19 +100,33 @@ struct ChatRoomTranscriptAdapter {
                 tintHues[messageID] = Self.hue(for: message.roleID)
             }
 
-            // 工具调用 → 工具卡（现成 renderCard；arguments 摘要截断防超长）。
-            // 结果未到达（实时发言进行中）→ running 状态。
-            for call in message.toolCalls ?? [] {
-                let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
+            // 工具调用 → 处理详情组（Phase A）：同一发言的工具卡收进一个可折叠组，
+            // 实时发言中保持展开（卡片随执行出现），发言完成自动收起为一行；
+            // 彻底解决长工具循环（如 500 轮）把 transcript 刷屏的问题。
+            let chatroomToolCalls = message.toolCalls ?? []
+            if !chatroomToolCalls.isEmpty {
+                let groupTurnID = "speak-\(message.id)"
+                // marker 自身必须携带 detailTurnID（组的身份行，对齐 session 的
+                // detailGroup 条目语义），否则 JS 无法把工具卡归组
                 items.append(NewPiTranscriptItem(
-                    id: derivedID("tool-\(call.id)"),
-                    kind: .tool(
-                        name: call.name,
-                        state: result.map { .completed(isError: $0.isError) } ?? .running
-                    ),
-                    body: result?.output ?? "",
-                    toolCommand: Self.truncate(call.arguments)
+                    id: derivedID("detail-\(message.id)"),
+                    kind: .detailGroup(collapsed: !(isRunning && message.id == lastMessageID)),
+                    body: "",
+                    detailTurnID: groupTurnID
                 ))
+                for call in chatroomToolCalls {
+                    let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
+                    items.append(NewPiTranscriptItem(
+                        id: derivedID("tool-\(call.id)"),
+                        kind: .tool(
+                            name: call.name,
+                            state: result.map { .completed(isError: $0.isError) } ?? .running
+                        ),
+                        body: result?.output ?? "",
+                        toolCommand: Self.truncate(call.arguments),
+                        detailTurnID: groupTurnID
+                    ))
+                }
             }
         }
         return (items, tintHues)

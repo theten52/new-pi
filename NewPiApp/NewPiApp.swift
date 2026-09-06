@@ -1182,6 +1182,8 @@ struct ChatRoomDetailView: View {
     @ObservedObject var controller: ChatRoomFlowController
 
     @State private var inputText = ""
+    /// Composer 实测内容高度（NewPiComposerTextView 回报，自动增高、超限滚动）。
+    @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     @State private var showingVoteSheet = false
     @State private var showingRolePicker = false
     @State private var showingEndDiscussionDialog = false
@@ -1449,19 +1451,41 @@ struct ChatRoomDetailView: View {
                 }
             }
 
-            // 输入框
+            // 状态行（Phase A 用量显示）：空闲时展示累计 token 用量
+            if !runtime.isRunning, let usageText = runtime.usage.newPiCompactText {
+                HStack(spacing: 5) {
+                    Image(systemName: "cpu")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("累计 Token：\(usageText)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+
+            // 输入框（Phase A：复用 Session 的多行 Composer）——真实多行、自动增高、
+            // Return 发送 / Shift+Return 换行；发言进行中保持可输入（插话走 steering）。
+            NewPiComposerTextView(
+                text: $inputText,
+                placeholder: "输入消息…（Return 发送，Shift+Return 换行；发言中发送 = 插话）",
+                onSubmit: {
+                    sendUserMessage()
+                },
+                onHeightChange: { newHeight in
+                    guard abs(composerInputHeight - newHeight) > 0.5 else { return }
+                    composerInputHeight = newHeight
+                }
+            )
+            .frame(height: composerInputHeight)
+
             HStack {
-                TextField("输入消息...", text: $inputText, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...5)
-                    .onSubmit {
-                        sendUserMessage()
-                    }
+                Spacer()
 
                 Button("发送") {
                     sendUserMessage()
                 }
-                .disabled(inputText.isEmpty)
+                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding()
@@ -1558,8 +1582,9 @@ struct ChatRoomDetailView: View {
     // MARK: - 辅助方法
 
     private func sendUserMessage() {
-        guard !inputText.isEmpty else { return }
-        controller.userSpeak(content: inputText)
+        let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+        controller.userSpeak(content: content)
         inputText = ""
     }
 
