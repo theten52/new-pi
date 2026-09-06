@@ -1383,23 +1383,7 @@ struct ChatRoomDetailView: View {
                 }
             }
 
-            // 当前发言者指示：保留原生浮层，不进文档。
-            if runtime.isRunning, let speaker = runtime.currentSpeaker {
-                HStack(spacing: 6) {
-                    Image(systemName: speaker.icon)
-                        .font(.caption)
-                    Text("\(speaker.name) 正在思考...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.regularMaterial, in: Capsule())
-                .padding(.leading, 12)
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            // 当前发言状态移入底部状态栏（CHATROOM-STATUS-BAR），列表内不再重复展示
         }
     }
     
@@ -1476,18 +1460,13 @@ struct ChatRoomDetailView: View {
                 }
             }
 
-            // 状态行（Phase A 用量显示）：空闲时展示累计 token 用量
-            if !runtime.isRunning, let usageText = runtime.usage.newPiCompactText {
-                HStack(spacing: 5) {
-                    Image(systemName: "cpu")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("累计 Token：\(usageText)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-            }
+            // 状态栏（对齐 session）：发言状态（正在思考/等待审批）+ 累计用量 + 上下文占用。
+            // 聊天室没有的维度（token 速率/缓存命中率/全局模型切换）不硬加。
+            NewPiAgentStatusBar(
+                presentation: chatroomStatusPresentation,
+                usageText: runtime.usage.newPiCompactText,
+                contextText: chatroomContextText
+            )
 
             // 输入框（Phase A：复用 Session 的多行 Composer）——真实多行、自动增高、
             // Return 发送 / Shift+Return 换行；发言进行中保持可输入（插话走 steering）。
@@ -1559,14 +1538,40 @@ struct ChatRoomDetailView: View {
         .background(.orange.opacity(0.12))
     }
 
-    private struct ContextBudget {
-        let usedRatio: Double
-        let limitTokens: Int
+    // MARK: - 状态栏（CHATROOM-STATUS-BAR）
+
+    /// 状态栏主标签：等待审批 > 发言中（角色名 + 正在思考）> 就绪
+    private var chatroomStatusPresentation: NewPiAgentStatusPresentation {
+        if !approvalManager.pendingApprovals.isEmpty {
+            return NewPiAgentStatusPresentation(
+                systemImage: "hand.raised.circle",
+                label: "等待工具审批…",
+                isActive: true
+            )
+        }
+        if runtime.isRunning, let speaker = runtime.currentSpeaker {
+            return NewPiAgentStatusPresentation(
+                systemImage: speaker.icon,
+                label: "\(speaker.name) 正在思考…",
+                isActive: true
+            )
+        }
+        return NewPiAgentStatusPresentation(
+            systemImage: "bubble.left.and.bubble.right",
+            label: "聊天室就绪",
+            isActive: false
+        )
     }
 
-    /// 共享上下文预算（决策 #7）：上限 = 所有角色中最小的 context window，
-    /// 达到 80% 时提示「建议结束当前讨论」。token 用字符数粗略估算。
-    private var contextBudgetWarning: ContextBudget? {
+    private struct ContextBudget {
+        let usedTokens: Int
+        let limitTokens: Int
+        var ratio: Double { Double(usedTokens) / Double(limitTokens) }
+    }
+
+    /// 共享上下文预算（决策 #7）：上限 = 所有角色中最小的 context window。
+    /// 状态栏占用文案与 ≥80% 告警横幅共用这一个来源。
+    private var contextBudget: ContextBudget? {
         let roles = runtime.chatroom.configuredRoles
         guard !roles.isEmpty else { return nil }
 
@@ -1586,16 +1591,33 @@ struct ChatRoomDetailView: View {
 
         // 与自动压缩共用核心估算器（摘要检查点 + 检查点后消息，与实际 API 载荷一致）
         let usedTokens = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
-        let ratio = Double(usedTokens) / Double(cap)
-        guard ratio >= 0.8 else { return nil }
-        return ContextBudget(usedRatio: ratio, limitTokens: cap)
+        return ContextBudget(usedTokens: usedTokens, limitTokens: cap)
+    }
+
+    private var contextBudgetWarning: ContextBudget? {
+        contextBudget.flatMap { $0.ratio >= 0.8 ? $0 : nil }
+    }
+
+    /// 状态栏上下文占用文案（格式对齐 session 的 contextUsageText）
+    private var chatroomContextText: String? {
+        guard let budget = contextBudget else { return nil }
+        let percent = min(budget.ratio * 100, 999.9)
+        return "上下文 \(String(format: "%.1f%%", percent)) / \(Self.compactTokenCount(budget.limitTokens))"
+    }
+
+    /// 紧凑 token 计数（对齐 session：≥1M → x.xM，≥10k → xk，≥1k → x.xk，否则原值）
+    private static func compactTokenCount(_ value: Int) -> String {
+        if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
+        if value >= 10_000 { return String(format: "%.0fk", Double(value) / 1_000) }
+        if value >= 1_000 { return String(format: "%.1fk", Double(value) / 1_000) }
+        return "\(value)"
     }
 
     private func budgetBanner(_ budget: ContextBudget) -> some View {
         HStack {
             Image(systemName: "gauge.with.needle")
                 .foregroundStyle(.orange)
-            Text("共享上下文已达预算约 \(Int(budget.usedRatio * 100))%（各角色最小窗口 \(budget.limitTokens) tokens），建议结束当前讨论")
+            Text("共享上下文已达预算约 \(Int(budget.ratio * 100))%（各角色最小窗口 \(budget.limitTokens) tokens），建议结束当前讨论")
                 .font(.callout)
             Spacer()
         }

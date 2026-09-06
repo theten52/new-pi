@@ -456,16 +456,10 @@ public final class ChatRoomLoop {
             promptMessage = .user(UserMessage(content: trigger))
         }
 
-        // 实时进度：临时消息（不落盘，事件实时改写，定型才持久化）
-        let liveMessageID = UUID().uuidString
-        runtime.messages.append(ChatRoomMessage(
-            id: liveMessageID,
-            chatroomID: runtime.chatroom.id,
-            roleID: role.id,
-            content: "",
-            phase: runtime.chatroom.currentPhase
-        ))
-        let liveIndex = runtime.messages.count - 1
+        // 实时进度：按 agentic 迭代分段（对齐 session 的交错展示）——每次 turnStart
+        // 起一条新消息（共享 speechID），思考/文本/工具事件只改写当前段；
+        // 全部段在发言结束时统一去空、定型、逐条落盘。
+        let speechID = UUID().uuidString
 
         // 流式增量节流（AgentLoop 不节流，节流在消费侧，120ms 攒批）
         var pendingText = ""
@@ -476,10 +470,19 @@ public final class ChatRoomLoop {
         var errorMessage: String?
         var sawAbort = false
 
-        func mutateProvisional(_ mutate: (inout ChatRoomMessage) -> Void) {
-            guard runtime.messages.indices.contains(liveIndex),
-                  runtime.messages[liveIndex].id == liveMessageID else { return }
-            mutate(&runtime.messages[liveIndex])
+        func appendSegment() {
+            runtime.messages.append(ChatRoomMessage(
+                chatroomID: runtime.chatroom.id,
+                roleID: role.id,
+                content: "",
+                speechID: speechID,
+                phase: runtime.chatroom.currentPhase
+            ))
+        }
+
+        func mutateCurrentSegment(_ mutate: (inout ChatRoomMessage) -> Void) {
+            guard let index = runtime.messages.lastIndex(where: { $0.speechID == speechID }) else { return }
+            mutate(&runtime.messages[index])
         }
 
         func flushText(force: Bool) async {
@@ -488,7 +491,7 @@ public final class ChatRoomLoop {
             let chunk = pendingText
             pendingText = ""
             lastTextFlush = Date()
-            mutateProvisional { $0.content += chunk }
+            mutateCurrentSegment { $0.content += chunk }
         }
 
         func flushThinking(force: Bool) async {
@@ -497,25 +500,30 @@ public final class ChatRoomLoop {
             let chunk = pendingThinking
             pendingThinking = ""
             lastThinkingFlush = Date()
-            mutateProvisional { message in
+            mutateCurrentSegment { message in
                 message.reasoningContent = (message.reasoningContent ?? "") + chunk
             }
         }
 
         func appendToolCall(_ call: ChatRoomToolCall) {
-            mutateProvisional { message in
+            mutateCurrentSegment { message in
                 message.toolCalls = (message.toolCalls ?? []) + [call]
             }
         }
 
         func appendToolResult(_ result: ChatRoomToolResult) {
-            mutateProvisional { message in
+            mutateCurrentSegment { message in
                 message.toolResults = (message.toolResults ?? []) + [result]
             }
         }
 
         func applyAgentEvent(_ event: AgentEvent) async throws {
             switch event {
+            case .turnStart:
+                // 新迭代 = 新分段；上一段的流式内容在此定格
+                await flushText(force: true)
+                await flushThinking(force: true)
+                appendSegment()
             case .textDelta(let delta):
                 pendingText += delta
                 await flushText(force: false)
@@ -523,9 +531,6 @@ public final class ChatRoomLoop {
                 pendingThinking += delta
                 await flushThinking(force: false)
             case .toolExecutionStart(let id, let name, let arguments):
-                // 定格流式内容，再挂出 running 工具卡
-                await flushText(force: true)
-                await flushThinking(force: true)
                 appendToolCall(ChatRoomToolCall(
                     id: id,
                     name: name,
@@ -592,7 +597,7 @@ public final class ChatRoomLoop {
                 try await applyAgentEvent(event)
             }
         } catch is CancellationError {
-            runtime.messages.remove(at: liveIndex)
+            runtime.messages.removeAll { $0.speechID == speechID }
             throw CancellationError()
         }
 
@@ -600,23 +605,36 @@ public final class ChatRoomLoop {
         await flushThinking(force: true)
 
         if sawAbort {
-            // 用户停止：移除临时消息，本轮不产出
-            runtime.messages.remove(at: liveIndex)
+            // 用户停止：移除全部分段，本轮不产出
+            runtime.messages.removeAll { $0.speechID == speechID }
             throw CancellationError()
         }
 
-        if let errorMessage {
-            mutateProvisional { $0.content += "\n\n（发言失败：\(errorMessage)）" }
+        // 去空段：无思考/无工具/无文本的迭代不留痕（全部为空时保留最后一段兜底）
+        var segments = runtime.messages.filter { $0.speechID == speechID }
+        let nonEmpty = segments.filter {
+            !$0.content.isEmpty || ($0.reasoningContent?.isEmpty == false) || ($0.toolCalls?.isEmpty == false)
+        }
+        if !nonEmpty.isEmpty, nonEmpty.count != segments.count {
+            let keepIDs = Set(nonEmpty.map(\.id))
+            runtime.messages.removeAll { $0.speechID == speechID && !keepIDs.contains($0.id) }
+            segments = nonEmpty
         }
 
-        // 候选方案只在讨论阶段解析（决策 #16 的「收尾归纳」语义）
+        if let errorMessage {
+            mutateCurrentSegment { $0.content += "\n\n（发言失败：\(errorMessage)）" }
+        }
+
+        // 候选方案只在讨论阶段解析（决策 #16 的「收尾归纳」语义），挂最后一段
         if runtime.chatroom.currentPhase == .discussion, !lastAssistantText.isEmpty {
-            mutateProvisional { message in
+            mutateCurrentSegment { message in
                 message.candidates = ChatRoomCandidateParser.parse(from: lastAssistantText)
             }
         }
 
-        try store.appendMessage(runtime.messages[liveIndex], to: runtime.chatroom.id)
+        for segment in runtime.messages.filter({ $0.speechID == speechID }) {
+            try store.appendMessage(segment, to: runtime.chatroom.id)
+        }
     }
 
     /// 聊天室引擎工具集：session 的 BuiltInTools（不含 SubAgent），edit 快照挂项目目录。

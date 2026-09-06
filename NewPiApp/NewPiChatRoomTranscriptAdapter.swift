@@ -48,6 +48,9 @@ struct ChatRoomTranscriptAdapter {
         var tintHues: [UUID: Int] = [:]
         var lastPhase: ChatRoomPhase?
         let lastMessageID = messages.last?.id
+        let lastSpeechKey = messages.last.flatMap { $0.speechID ?? $0.id }
+        // 每个发言（speechID）只发一个组 marker；组内条目按时间顺序交错
+        var emittedGroupMarkers: Set<String> = []
 
         for message in messages {
             // phase 切换处插分隔行（原 PhaseHeader 的文档内化，方案决策 4）：
@@ -68,22 +71,59 @@ struct ChatRoomTranscriptAdapter {
                 continue
             }
 
-            // 思考过程：正文前补 thinking 条目（与 session 的 reasoningContent 渲染一致）；
-            // 实时发言中且正文未开始 → 流式（✦ 光标），正文开始后冻结
-            if let reasoning = message.reasoningContent, !reasoning.isEmpty {
-                items.append(NewPiTranscriptItem(
-                    id: derivedID("thinking-\(message.id)"),
-                    kind: .thinking(isStreaming: isRunning && message.id == lastMessageID && message.content.isEmpty),
-                    body: reasoning
-                ))
-            }
-
             if message.isUserMessage {
                 items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content))
                 continue
             }
 
-            // 角色发言：正文 + 候选方案（决策 5：v1 拼进 markdown，不新增 kind）。
+            // 角色发言（对齐 session 的 turn 结构，CHATROOM-CHRONO-SEGMENTS）：
+            // speechID 相同的各迭代分段共享一个「处理详情」组，组内按时间顺序交错
+            // （Thinking 卡 / 工具卡 / 中间正文）；无工具调用的最终段正文在组外。
+            // 实时发言中组展开，完成自动收起为一行。
+            let reasoning = message.reasoningContent ?? ""
+            let chatroomToolCalls = message.toolCalls ?? []
+            let speechKey = message.speechID ?? message.id
+            let isLiveSpeech = isRunning && lastSpeechKey == speechKey
+
+            let hasGroupContent = !reasoning.isEmpty || !chatroomToolCalls.isEmpty
+            if hasGroupContent, !emittedGroupMarkers.contains(speechKey) {
+                // marker 自身必须携带 detailTurnID（组的身份行，对齐 session 语义）
+                items.append(NewPiTranscriptItem(
+                    id: derivedID("detail-\(speechKey)"),
+                    kind: .detailGroup(collapsed: !isLiveSpeech),
+                    body: "",
+                    detailTurnID: speechKey
+                ))
+                emittedGroupMarkers.insert(speechKey)
+            }
+
+            // Thinking 卡：组内，JS thinking 渲染器自带单行预览 + 点击展开；
+            // 仅最后一段的思考保持流式（✦ 光标），正文开始后冻结
+            if !reasoning.isEmpty {
+                items.append(NewPiTranscriptItem(
+                    id: derivedID("thinking-\(message.id)"),
+                    kind: .thinking(isStreaming: isRunning && message.id == lastMessageID && message.content.isEmpty),
+                    body: reasoning,
+                    detailTurnID: hasGroupContent ? speechKey : nil
+                ))
+            }
+
+            for call in chatroomToolCalls {
+                let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
+                items.append(NewPiTranscriptItem(
+                    id: derivedID("tool-\(call.id)"),
+                    kind: .tool(
+                        name: call.name,
+                        state: result.map { .completed(isError: $0.isError) } ?? .running
+                    ),
+                    body: result?.output ?? "",
+                    toolCommand: Self.truncate(call.arguments),
+                    detailTurnID: speechKey
+                ))
+            }
+
+            // 角色发言正文 + 候选方案（决策 5：v1 拼进 markdown，不新增 kind）。
+            // 有工具调用的段 = 中间解说（组内）；无工具调用 = 最终答复（组外）。
             var body = message.content
             if let candidates = message.candidates, !candidates.isEmpty {
                 let list = candidates.map { "- **\($0.title)**：\($0.description)" }.joined(separator: "\n")
@@ -95,38 +135,10 @@ struct ChatRoomTranscriptAdapter {
                     id: messageID,
                     kind: .assistant,
                     body: body,
+                    detailTurnID: chatroomToolCalls.isEmpty ? nil : speechKey,
                     speaker: roleName
                 ))
                 tintHues[messageID] = Self.hue(for: message.roleID)
-            }
-
-            // 工具调用 → 处理详情组（Phase A）：同一发言的工具卡收进一个可折叠组，
-            // 实时发言中保持展开（卡片随执行出现），发言完成自动收起为一行；
-            // 彻底解决长工具循环（如 500 轮）把 transcript 刷屏的问题。
-            let chatroomToolCalls = message.toolCalls ?? []
-            if !chatroomToolCalls.isEmpty {
-                let groupTurnID = "speak-\(message.id)"
-                // marker 自身必须携带 detailTurnID（组的身份行，对齐 session 的
-                // detailGroup 条目语义），否则 JS 无法把工具卡归组
-                items.append(NewPiTranscriptItem(
-                    id: derivedID("detail-\(message.id)"),
-                    kind: .detailGroup(collapsed: !(isRunning && message.id == lastMessageID)),
-                    body: "",
-                    detailTurnID: groupTurnID
-                ))
-                for call in chatroomToolCalls {
-                    let result = message.toolResults?.first(where: { $0.toolCallID == call.id })
-                    items.append(NewPiTranscriptItem(
-                        id: derivedID("tool-\(call.id)"),
-                        kind: .tool(
-                            name: call.name,
-                            state: result.map { .completed(isError: $0.isError) } ?? .running
-                        ),
-                        body: result?.output ?? "",
-                        toolCommand: Self.truncate(call.arguments),
-                        detailTurnID: groupTurnID
-                    ))
-                }
             }
         }
         return (items, tintHues)

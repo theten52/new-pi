@@ -1331,11 +1331,17 @@ struct ChatRoomEngineSpeechTests {
 
         try await loop.triggerNextSpeaker(runtime: runtime)
 
-        // 工具卡：BuiltInTools 的 read 真实执行（读自动过）
-        #expect(runtime.messages.last?.toolCalls?.first?.name == "read")
-        #expect(runtime.messages.last?.toolResults?.first?.output.contains("引擎读到的内容") == true)
-        #expect(runtime.messages.last?.toolResults?.first?.isError == false)
-        #expect(runtime.messages.last?.content == "读完了")
+        // 两个迭代分段：段1 = read 工具（BuiltInTools 真实执行，读自动过），段2 = 正文
+        #expect(runtime.messages.count == 2)
+        let toolSegment = runtime.messages[0]
+        let textSegment = runtime.messages[1]
+        #expect(toolSegment.speechID != nil)
+        #expect(toolSegment.speechID == textSegment.speechID)
+        #expect(toolSegment.toolCalls?.first?.name == "read")
+        #expect(toolSegment.toolResults?.first?.output.contains("引擎读到的内容") == true)
+        #expect(toolSegment.toolResults?.first?.isError == false)
+        #expect(textSegment.content == "读完了")
+        #expect(textSegment.toolCalls?.isEmpty != false)
     }
 
     @Test("steering enqueued mid-run reaches the model and lands in history")
@@ -1456,6 +1462,60 @@ struct ChatRoomEngineSpeechTests {
 
         // AgentLoop 把 LLM 异常转为 .error 事件 → 发言以失败标记定型（不抛出、不丢工具记录）
         #expect(runtime.messages.last?.content.contains("发言失败") == true)
+    }
+
+    @Test("agentic iterations become chronological segments sharing one speechID")
+    func chronologicalSegments() async throws {
+        let role = ChatRoomRole(name: "程序员", description: "", systemPrompt: "x", providerProfileID: "p1", modelID: "m1")
+        let chatroom = ChatRoom(name: "分段测试", roles: [role], projectPath: "/tmp/p")
+        let storeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chatroom-seg-\(UUID().uuidString)", isDirectory: true)
+        let store = ChatRoomStore(baseDirectory: storeDir)
+        defer { try? FileManager.default.removeItem(at: storeDir) }
+        try store.save(chatroom)
+        let runtime = ChatRoomRuntime(chatroom: chatroom)
+
+        let llm = EngineMockLLMProvider { messageCount, _ in
+            if messageCount <= 1 {
+                // 迭代 1：中间解说 + 工具调用
+                return [
+                    .thinkingDelta("第一段思考"),
+                    .textDelta("先看一下文件。"),
+                    .toolCall(ToolCallContent(
+                        id: "call-1",
+                        name: "read",
+                        arguments: .object(["path": .string("a.txt")])
+                    )),
+                ]
+            }
+            // 迭代 2：新思考 + 最终答复
+            return [
+                .thinkingDelta("第二段思考"),
+                .textDelta("最终答复"),
+                .completed(stopReason: .stop, usage: UsageStats()),
+            ]
+        }
+        let loop = makeEngineLoop(llm: llm, store: store)
+
+        try await loop.triggerNextSpeaker(runtime: runtime)
+
+        // 两个分段，同一 speechID，按时间顺序排列
+        #expect(runtime.messages.count == 2)
+        let seg1 = runtime.messages[0]
+        let seg2 = runtime.messages[1]
+        #expect(seg1.speechID != nil && seg1.speechID == seg2.speechID)
+
+        // 段1：思考 + 中间解说 + 工具；段2：思考 + 最终答复（无工具）
+        #expect(seg1.reasoningContent == "第一段思考")
+        #expect(seg1.content == "先看一下文件。")
+        #expect(seg1.toolCalls?.count == 1)
+        #expect(seg2.reasoningContent == "第二段思考")
+        #expect(seg2.content == "最终答复")
+        #expect(seg2.toolCalls == nil || seg2.toolCalls?.isEmpty == true)
+
+        // 落盘顺序与展示顺序一致
+        let persisted = try store.loadMessages(for: chatroom.id)
+        #expect(persisted.map(\.content) == ["先看一下文件。", "最终答复"])
     }
 
     @Test("approval bridge converts decisions and resumes the loop wait")

@@ -282,6 +282,10 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
     public var content: String
     /// 思考过程（extended thinking）；仅角色发言可能非空，供思考条目展示
     public var reasoningContent: String?
+    /// 发言分段标识（Phase B 引擎路径）：一次发言的每个 agentic 迭代各占一条
+    /// 消息、共享同一 speechID——展示层据此把各段的 Thinking/工具卡归入同一个
+    /// 「处理详情」组（对齐 session 的按时间顺序交错展示）。nil = 旧格式/单条发言。
+    public var speechID: String?
     public var phase: ChatRoomPhase
     public var candidates: [CandidateOption]?  // 讨论末尾的候选方案
     public var toolCalls: [ChatRoomToolCall]?
@@ -294,6 +298,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         roleID: String,
         content: String,
         reasoningContent: String? = nil,
+        speechID: String? = nil,
         phase: ChatRoomPhase,
         candidates: [CandidateOption]? = nil,
         toolCalls: [ChatRoomToolCall]? = nil,
@@ -305,6 +310,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         self.roleID = roleID
         self.content = content
         self.reasoningContent = reasoningContent
+        self.speechID = speechID
         self.phase = phase
         self.candidates = candidates
         self.toolCalls = toolCalls
