@@ -184,6 +184,22 @@ hljs 异步高亮。catchUp 循环（1.6s 窗口逐帧钉底）保证沉降后�
 
 决策：A→B 顺序实施，A 完成后实测再定 B 的具体形态（纯滑行 vs 锚定+滑行）。
 
+### 实施结果（已落地并实测）
+
+- **方案 A**：`collapseDetailGroupOnAnswerStart`——首个 text flush 即把流式答案
+  移出组 + marker 提前收起（组内无条目则移除），幂等；JS 零改动（原有
+  applyDetailGroupClass/applyGroupState 原生支持中途归属变化）。配套修复
+  `appendOrUpdateAssistant` 更新分支的 `?? runtime.detailTurnID` 兑底（会把已出组
+  条目每 flush 重新入组，探针抓到 assistant-out 每 flush 一次的震荡；修复后整轮
+  恰好一次）。
+- **方案 B**：forkLock 解锁时钉底中则先做一次 smooth scrollToBottom（600ms 窗口
+  内不硬钉），把气泡定型/hljs 的残余高度差变成滑行；RAF 追平循环保留兜底。
+- 验证：思考+工具场景（组展开→答案开始即折叠→答案始终可见→终态钉底）与
+  100 行长文（全程跟随、平滑落底）均通过；swift test 242 全过。
+- **附带观察（既有现象，非本次引入）**：渲染器「冻结前缀分叉 → 全量重渲染」的
+  防御路径在 k3 流式中触发过一次（docHeight 瞬间回落再长回，钉底自愈）。
+  内容驱动的罕见事件，若日后频繁出现再单列治理。
+
 ## 八、遗留与后续项
 
 1. **surface churn 未根治**：主线程的同步表面分配等待机制还在，修复只是
