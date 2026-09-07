@@ -2345,6 +2345,13 @@ final class NewPiViewModel: ObservableObject {
         // 诊断：flush 本身（字符串拼接 + 影子更新 + 直连投递）若过慢会卡事件循环。
         let start = Date()
         appendOrUpdateAssistant(drained.text, into: &items, on: runtime)
+        // 方案 A（收尾跳治理）：答案开始流出即完成「处理详情」折叠与答案出组——
+        // 把原 finalize 时刻的大位移分摊到答案尚短、重排不可感知的时刻。
+        // 幂等：已折叠/已出组后每次 flush 零变化（diff 不产生额外 ops）。
+        let groupAction = collapseDetailGroupOnAnswerStart(into: &items, on: runtime)
+        if !groupAction.isEmpty {
+            NewPiLogger.info(category: "app", message: "PROBE group collapse", details: groupAction)
+        }
         let elapsed = Date().timeIntervalSince(start)
         storeFlushTarget(items, live: liveDriven, on: runtime)
         // PROBE（BACKLOG-STALL 定位）：flush 派发时刻。与「PROBE dom applied」
@@ -2417,7 +2424,10 @@ final class NewPiViewModel: ObservableObject {
                 body: last.body + delta,
                 messageIndex: last.messageIndex,
                 sessionEntryID: last.sessionEntryID,
-                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
+                // 组归属不在更新路径变更（方案 A 后「出组」是流式中的稳定状态）：
+                // 曾用 ?? runtime.detailTurnID 兑底，会把已被 collapseDetailGroupOnAnswerStart
+                // 移出组的条目每 flush 重新入组再移出，造成反复 upsert 震荡。
+                detailTurnID: last.detailTurnID
             )
         } else {
             ensureDetailGroupMarker(into: &items, on: runtime)
@@ -2512,6 +2522,56 @@ final class NewPiViewModel: ObservableObject {
     /// 最终答复落定（BACKLOG-DETAIL-GROUP，决策 1+2）：把 turn 内最后一个 assistant 条目
     /// detailTurnID 置 nil（移出组，原地保留），并把 marker 置为 collapsed=true。
     /// 仅在存在当前 turn 且有 marker 时执行；无中间过程（无 marker）的 turn 是纯最终答复，无需处理。
+    /// 方案 A（收尾跳治理）：答案开始流出（首个 text flush）即执行 finalize 的分组动作——
+    /// 流式答案条目移出组（detailTurnID 置 nil）、marker 收起（组内无其它条目则移除）。
+    /// 在原 agentEnd/messageEnd 时刻只剩气泡定型的小差异，折叠大位移提前到答案尚短、
+    /// 重排不可感知的时刻。多轮 run 中每段新答案的第一个 text flush 重复一次（中间段
+    /// 文本同样先出组）；幂等，已处理后每次 flush 零变化。finalizeDetailGroup 保留为兜底。
+    /// 返回动作描述（空串 = 无变化），供诊断日志。
+    @discardableResult
+    private func collapseDetailGroupOnAnswerStart(into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) -> String {
+        guard let turnID = runtime.detailTurnID else { return "" }
+        var actions: [String] = []
+        // a. 最后一个在组内的 assistant 条目（即当前流式气泡）移出组。
+        if let lastIndex = items.lastIndex(where: { $0.kind == .assistant && $0.detailTurnID == turnID }) {
+            let item = items[lastIndex]
+            items[lastIndex] = NewPiTranscriptItem(
+                id: item.id,
+                kind: item.kind,
+                body: item.body,
+                toolCommand: item.toolCommand,
+                messageIndex: item.messageIndex,
+                sessionEntryID: item.sessionEntryID,
+                detailTurnID: nil
+            )
+            actions.append("assistant-out(\(item.id.uuidString.prefix(4)))")
+        }
+        // b. marker：组内仍有其它条目（thinking / tool / 中间 assistant）→ 收起；
+        //    无 → 移除（纯答复 turn 不留空壳，与 finalizeDetailGroup 同规则）。
+        if let markerID = runtime.detailGroupMarkerID,
+           let markerIndex = items.firstIndex(where: { $0.id == markerID }) {
+            let marker = items[markerIndex]
+            let groupItems = items.filter { $0.id != markerID && $0.detailTurnID == turnID }
+            if !groupItems.isEmpty {
+                if case .detailGroup(collapsed: false) = marker.kind {
+                    items[markerIndex] = NewPiTranscriptItem(
+                        id: marker.id,
+                        kind: .detailGroup(collapsed: true),
+                        body: marker.body,
+                        detailTurnID: marker.detailTurnID
+                    )
+                    let kinds = groupItems.map { $0.title }.joined(separator: ",")
+                    actions.append("marker-collapsed(remaining: \(kinds))")
+                }
+            } else {
+                items.remove(at: markerIndex)
+                runtime.detailGroupMarkerID = nil
+                actions.append("marker-removed")
+            }
+        }
+        return actions.joined(separator: " ")
+    }
+
     private func finalizeDetailGroup(on runtime: SessionRuntime) {
         guard let turnID = runtime.detailTurnID else { return }
         // a. 找到最后一个 detailTurnID == 当前 turn 的 assistant 条目，置 nil 移出组。

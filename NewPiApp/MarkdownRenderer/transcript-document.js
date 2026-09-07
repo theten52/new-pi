@@ -1100,13 +1100,21 @@
         // 引起高度变化），hljs 高亮也有异步布局——全部落在最后一次钉底之后。
         // 若此前处于钉底跟随，在窗口期内逐帧无条件钉底（到点即停）；
         // 用户上滚（intent 变 userScrolling）立即退出，不打扰阅读。
+        // 方案 B（收尾跳治理）：先做一次平滑滚动把 finalize 的高度差变成
+        // 「滑到底」而非「跳到底」（方案 A 已把折叠大位移提前到答案开始时，
+        // 这里吸收的只剩气泡定型/hljs 的小差异）；平滑窗口内不硬钉以免打断
+        // 动画，窗口后 RAF 追平循环继续兼容后续布局变化。
         if (wasLocked && !forkLocked && Scroll.intent === "pinnedBottom") {
+          Scroll.scrollToBottom(true);
+          const smoothUntil = Date.now() + 600;
           const catchUpDeadline = Date.now() + 1600;
           const catchUp = function () {
             if (Scroll.intent !== "pinnedBottom") {
               return;
             }
-            Scroll.pinBottom();
+            if (Date.now() >= smoothUntil) {
+              Scroll.pinBottom();
+            }
             if (Date.now() < catchUpDeadline) {
               window.requestAnimationFrame(catchUp);
             }
