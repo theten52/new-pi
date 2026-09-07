@@ -8,6 +8,7 @@ public struct ToolApprovalAuditEntry: Sendable, Equatable, Codable {
         case lowRisk = "low-risk"           // 只读命令，按危险等级豁免
         case sessionRecord = "session"      // 命中本对话授权记录
         case foreverRecord = "forever"      // 命中持久化授权记录
+        case projectScoped = "project-scoped" // 项目根内文件操作，按 PROJECT-SCOPE 策略豁免
         case prompted                        // 实际弹窗，由用户决定
     }
 

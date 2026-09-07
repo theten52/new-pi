@@ -587,7 +587,13 @@ public final class ChatRoomLoop {
                         roleName: role.name
                     )
                 },
-                dangerEvaluator: DangerEvaluator()
+                dangerEvaluator: DangerEvaluator(),
+                // 项目根内文件操作免审批（PROJECT-SCOPE-AUTO-APPROVE）：
+                // 根 = 聊天室 projectPath，开关走持久化策略。
+                projectScope: ProjectScopePolicy(
+                    root: projectURL,
+                    isEnabled: ApprovalPolicyStore().load().projectScopeAutoApprove
+                )
             )
 
             let stream = AgentLoop().run(

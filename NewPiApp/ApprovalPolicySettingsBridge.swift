@@ -9,6 +9,11 @@ final class ApprovalPolicySettingsBridge: ObservableObject {
     @Published var llmSupplementEnabled: Bool {
         didSet { save() }
     }
+    /// 项目根内文件操作（含删除）免审批开关；改动即持久化。
+    /// 对已在运行的会话不热生效，新会话/聊天室下次构建 config 时读取。
+    @Published var projectScopeAutoApprove: Bool {
+        didSet { save() }
+    }
 
     private let store = ApprovalPolicyStore()
 
@@ -16,10 +21,12 @@ final class ApprovalPolicySettingsBridge: ObservableObject {
         let loaded = store.load()
         policy = loaded
         llmSupplementEnabled = loaded.llmSupplementEnabled
+        projectScopeAutoApprove = loaded.projectScopeAutoApprove
     }
 
     func save() {
         policy.llmSupplementEnabled = llmSupplementEnabled
+        policy.projectScopeAutoApprove = projectScopeAutoApprove
         do {
             try store.save(policy)
         } catch {
@@ -35,6 +42,7 @@ final class ApprovalPolicySettingsBridge: ObservableObject {
     func resetToDefaults() {
         policy = ApprovalPolicy()
         llmSupplementEnabled = policy.llmSupplementEnabled
+        projectScopeAutoApprove = policy.projectScopeAutoApprove
         save()
     }
 }

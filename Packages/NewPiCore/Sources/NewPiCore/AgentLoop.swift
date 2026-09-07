@@ -268,6 +268,7 @@ public struct AgentLoop: Sendable {
             toolApprovalTracker: config.toolApprovalTracker,
             dangerEvaluator: config.dangerEvaluator,
             dangerCache: config.dangerCache,
+            projectScope: config.projectScope,
             auditLogger: config.auditLogger
         )
 
@@ -353,7 +354,28 @@ public struct AgentLoop: Sendable {
                 alreadyApproved = false
             }
 
-            if requiresApproval && !alreadyApproved {
+            // 项目根内文件操作免审批（PROJECT-SCOPE-AUTO-APPROVE）：
+            // 高危评估结果永不降级（level == .high 不咨询本策略）；
+            // MCP / subagent 在策略内部直接 prompt，不会误放行。
+            var projectScopeAllowed = false
+            if requiresApproval, !alreadyApproved, assessment.level != .high,
+               let projectScope = config.projectScope {
+                if case let .allow(reason) = projectScope.authorize(
+                    toolName: call.name,
+                    arguments: call.arguments
+                ) {
+                    projectScopeAllowed = true
+                    authorization = .projectScoped
+                    NewPiLogger.info(
+                        category: "tool-approval",
+                        message: "Project-scoped call auto-approved",
+                        details: "tool=\(call.name) reason=\(reason) root=\(projectScope.root.path)"
+                    )
+                }
+            }
+            let skipApproval = alreadyApproved || projectScopeAllowed
+
+            if requiresApproval && !skipApproval {
                 authorization = .prompted
                 let request = ToolApprovalRequest(
                     id: call.id,

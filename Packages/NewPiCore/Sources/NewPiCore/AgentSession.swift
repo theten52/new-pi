@@ -34,6 +34,11 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        // 项目根内文件操作免审批：根取本会话 workingDirectory，开关走持久化策略。
+        configured.projectScope = config.projectScope ?? ProjectScopePolicy(
+            root: context.workingDirectory,
+            isEnabled: approvalPolicy.projectScopeAutoApprove
+        )
         configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
     }
@@ -221,6 +226,11 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        // 与 init 同源：根取会话 workingDirectory，开关走持久化策略。
+        configured.projectScope = config.projectScope ?? ProjectScopePolicy(
+            root: context.workingDirectory,
+            isEnabled: ApprovalPolicyStore().load().projectScopeAutoApprove
+        )
         configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
         NewPiLogger.info(

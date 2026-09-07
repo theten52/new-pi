@@ -12,6 +12,10 @@ public struct ToolContext: Sendable {
     public var toolApprovalTracker: ToolApprovalTracker?
     public var dangerEvaluator: DangerEvaluator?
     public var dangerCache: DangerAssessmentCache?
+    /// 项目根内文件操作免审批策略（PROJECT-SCOPE-AUTO-APPROVE，可为 nil = 不启用）。
+    /// 需要派生子代理的工具（如 SubAgentTool）应把它继续传给子代理的
+    /// AgentLoopConfig，保证子代理与主会话行为一致。
+    public var projectScope: ProjectScopePolicy?
     /// 审批审计日志：每次工具调用记录原始参数/危险评估/审批路径与结果。
     public var auditLogger: ToolApprovalAuditLogger?
 
@@ -24,6 +28,7 @@ public struct ToolContext: Sendable {
         toolApprovalTracker: ToolApprovalTracker? = nil,
         dangerEvaluator: DangerEvaluator? = nil,
         dangerCache: DangerAssessmentCache? = nil,
+        projectScope: ProjectScopePolicy? = nil,
         auditLogger: ToolApprovalAuditLogger? = nil
     ) {
         self.workingDirectory = workingDirectory
@@ -34,6 +39,7 @@ public struct ToolContext: Sendable {
         self.toolApprovalTracker = toolApprovalTracker
         self.dangerEvaluator = dangerEvaluator
         self.dangerCache = dangerCache
+        self.projectScope = projectScope
         self.auditLogger = auditLogger
     }
 }
@@ -86,6 +92,9 @@ public struct AgentLoopConfig: Sendable {
     public var dangerEvaluator: DangerEvaluator?
     /// 危险评估结果缓存（跨调用复用）。
     public var dangerCache: DangerAssessmentCache?
+    /// 项目根内文件操作免审批策略（PROJECT-SCOPE-AUTO-APPROVE）。
+    /// nil = 不启用，所有非低危调用照常走审批弹窗。
+    public var projectScope: ProjectScopePolicy?
     /// 审批审计日志：每次工具调用记录原始参数/危险评估/审批路径与结果。
     public var auditLogger: ToolApprovalAuditLogger?
 
@@ -102,6 +111,7 @@ public struct AgentLoopConfig: Sendable {
         toolApprovalTracker: ToolApprovalTracker? = nil,
         dangerEvaluator: DangerEvaluator? = nil,
         dangerCache: DangerAssessmentCache? = nil,
+        projectScope: ProjectScopePolicy? = nil,
         auditLogger: ToolApprovalAuditLogger? = nil
     ) {
         self.model = model
@@ -116,6 +126,7 @@ public struct AgentLoopConfig: Sendable {
         self.toolApprovalTracker = toolApprovalTracker
         self.dangerEvaluator = dangerEvaluator
         self.dangerCache = dangerCache
+        self.projectScope = projectScope
         self.auditLogger = auditLogger
     }
 }
