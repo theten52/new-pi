@@ -156,6 +156,9 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         private var didApplyRestore = false
         /// PIN-PROBE：最近一次上报的 JS 滚动意图（变化才记日志）。
         private var lastReportedIntent: String?
+        /// PIN-PROBE2：最近一次记日志的 scrollTop / docHeight（≥400px 变化才记）。
+        private var lastReportedScrollTop: Double = -1
+        private var lastReportedDocHeight: Double = -1
         /// 上一次下发的全局 fork 锁状态（会话是否正在流式），变化时才发 forkLock op。
         private var lastForkLocked: Bool?
 
@@ -508,15 +511,28 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 let anchorID = body["anchorID"] as? String
                 let anchorDelta = (body["anchorDelta"] as? NSNumber)?.doubleValue ?? 0
                 let scrollTop = (body["scrollTop"] as? NSNumber)?.doubleValue ?? 0
+                let docHeight = (body["docHeight"] as? NSNumber)?.doubleValue ?? 0
                 // PIN-PROBE：JS 滚动意图变化观测（钉底回归定位），转迁时记一条。
                 let intent = body["intent"] as? String ?? "?"
+                // PIN-PROBE2：scrollTop/docHeight 每变 ≥400px 记一条——区分
+                // 「文档没长高」（布局/容器）与「长高了但 scrollY 没跟」（scrollTo 失效）
+                // 与「都正常但画面旧」（paint/合成层滞后）。
+                if abs(scrollTop - lastReportedScrollTop) >= 400 || abs(docHeight - lastReportedDocHeight) >= 400 {
+                    lastReportedScrollTop = scrollTop
+                    lastReportedDocHeight = docHeight
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "PROBE scroll pos",
+                        details: "panel=\(sessionID?.uuidString.prefix(8) ?? "?") scrollTop=\(Int(scrollTop)) docHeight=\(Int(docHeight)) intent=\(intent) nearBottom=\(nearBottom)"
+                    )
+                }
                 if intent != lastReportedIntent {
                     let prev = lastReportedIntent
                     lastReportedIntent = intent
                     NewPiLogger.info(
                         category: "app",
                         message: "PROBE scroll intent",
-                        details: "\(prev ?? "nil") -> \(intent) nearBottom=\(nearBottom) scrollTop=\(Int(scrollTop))"
+                        details: "panel=\(sessionID?.uuidString.prefix(8) ?? "?") \(prev ?? "nil") -> \(intent) nearBottom=\(nearBottom) scrollTop=\(Int(scrollTop))"
                     )
                 }
                 controller?.updateScrollState(

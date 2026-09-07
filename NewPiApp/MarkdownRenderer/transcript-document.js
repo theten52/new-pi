@@ -460,11 +460,14 @@
     const payload = {
       nearBottom: Scroll.isNearBottom(),
       scrollTop: Math.round(window.scrollY),
+      // PIN-PROBE2：文档总高随流式的变化——区分「文档没长高」（布局/容器问题）
+      // 与「长高了但 scrollY 没跟」（pinBottom/scrollTo 失效）。
+      docHeight: Math.round(document.documentElement.scrollHeight),
       anchorID: anchor ? anchor.id : null,
       anchorDelta: anchor ? Math.round(anchor.delta) : 0,
       intent: Scroll.intent
     };
-    const key = payload.nearBottom + "|" + payload.scrollTop + "|" + (payload.anchorID || "") + "|" + payload.anchorDelta + "|" + payload.intent;
+    const key = payload.nearBottom + "|" + payload.scrollTop + "|" + (payload.anchorID || "") + "|" + payload.anchorDelta + "|" + payload.intent + "|" + payload.docHeight;
     if (key === lastScrollReport) {
       return;
     }
@@ -901,6 +904,12 @@
   function renderAssistant(el, op, state) {
     el.className = "ti ti-answer";
     applyTint(el, op.tint);
+    // PIN-FREEZE 修复：流式期间强制渲染该条目（绕过 content-visibility 调度）。
+    // 实测现象：气泡高度超过一个视口后，docHeight/scrollY 一起冻结在「恰好一屏」
+    // 处，内容仍在流入但布局不再长高（CV 估算高被 lockIntrinsicHeight 逐批锁定后
+    // 与真实内容脱钩）；流结束 renderFinal 后才恢复。流式条日本来就该在屏上，
+    // 让 CV 调度它没有收益只有风险；定型后归还调度。
+    el.style.contentVisibility = op.streaming ? "visible" : "";
     if (!state.renderer) {
       el.textContent = "";
       const card = document.createElement("div");
@@ -1138,6 +1147,9 @@
     if (!explicitScroll) {
       Scroll.endBatch(plan);
     }
+    // PIN-PROBE2：批次结束后主动上报一次（内部有去重）——scrollY 不动时
+    // scroll 事件不触发，docHeight 的变化也能反映出来。
+    reportScrollState();
     // 批次结束后固化触达条目的真实高度（可见条目是真实高；离屏条目读到占位高，同值无害）。
     for (const el of touchedEls) {
       lockIntrinsicHeight(el);

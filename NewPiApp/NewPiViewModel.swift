@@ -2271,7 +2271,10 @@ final class NewPiViewModel: ObservableObject {
         // 注：wip 曾把下限提到 200ms（BACKLOG-STALL 缓解）；STALL-FIX 后事件消费已
         // 不依赖主线程可用性，40ms 下限恢复——积压只来自渲染慢，不再雪崩。
         let backlog = runtime.streamBuffer.pendingCount
-        return UInt64(min(40 + backlog / 150, 600))
+        // 实验旋钮（PIN-FREEZE 排查）：NEWPI_FLUSH_MS 覆盖节流下限，验证
+        // 「可见冻结 = 每帧新表面分配 × WindowServer 确认」是否与提交频率成正比。
+        let base = ProcessInfo.processInfo.environment["NEWPI_FLUSH_MS"].flatMap(Int.init) ?? 40
+        return UInt64(min(base + backlog / 150, 600))
     }
 
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
