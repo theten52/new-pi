@@ -116,28 +116,43 @@ Session 流式渲染主链路在 main..feat/chatroom 间实质零变化。
 其它验证：bcast/consumed 序号两端时间戳逐对对齐（生产→后台消费零延迟）；
 150 行长文完整渲染（截图）；token 速率/状态栏正常；`swift test` 180 全过。
 
-## 七、钉底回归（PIN-FIX，`74663c8`）
+## 七、钉底回归（PIN-FIX `74663c8` + PIN-FREEZE `aad8608`）
 
-STALL-FIX 合入后用户反馈「输出钉到底部」在 Session 与聊天室双双失效。
-加 PIN-PROBE（scrollState 上报 JS 意图转迁）后定位到两层原因：
+STALL-FIX 合入后用户反馈「输出钉到底部」失效。最终定位到**三层叠加**，
+前两层是意图管理漏洞，第三层才是用户看到「完全没效果」的主因：
 
 1. **钉底意图空窗期不受保护**：发送时 `scrollToBottom` 置 `pinnedBottom`，但
-   流式首批 `forkLock` 要数百毫秒后才到（Release/忙主线更长）。空窗内 scroll
-   事件监听的两条路径都可能误贬意图——拖拽误判（>150ms 无程序滚动即视为用户
-   接管；scroll anchoring 的布局微调也走 scroll 事件）与 `onScrollSettled` 的
-   「未近底即降级」。意图一旦被贬为 userScrolling/idle，Session 与聊天室都
-   **没有任何重新武装机制**，整轮不再跟随。
+   流式首批 `forkLock` 要数百毫秒后才到。空窗内拖拽误判（>150ms 无程序滚动即
+   视为用户接管；scroll anchoring 布局微调也走 scroll 事件）与 `onScrollSettled`
+   的「未近底即降级」都可能误贬意图，且无任何重新武装机制。修复：钉底宽限期
+   1.5s。
 2. **聊天室发送从不钉底**：`sendUserMessage` 自初始集成（28996ec）起就没有
-   `scrollToBottom`（Session 的 `sendComposerInput` 有），只靠「idle + 近底」
-   兜底，噪声降级后同样永久失效。
+   `scrollToBottom`（Session 的 `sendComposerInput` 有）。修复：补上。
+3. **content-visibility 冻结流式条目（主因）**：`.ti` 的 `content-visibility:auto`
+   + `lockIntrinsicHeight` 逐批锁定估算高——流式气泡高度超过一个视口后，布局
+   被冻结在锁定值上：DOM 仍在实时流入（dom applied 每批正常）、pinBottom 每批
+   执行、意图全程 pinnedBottom，但 **docHeight/scrollY 双双平台化**，画面精确定格
+   在「恰好一屏」（所有构建、所有节流档位、wip 与合并后构建都停在 22 行）。
+   流结束 renderFinal 后条目恢复渲染，文档瞬间长全。
+   修复：流式期间该条目 `contentVisibility = "visible"`（本就该在屏上，CV 调度
+   只有风险没有收益），定型归还。
 
-修复：钉底宽限期 1.5s（空窗内跳过拖拽误判与 settle 降级；过期恢复拖拽识别；
-流式中仍由 forkLock 路径保护；滚轮/触控/键盘接管通道不受影响）+ 聊天室发送
-补 `scrollToBottom`。验证：Release 120 行流式全程 `pinnedBottom` 零降级。
+### 排查过程中的排除项（都有实验证据）
 
-**残余认知**：Release 重负载下 WebView 绘制仍可能滞后数秒（可见内容冻结在旧帧，
-flush 节奏与意图都健康——是 WebContent 渲染/表面分配跟不上），追平时直接落在
-钉底位置。观感像「没钉住」，实为遗留项 #1/#2 的 surface churn，需独立治理。
+- ~~帧率 × 提交等待~~：NEWPI_FLUSH_MS=200（5 帧/s vs 17 帧/s）冻结依旧
+- ~~意图丢失~~：PIN-PROBE 全程 pinnedBottom 零降级
+- ~~JS 执行滞后~~：dom applied 与 flush 1:1 同秒
+- ~~WebContent 过载~~：sample 显示其 98% 空闲
+- ~~窗口尺寸变化可解锁~~：resize 实验无效
+- ~~本次合并的回归~~：wip 构建（d6edcd6）同环境同会话复现同一冻结
+- 干扰项：多面板探针日志互相污染（加面板标识后排除）；provider 出字速度
+  波动（35~112 tok/s）干扰「是否在跟随」的截图判读
+
+### 认知更新
+
+「看到旧画面」不等于「绘制滞后」——docHeight 平台化证明是**布局**被冻结，
+像素只是如实反映了布局。关键探针：scrollTop 与 docHeight 成对上报
+（两者同涨=健康钉底；docHeight 停涨=布局冻结；scrollTop 落后=滚动失效）。
 
 ## 八、遗留与后续项
 
