@@ -108,6 +108,19 @@ public final class ChatRoomStore: Sendable {
         }
     }
     
+    /// 定型整次发言（可能夹有已落盘的用户插话），原子保持 UI 中的消息顺序。
+    public func saveMessages(_ messages: [ChatRoomMessage], for chatroomID: String) throws {
+        try ensureDirectoryExists(for: chatroomID)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var data = Data()
+        for message in messages {
+            data.append(try encoder.encode(message))
+            data.append(0x0A)
+        }
+        try data.write(to: messagesURL(for: chatroomID), options: .atomic)
+    }
+
     /// 加载所有消息
     public func loadMessages(for chatroomID: String) throws -> [ChatRoomMessage] {
         let url = messagesURL(for: chatroomID)

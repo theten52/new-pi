@@ -308,6 +308,18 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
 // MARK: - 消息
 
 /// 聊天室消息
+/// 可选的中断标记；旧记录没有该字段，保持兼容。
+public enum ChatRoomSpeechTermination: String, Codable, Sendable {
+    case cancelled, failed
+
+    public var notice: String {
+        switch self {
+        case .cancelled: "发言已停止：已保留部分输出及工具记录，内容未完成。停止不代表已执行的操作被撤销。"
+        case .failed: "发言失败：已保留部分输出及工具记录，内容未完成。请检查实际文件状态。"
+        }
+    }
+}
+
 public struct ChatRoomMessage: Codable, Identifiable, Sendable {
     public var id: String
     public var chatroomID: String
@@ -319,6 +331,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
     /// 消息、共享同一 speechID——展示层据此把各段的 Thinking/工具卡归入同一个
     /// 「处理详情」组（对齐 session 的按时间顺序交错展示）。nil = 旧格式/单条发言。
     public var speechID: String?
+    public var termination: ChatRoomSpeechTermination?
     public var phase: ChatRoomPhase
     public var candidates: [CandidateOption]?  // 讨论末尾的候选方案
     public var toolCalls: [ChatRoomToolCall]?
@@ -332,6 +345,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         content: String,
         reasoningContent: String? = nil,
         speechID: String? = nil,
+        termination: ChatRoomSpeechTermination? = nil,
         phase: ChatRoomPhase,
         candidates: [CandidateOption]? = nil,
         toolCalls: [ChatRoomToolCall]? = nil,
@@ -344,6 +358,7 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         self.content = content
         self.reasoningContent = reasoningContent
         self.speechID = speechID
+        self.termination = termination
         self.phase = phase
         self.candidates = candidates
         self.toolCalls = toolCalls

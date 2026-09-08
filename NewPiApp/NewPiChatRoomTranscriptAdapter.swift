@@ -4,8 +4,8 @@ import NewPiCore
 /// 聊天室消息 → transcript items 适配层（CHATROOM-FLAT-MD Phase 2）。
 ///
 /// 把 ChatRoomRuntime.messages 映射为单文档管线可渲染的 `[NewPiTranscriptItem]`，
-/// 复用 session 的 markdown / 工具卡 / 滚动管线。聊天室无流式、无 fork、无详情折叠组：
-/// `messageIndex` / `detailTurnID` 一律 nil（canFork 为 false，JS 不渲染 Fork 按钮）。
+/// 复用 Session 的 Markdown / 工具卡 / 详情组 / 滚动管线；按显式发言身份支持插话中流式。
+/// messageIndex 为 nil，因此聊天室不显示 Fork 按钮。
 ///
 /// 映射规则（方案 §三.E）：
 /// - 用户消息 → .user；角色发言 → .assistant（speaker = 角色名，tint 按角色着色）；
@@ -37,18 +37,19 @@ struct ChatRoomTranscriptAdapter {
     }
 
     /// 全量重算（聊天室消息量级小，O(n) 可接受）；调用方按 controller 生命周期持有本实例。
-    /// isRunning：实时发言期间，最后一条消息的思考条目保持流式（✦ 光标），
-    /// 正文开始后冻结——与 session 的 thinking 语义一致。
+    /// liveSpeech 显式指定发言/分段/阶段；不能从 messages.last 猜测（用户可能插话）。
     mutating func adapt(
         messages: [ChatRoomMessage],
         roles: [ChatRoomRole],
-        isRunning: Bool
+        liveSpeech: ChatRoomLiveSpeech?
     ) -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) {
         var items: [NewPiTranscriptItem] = []
         var tintHues: [UUID: Int] = [:]
         var lastPhase: ChatRoomPhase?
-        let lastMessageID = messages.last?.id
-        let lastSpeechKey = messages.last.flatMap { $0.speechID ?? $0.id }
+        var lastInterruptedSegments: [String: String] = [:]
+        for message in messages where message.termination != nil && !message.isUserMessage {
+            lastInterruptedSegments[message.speechID ?? message.id] = message.id
+        }
         // 每个发言（speechID）只发一个组 marker；组内条目按时间顺序交错
         var emittedGroupMarkers: Set<String> = []
 
@@ -83,14 +84,15 @@ struct ChatRoomTranscriptAdapter {
             let reasoning = message.reasoningContent ?? ""
             let chatroomToolCalls = message.toolCalls ?? []
             let speechKey = message.speechID ?? message.id
-            let isLiveSpeech = isRunning && lastSpeechKey == speechKey
+            let isLiveSpeech = liveSpeech?.id == speechKey
+            let isLiveSegment = isLiveSpeech && liveSpeech?.messageID == message.id
 
             let hasGroupContent = !reasoning.isEmpty || !chatroomToolCalls.isEmpty
             if hasGroupContent, !emittedGroupMarkers.contains(speechKey) {
                 // marker 自身必须携带 detailTurnID（组的身份行，对齐 session 语义）
                 items.append(NewPiTranscriptItem(
                     id: derivedID("detail-\(speechKey)"),
-                    kind: .detailGroup(collapsed: !isLiveSpeech),
+                    kind: .detailGroup(collapsed: !isLiveSpeech && message.termination == nil),
                     body: "",
                     detailTurnID: speechKey
                 ))
@@ -98,11 +100,11 @@ struct ChatRoomTranscriptAdapter {
             }
 
             // Thinking 卡：组内，JS thinking 渲染器自带单行预览 + 点击展开；
-            // 仅最后一段的思考保持流式（✦ 光标），正文开始后冻结
+            // 仅显式活跃分段的思考保持流式状态，正文开始后冻结
             if !reasoning.isEmpty {
                 items.append(NewPiTranscriptItem(
                     id: derivedID("thinking-\(message.id)"),
-                    kind: .thinking(isStreaming: isRunning && message.id == lastMessageID && message.content.isEmpty),
+                    kind: .thinking(isStreaming: isLiveSegment && liveSpeech?.phase == .thinking),
                     body: reasoning,
                     detailTurnID: hasGroupContent ? speechKey : nil
                 ))
@@ -123,7 +125,8 @@ struct ChatRoomTranscriptAdapter {
                     kind: .assistant,
                     body: body,
                     detailTurnID: chatroomToolCalls.isEmpty ? nil : speechKey,
-                    speaker: roleName
+                    speaker: roleName,
+                    streamingOverride: isLiveSegment && liveSpeech?.phase == .text
                 ))
                 tintHues[messageID] = Self.hue(for: message.roleID)
             }
@@ -140,6 +143,10 @@ struct ChatRoomTranscriptAdapter {
                     toolCommand: Self.truncate(call.arguments),
                     detailTurnID: speechKey
                 ))
+            }
+            if lastInterruptedSegments[speechKey] == message.id, let termination = message.termination {
+                items.append(NewPiTranscriptItem(id: derivedID("termination-\(speechKey)"),
+                    kind: .system, body: termination.notice))
             }
         }
         return (items, tintHues)

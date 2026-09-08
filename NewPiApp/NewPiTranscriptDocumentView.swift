@@ -324,19 +324,14 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             send(ops: ops)
         }
 
-        /// 与遗留面板一致的活跃流式条目判定：最后一条 assistant/summary 且正文未落定。
+        /// 聊天室使用显式条目状态，Session 保持末条 assistant/summary 的既有判定。
         private func isStreamingItem(
             _ item: NewPiTranscriptItem,
             snapshot: TranscriptSnapshot,
             lastItemID: UUID?
         ) -> Bool {
-            if case .thinking(let streaming) = item.kind {
-                return streaming
-            }
-            return snapshot.isStreaming
-                && !snapshot.streamingBubbleComplete
-                && item.id == lastItemID
-                && item.isAssistantMarkdown
+            item.isStreaming(isRunning: snapshot.isStreaming,
+                bubbleComplete: snapshot.streamingBubbleComplete, lastItemID: lastItemID)
         }
 
         private static func signature(of item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> String {

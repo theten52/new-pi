@@ -1075,7 +1075,7 @@ struct ChatRoomLiveSpeechTests {
         #expect(persisted.last?.content == "最终发言")
     }
 
-    @Test("failed speech removes the provisional message")
+    @Test("failure before output removes the empty provisional message")
     func failedSpeechCleansUp() async throws {
         let (loop, runtime, store, dir) = try makeLoop(provider: FailingProvider())
         defer { try? FileManager.default.removeItem(at: dir) }

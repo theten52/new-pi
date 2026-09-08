@@ -101,3 +101,9 @@ macOS + Swift 6 环境运行 `scripts/validation/check-chatroom-controller.sh`�
 脚本编译真实聊天室控制器，检查运行/取消收尾/待审批的删除保护，以及失效目录的发言拦截和恢复。
 转录适配器使用空测试替身；不会调用模型、执行工具或修改已有聊天数据。
 可用 `NEWPI_VALIDATION_SCRATCH` 指定 SwiftPM 临时构建目录。
+
+## 聊天室输出渲染验证
+
+- `scripts/validation/check-chatroom-rendering.sh`：编译真实条目模型、共享流式判定和聊天室适配器，覆盖插话、Thinking、分段、完成态、中断标记及 Session 兼容。
+- `scripts/validation/check-transcript-dom.sh`：使用独立 WKWebView 加载真实 JS/CSS，验证非末尾消息继续流式、DOM 身份、卡片手动展开、正文定型；需要 macOS 图形登录会话，不发送模型请求。
+- Swift Package 的 `ChatRoomRenderingTests.swift` 覆盖 120ms 缓冲、事件/审批顺序、取消/失败保留及磁盘重载顺序。

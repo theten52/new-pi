@@ -4,7 +4,7 @@ import NewPiCore
 // 该检查只编译真实 FlowController/RuntimeStore；转录渲染不参与测试，使用空适配器。
 struct NewPiTranscriptItem {}
 struct ChatRoomTranscriptAdapter {
-    func adapt(messages: [ChatRoomMessage], roles: [ChatRoomRole], isRunning: Bool)
+    func adapt(messages: [ChatRoomMessage], roles: [ChatRoomRole], liveSpeech: ChatRoomLiveSpeech?)
         -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) { ([], [:]) }
 }
 

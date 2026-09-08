@@ -46,6 +46,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     /// 发言者名字（CHATROOM-FLAT-MD Phase 2）：仅聊天室角色发言的 assistant 条目非空，
     /// JS 侧用它渲染气泡头部标签（替代 session 路径的 "NewPi"）。
     let speaker: String?
+    /// 聊天室显式声明正文流式状态；nil 保持 Session 的既有末条消息判定。
+    let streamingOverride: Bool?
 
     init(
         id: UUID = UUID(),
@@ -56,7 +58,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         sessionEntryID: String? = nil,
         detailTurnID: String? = nil,
         attachments: [MessageAttachment] = [],
-        speaker: String? = nil
+        speaker: String? = nil,
+        streamingOverride: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -67,6 +70,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.detailTurnID = detailTurnID
         self.attachments = attachments
         self.speaker = speaker
+        self.streamingOverride = streamingOverride
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -92,6 +96,12 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     var isStreamingThinking: Bool {
         if case .thinking(true) = kind { return true }
         return false
+    }
+
+    func isStreaming(isRunning: Bool, bubbleComplete: Bool, lastItemID: UUID?) -> Bool {
+        if case .thinking(let streaming) = kind { return streaming }
+        if let streamingOverride { return isRunning && streamingOverride && isAssistantMarkdown }
+        return isRunning && !bubbleComplete && id == lastItemID && isAssistantMarkdown
     }
 
     var canFork: Bool {

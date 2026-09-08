@@ -445,6 +445,7 @@ struct NewPiRootView: View {
                 : (chatroom.role(by: message.roleID)?.name ?? message.roleID)
             let metadata = "\(formatter.string(from: message.timestamp)) · \(message.phase.rawValue)"
             var body: [String] = []
+            if let termination = message.termination { body.append(termination.notice) }
             if let reasoning = message.reasoningContent, !reasoning.isEmpty {
                 body.append(format == .markdown
                     ? "<details><summary>Thinking</summary>\n\n```text\n\(reasoning)\n```\n</details>"
@@ -1704,9 +1705,9 @@ struct ChatRoomDetailView: View {
     @StateObject private var docController = TranscriptDocumentController()
 
     private var messageList: some View {
-        // 消息 → transcript items（实时发言走增量渲染管线：isRunning 期间临时消息
-        // 为活跃流式条目（renderStreaming + ✦ 光标），结束翻 false 定型一次。
-        // 无 fork/折叠组：条目 messageIndex/detailTurnID 均为 nil，JS 不渲染 Fork 按钮）。
+        // 消息 → transcript items：适配器按 liveSpeech 显式标记活跃正文和 Thinking。
+        // 用户插话不改变流式身份；正文 messageEnd 即定型，不必等整次发言退出。
+        // 支持 speechID 详情组；messageIndex 为 nil，因此聊天室不显示 Fork 按钮。
         let snapshot = controller.transcriptSnapshot()
         let chatroomUUID = UUID(uuidString: runtime.chatroom.id)
         return ZStack(alignment: .bottom) {

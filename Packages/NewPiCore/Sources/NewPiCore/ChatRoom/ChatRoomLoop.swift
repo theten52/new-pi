@@ -6,6 +6,8 @@ public final class ChatRoomRuntime: ObservableObject {
     @Published public var chatroom: ChatRoom
     @Published public var messages: [ChatRoomMessage] = []
     @Published public var isRunning = false
+    /// 当前角色发言/分段/输出阶段，不依赖 messages.last（用户可随时插话）。
+    @Published public var liveSpeech: ChatRoomLiveSpeech?
     @Published public var currentSpeakerIndex = 0
     /// 正在发言的角色（发言期间由 loop 设置）。与 currentSpeaker（轮转索引推导）
     /// 不同：@指定发言时索引尚未推进，状态栏需要这个显式字段才能显示正确角色。
@@ -341,7 +343,7 @@ public final class ChatRoomLoop {
                 } else {
                     speaker = runtime.chatroom.role(by: message.roleID)?.name ?? message.roleID
                 }
-                return "【\(speaker)】\(message.content)"
+                return "【\(speaker)】\(message.content)" + (message.termination.map { "\n（\($0.notice)）" } ?? "")
             }.joined(separator: "\n\n")
 
             var prompt = "请把以下多模型协作对话压缩为要点摘要。"
@@ -391,6 +393,8 @@ public final class ChatRoomLoop {
 
     /// 角色发言
     private func speak(role: ChatRoomRole, runtime: ChatRoomRuntime) async throws {
+        guard !runtime.isRunning else { throw AgentError.invalidState("聊天室已有发言正在进行") }
+        try Task.checkCancellation()
         guard let providerID = role.providerProfileID,
               let modelID = role.modelID else {
             throw ChatRoomError.roleNotConfigured(role.id)
@@ -439,6 +443,7 @@ public final class ChatRoomLoop {
                 thinkingLevel: role.thinkingLevel
             )
         })
+        try Task.checkCancellation()
 
         let systemPrompt = ChatRoomContextBuilder.systemPrompt(
             role: role,
@@ -466,20 +471,18 @@ public final class ChatRoomLoop {
 
         // 实时进度：按 agentic 迭代分段（对齐 session 的交错展示）——每次 turnStart
         // 起一条新消息（共享 speechID），思考/文本/工具事件只改写当前段；
-        // 全部段在发言结束时统一去空、定型、逐条落盘。
+        // 全部段在发言结束时统一去空、定型，与插话一起原子保存显示顺序。
         let speechID = UUID().uuidString
 
-        // 流式增量节流（AgentLoop 不节流，节流在消费侧，120ms 攒批）
-        var pendingText = ""
-        var pendingThinking = ""
-        var lastTextFlush = Date.distantPast
-        var lastThinkingFlush = Date.distantPast
+        let buffer = ChatRoomSpeechBuffer(runtime: runtime, speechID: speechID)
+        let approvalGate = ChatRoomApprovalEventGate()
+        defer { buffer.finish(); approvalGate.finish() }
         var lastAssistantText = ""
         var errorMessage: String?
         var sawAbort = false
 
         func appendSegment() {
-            runtime.messages.append(ChatRoomMessage(
+            buffer.beginSegment(ChatRoomMessage(
                 chatroomID: runtime.chatroom.id,
                 roleID: role.id,
                 content: "",
@@ -493,29 +496,11 @@ public final class ChatRoomLoop {
             mutate(&runtime.messages[index])
         }
 
-        func flushText(force: Bool) async {
-            guard !pendingText.isEmpty else { return }
-            guard force || Date().timeIntervalSince(lastTextFlush) >= 0.12 else { return }
-            let chunk = pendingText
-            pendingText = ""
-            lastTextFlush = Date()
-            mutateCurrentSegment { $0.content += chunk }
-        }
-
-        func flushThinking(force: Bool) async {
-            guard !pendingThinking.isEmpty else { return }
-            guard force || Date().timeIntervalSince(lastThinkingFlush) >= 0.12 else { return }
-            let chunk = pendingThinking
-            pendingThinking = ""
-            lastThinkingFlush = Date()
-            mutateCurrentSegment { message in
-                message.reasoningContent = (message.reasoningContent ?? "") + chunk
-            }
-        }
-
         func appendToolCall(_ call: ChatRoomToolCall) {
             mutateCurrentSegment { message in
-                message.toolCalls = (message.toolCalls ?? []) + [call]
+                if !(message.toolCalls ?? []).contains(where: { $0.id == call.id }) {
+                    message.toolCalls = (message.toolCalls ?? []) + [call]
+                }
             }
         }
 
@@ -525,19 +510,22 @@ public final class ChatRoomLoop {
             }
         }
 
-        func applyAgentEvent(_ event: AgentEvent) async throws {
+        func applyAgentEvent(_ event: AgentEvent) throws {
+            // 所有非增量事件都是显示边界；尤其审批可能长时间等待，不能把尾字留在缓冲。
+            switch event {
+            case .textDelta, .thinkingDelta: break
+            default: buffer.flush()
+            }
             switch event {
             case .turnStart:
                 // 新迭代 = 新分段；上一段的流式内容在此定格
-                await flushText(force: true)
-                await flushThinking(force: true)
                 appendSegment()
             case .textDelta(let delta):
-                pendingText += delta
-                await flushText(force: false)
+                buffer.appendText(delta)
             case .thinkingDelta(let delta):
-                pendingThinking += delta
-                await flushThinking(force: false)
+                buffer.appendThinking(delta)
+            case .toolApprovalRequired(let request):
+                approvalGate.reach(request.id)
             case .toolExecutionStart(let id, let name, let arguments):
                 appendToolCall(ChatRoomToolCall(
                     id: id,
@@ -551,6 +539,16 @@ public final class ChatRoomLoop {
                     isError: result.isError
                 ))
             case .messageEnd(.assistant(let assistant)):
+                buffer.completeMessage()
+                // 用最终消息补齐正文/工具声明。审批前已知的工具先入条目，避免将中间解说误当最终回答。
+                mutateCurrentSegment { message in
+                    message.content = assistant.text
+                    message.reasoningContent = assistant.reasoningContent.isEmpty ? nil : assistant.reasoningContent
+                }
+                for call in assistant.toolCalls {
+                    appendToolCall(ChatRoomToolCall(id: call.id, name: call.name,
+                        arguments: ChatRoomLLMProviderImpl.argumentsString(call.arguments)))
+                }
                 // 用量累计 + 候选方案取自最后一轮 assistant 正文（决策 #16）
                 runtime.usage.add(assistant.usage)
                 if !assistant.text.isEmpty {
@@ -571,6 +569,7 @@ public final class ChatRoomLoop {
                 mcpTools = await mcpToolsProvider()
             }
 
+            try Task.checkCancellation()
             let config = AgentLoopConfig(
                 model: engine.model,
                 llm: engine.llm,
@@ -580,6 +579,8 @@ public final class ChatRoomLoop {
                     .map { CompactionConfig.recommended(contextWindow: $0) } ?? CompactionConfig(),
                 maxTurns: 500,
                 requestToolApproval: { [weak approvalManager] request in
+                    // 先等消费端处理完审批之前的事件，避免主线程繁忙时弹框先于尾字上屏。
+                    guard await approvalGate.wait(for: request.id) else { return .deny }
                     guard let approvalManager else { return .deny }
                     return await approvalManager.approvalDecision(
                         for: request,
@@ -608,19 +609,20 @@ public final class ChatRoomLoop {
             )
 
             for try await event in stream {
-                try await applyAgentEvent(event)
+                try applyAgentEvent(event)
             }
-        } catch is CancellationError {
-            runtime.messages.removeAll { $0.speechID == speechID }
-            throw CancellationError()
+        } catch {
+            buffer.completeMessage()
+            let cancelled = Task.isCancelled || error is CancellationError || (error as? AgentError) == .aborted
+            try preserveInterruptedSpeech(runtime: runtime, speechID: speechID,
+                termination: cancelled ? .cancelled : .failed)
+            if cancelled { throw CancellationError() }
+            throw error
         }
 
-        await flushText(force: true)
-        await flushThinking(force: true)
-
-        if sawAbort {
-            // 用户停止：移除全部分段，本轮不产出
-            runtime.messages.removeAll { $0.speechID == speechID }
+        buffer.completeMessage()
+        if sawAbort || Task.isCancelled {
+            try preserveInterruptedSpeech(runtime: runtime, speechID: speechID, termination: .cancelled)
             throw CancellationError()
         }
 
@@ -640,15 +642,43 @@ public final class ChatRoomLoop {
         }
 
         // 候选方案只在讨论阶段解析（决策 #16 的「收尾归纳」语义），挂最后一段
-        if runtime.chatroom.currentPhase == .discussion, !lastAssistantText.isEmpty {
+        if errorMessage == nil, runtime.chatroom.currentPhase == .discussion, !lastAssistantText.isEmpty {
             mutateCurrentSegment { message in
                 message.candidates = ChatRoomCandidateParser.parse(from: lastAssistantText)
             }
         }
 
-        for segment in runtime.messages.filter({ $0.speechID == speechID }) {
-            try store.appendMessage(segment, to: runtime.chatroom.id)
+        if errorMessage != nil {
+            try preserveInterruptedSpeech(runtime: runtime, speechID: speechID, termination: .failed)
+        } else {
+            // 包含已经落盘的插话：原子保存当前顺序，避免重启后插话跑到本次发言前面。
+            try store.saveMessages(runtime.messages, for: runtime.chatroom.id)
         }
+    }
+
+    /// 中断不是撤销：保留已经看见的文字、思考和工具结果；不声称未知的工具已经回滚。
+    private func preserveInterruptedSpeech(
+        runtime: ChatRoomRuntime, speechID: String, termination: ChatRoomSpeechTermination
+    ) throws {
+        runtime.messages.removeAll { message in
+            (message.speechID ?? message.id) == speechID && message.content.isEmpty
+                && (message.reasoningContent ?? "").isEmpty && (message.toolCalls ?? []).isEmpty
+        }
+        guard runtime.messages.contains(where: { ($0.speechID ?? $0.id) == speechID }) else { return }
+        for index in runtime.messages.indices where (runtime.messages[index].speechID ?? runtime.messages[index].id) == speechID {
+            var message = runtime.messages[index]
+            message.termination = termination
+            var results = message.toolResults ?? []
+            for call in message.toolCalls ?? [] where !results.contains(where: { $0.toolCallID == call.id }) {
+                results.append(ChatRoomToolResult(toolCallID: call.id,
+                    output: "发言已中断，未收到该工具的结果。操作可能尚未执行，也可能已部分执行；请检查实际文件状态。",
+                    isError: true))
+            }
+            message.toolResults = results.isEmpty ? nil : results
+            runtime.messages[index] = message
+        }
+        try store.saveMessages(runtime.messages, for: runtime.chatroom.id)
+        try persistRuntimeState(runtime)
     }
 
     /// 聊天室引擎工具集：session 的 BuiltInTools（不含 SubAgent），edit 快照挂项目目录。
@@ -683,6 +713,7 @@ public final class ChatRoomLoop {
         // 决策 #7（2026-09-05 调整）：上下文估算达到预算 80% 时自动压缩。
         // 必须在构建 systemPrompt/上下文之前执行，当轮发言才能用上摘要。
         await compactContextIfNeeded(runtime: runtime, providerMaker: { provider })
+        try Task.checkCancellation()
 
         let systemPrompt = ChatRoomContextBuilder.systemPrompt(
             role: role,
@@ -697,11 +728,11 @@ public final class ChatRoomLoop {
             nextSpeaker: role
         )
 
-        // 实时进度（与 Session 流式体验对齐）：先挂一条临时消息，流式增量与
-        // 工具事件实时改写它；发言结束才落盘，失败则移除临时消息。
-        // 临时消息不写入 messages.jsonl，持久化只发生在定型之后。
+        // 兼容 provider 路径也使用显式发言身份和合并器；中断时保留可见内容。
         let liveMessageID = UUID().uuidString
-        runtime.messages.append(ChatRoomMessage(
+        let buffer = ChatRoomSpeechBuffer(runtime: runtime, speechID: liveMessageID)
+        defer { buffer.finish() }
+        buffer.beginSegment(ChatRoomMessage(
             id: liveMessageID,
             chatroomID: runtime.chatroom.id,
             roleID: role.id,
@@ -717,14 +748,16 @@ public final class ChatRoomLoop {
 
             switch event {
             case .thinkingDelta(let delta):
-                runtime.messages[liveIndex].reasoningContent = (runtime.messages[liveIndex].reasoningContent ?? "") + delta
+                buffer.appendThinking(delta)
             case .textDelta(let delta):
-                runtime.messages[liveIndex].content += delta
+                buffer.appendText(delta)
             case .toolStarted(let call):
+                buffer.completeMessage()
                 var calls = runtime.messages[liveIndex].toolCalls ?? []
                 calls.append(call)
                 runtime.messages[liveIndex].toolCalls = calls
             case .toolFinished(let result):
+                buffer.flush()
                 var results = runtime.messages[liveIndex].toolResults ?? []
                 results.append(result)
                 runtime.messages[liveIndex].toolResults = results
@@ -738,6 +771,8 @@ public final class ChatRoomLoop {
                 onEvent: { applySpeechEvent($0) }
             )
 
+            buffer.completeMessage()
+            try Task.checkCancellation()
             // 定型：以最终响应覆盖实时内容（agentic loop 多轮的中间文本以最终轮为准）
             let messageCandidates = runtime.chatroom.currentPhase == .discussion ? response.candidates : nil
             runtime.messages[liveIndex].content = response.content
@@ -746,13 +781,13 @@ public final class ChatRoomLoop {
             runtime.messages[liveIndex].toolCalls = response.toolCalls.isEmpty ? nil : response.toolCalls
             runtime.messages[liveIndex].toolResults = response.toolResults.isEmpty ? nil : response.toolResults
 
-            try store.appendMessage(runtime.messages[liveIndex], to: runtime.chatroom.id)
+            try store.saveMessages(runtime.messages, for: runtime.chatroom.id)
         } catch {
-            // 移除未完成的临时消息，错误向上抛给 UI
-            if runtime.messages.indices.contains(liveIndex),
-               runtime.messages[liveIndex].id == liveMessageID {
-                runtime.messages.remove(at: liveIndex)
-            }
+            buffer.completeMessage()
+            let cancelled = Task.isCancelled || error is CancellationError || (error as? AgentError) == .aborted
+            try preserveInterruptedSpeech(runtime: runtime, speechID: liveMessageID,
+                termination: cancelled ? .cancelled : .failed)
+            if cancelled { throw CancellationError() }
             throw error
         }
     }
@@ -811,7 +846,7 @@ public enum ChatRoomContextBuilder {
             total += ContextTokenEstimator.estimate(text: summary) + 16
         }
         for message in effectiveHistory(room: room, history: history) where message.roleID != systemRoleID {
-            total += ContextTokenEstimator.estimate(text: message.content) + 8
+            total += ContextTokenEstimator.estimate(text: message.content + (message.termination?.notice ?? "")) + 8
         }
         return total
     }
@@ -879,6 +914,7 @@ public enum ChatRoomContextBuilder {
                 if text.isEmpty, let calls = msg.toolCalls, !calls.isEmpty {
                     text = "（调用工具: " + calls.map { $0.name }.joined(separator: ", ") + "）"
                 }
+                if let termination = msg.termination { text += "\n\n（\(termination.notice)）" }
                 guard !text.isEmpty else { continue }
                 message = .assistant(AssistantMessage(
                     text: "【\(speakerName)】\(text)",
