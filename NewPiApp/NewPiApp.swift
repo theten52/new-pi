@@ -5,6 +5,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class NewPiAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // 应用外观模式（跟随系统 / 浅色 / 深色）——此前未设置时默认跟随系统，
+        // 因此系统处于深色模式时 App 会显示为夜间模式（DARK-FOLLOW-SYSTEM）。
+        // 必须在这里而非 App.init()：init 阶段 NSApp 尚未创建，直接用会崩
+        // （APPEARANCE-NSAPP-NIL）；此处窗口尚未显示，也不会出现外观闪变。
+        AppearanceModeManager.shared.applyOnLaunch()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         Task {
             await MCPPluginManager.shared.shutdownAll()

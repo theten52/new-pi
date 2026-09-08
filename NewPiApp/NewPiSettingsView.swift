@@ -42,6 +42,8 @@ struct NewPiSettingsView: View {
     @State private var showLogs = false
     @State private var showingTemplateManager = false
 
+    @StateObject private var appearanceManager = AppearanceModeManager.shared
+
     private var activeTab: NewPiSettingsTab {
         selectedTab ?? .general
     }
@@ -137,6 +139,17 @@ struct NewPiSettingsView: View {
 
     private var generalSettings: some View {
         Form {
+            Section("外观") {
+                Picker("外观模式", selection: $appearanceManager.mode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Label(mode.displayName, systemImage: mode.icon).tag(mode)
+                    }
+                }
+                Text("选择「跟随系统」时，App 随 macOS 系统的浅色/深色模式自动切换；「浅色/深色」则手动固定。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Default Provider") {
                 Picker("Default for new sessions", selection: defaultProfileBinding) {
                     ForEach(viewModel.providerConfig.profiles) { profile in
