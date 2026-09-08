@@ -166,14 +166,39 @@ final class ChatRoomRuntimeStore: ObservableObject {
     @Published private(set) var chatrooms: [ChatRoom] = []
     private var controllers: [String: ChatRoomFlowController] = [:]
     private var chatroomSyncCancellables: [String: AnyCancellable] = [:]
+    /// 当前应用项目。聊天室采用项目级作用域；nil 时侧边栏不展示全局聊天室。
+    private var activeProjectPath: String?
 
-    private init() {
+    private init() {}
+
+    /// 切换当前项目。旧项目的隐藏运行必须取消，防止用户已看到项目 B 时，
+    /// 项目 A 的聊天室仍在后台执行工具或等待不可见的审批。
+    func setProject(_ projectURL: URL?) {
+        let newPath = projectURL?.standardizedFileURL.resolvingSymlinksInPath().path
+        if activeProjectPath != newPath {
+            for controller in controllers.values {
+                controller.cancelRunning()
+            }
+            controllers.removeAll()
+            chatroomSyncCancellables.removeAll()
+            activeProjectPath = newPath
+        }
         reload()
     }
 
-    /// 从磁盘重载聊天室列表。
+    /// 从磁盘重载当前项目的聊天室列表。
     func reload() {
-        chatrooms = (try? ChatRoomStore.shared.listAll()) ?? []
+        guard let activeProjectPath else {
+            chatrooms = []
+            return
+        }
+        let all = (try? ChatRoomStore.shared.listAll()) ?? []
+        chatrooms = all.filter {
+            URL(fileURLWithPath: $0.projectPath)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path == activeProjectPath
+        }
     }
 
     /// 取（或惰性创建）某聊天室的流程控制器。

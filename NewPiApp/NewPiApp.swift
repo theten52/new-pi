@@ -1,6 +1,7 @@
 import AppKit
 import NewPiCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class NewPiAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
@@ -131,6 +132,12 @@ extension Notification.Name {
     static let newPiShowSpike = Notification.Name("com.new-pi.showSpike")
 }
 
+private struct ChatRoomExportPayload: Codable {
+    let chatroom: ChatRoom
+    let messages: [ChatRoomMessage]
+    let exportedAt: Date
+}
+
 private struct SessionRow: View {
     let summary: SessionSummary
     let isActive: Bool
@@ -208,6 +215,7 @@ struct NewPiRootView: View {
     @State private var sessionDisplayLimit = 5
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
+    @State private var exportError: String?
 
     private let recentSessionLimit = 5
     private let sessionDisplayIncrement = 5
@@ -316,6 +324,102 @@ struct NewPiRootView: View {
         }
     }
 
+    private var selectedChatroom: ChatRoom? {
+        guard let selectedChatroomID else { return nil }
+        return chatroomStore.chatrooms.first { $0.id == selectedChatroomID }
+    }
+
+    /// 导出用户当前正在看的聊天室，避免聊天室 detail 中的工具栏误导出后台 Session。
+    private func exportChatroomToFile(_ chatroom: ChatRoom, format: SessionExportFormat) {
+        do {
+            let messages = try ChatRoomStore.shared.loadMessages(for: chatroom.id)
+            guard !messages.isEmpty else {
+                exportError = "当前聊天室还没有可导出的消息。"
+                return
+            }
+            let content = try chatroomExportContent(chatroom: chatroom, messages: messages, format: format)
+            let panel = NSSavePanel()
+            panel.canCreateDirectories = true
+            panel.nameFieldStringValue = chatroomExportFilename(chatroom: chatroom, format: format)
+            switch format {
+            case .markdown:
+                panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+            case .text: panel.allowedContentTypes = [.plainText]
+            case .json: panel.allowedContentTypes = [.json]
+            }
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            exportError = "导出聊天室失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func chatroomExportContent(
+        chatroom: ChatRoom,
+        messages: [ChatRoomMessage],
+        format: SessionExportFormat
+    ) throws -> String {
+        if format == .json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(
+                ChatRoomExportPayload(chatroom: chatroom, messages: messages, exportedAt: Date())
+            )
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        var sections: [String] = []
+        if format == .markdown {
+            sections.append("# \(chatroom.name)")
+            if !chatroom.description.isEmpty { sections.append(chatroom.description) }
+            sections.append("项目：`\(chatroom.projectPath)`")
+        } else {
+            sections.append(chatroom.name)
+            if !chatroom.description.isEmpty { sections.append(chatroom.description) }
+            sections.append("项目：\(chatroom.projectPath)")
+        }
+
+        let formatter = ISO8601DateFormatter()
+        for message in messages {
+            let speaker = message.isUserMessage
+                ? "User"
+                : (chatroom.role(by: message.roleID)?.name ?? message.roleID)
+            let metadata = "\(formatter.string(from: message.timestamp)) · \(message.phase.rawValue)"
+            var body: [String] = []
+            if let reasoning = message.reasoningContent, !reasoning.isEmpty {
+                body.append(format == .markdown
+                    ? "<details><summary>Thinking</summary>\n\n```text\n\(reasoning)\n```\n</details>"
+                    : "Thinking:\n\(reasoning)")
+            }
+            if !message.content.isEmpty { body.append(message.content) }
+            for call in message.toolCalls ?? [] {
+                let result = message.toolResults?.first { $0.toolCallID == call.id }
+                let detail = "\(call.name)\n\(call.arguments)" + (result.map { "\n\n\($0.isError ? "Failed" : "Result"):\n\($0.output)" } ?? "")
+                body.append(format == .markdown
+                    ? "**Tool: \(call.name)**\n\n```text\n\(detail)\n```"
+                    : "Tool: \(detail)")
+            }
+            if format == .markdown {
+                sections.append("## \(speaker)\n\n*\(metadata)*\n\n" + body.joined(separator: "\n\n"))
+            } else {
+                sections.append("\(speaker) [\(metadata)]\n" + body.joined(separator: "\n\n"))
+            }
+        }
+        return sections.joined(separator: "\n\n") + "\n"
+    }
+
+    private func chatroomExportFilename(chatroom: ChatRoom, format: SessionExportFormat) -> String {
+        let safeName = chatroom.name
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        switch format {
+        case .markdown: return "\(safeName).md"
+        case .text: return "\(safeName).txt"
+        case .json: return "\(safeName).json"
+        }
+    }
+
     private var displayedSessions: [SessionSummary] {
         Array(viewModel.savedSessions.prefix(max(sessionDisplayLimit, recentSessionLimit)))
     }
@@ -343,8 +447,7 @@ struct NewPiRootView: View {
             .navigationTitle("NewPi")
         } detail: {
             Group {
-                if let id = selectedChatroomID,
-                   let chatroom = chatroomStore.chatrooms.first(where: { $0.id == id }) {
+                if let chatroom = selectedChatroom {
                     ChatRoomDetailView(
                         viewModel: viewModel,
                         controller: chatroomStore.controller(for: chatroom)
@@ -361,20 +464,40 @@ struct NewPiRootView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
-                    Menu {
-                        Button("Export Markdown…") {
-                            Task { await viewModel.exportSessionToFile(format: .markdown) }
+                    if let chatroom = selectedChatroom {
+                        Menu {
+                            Button("Export Markdown…") {
+                                exportChatroomToFile(chatroom, format: .markdown)
+                            }
+                            Button("Export Text…") {
+                                exportChatroomToFile(chatroom, format: .text)
+                            }
+                            Button("Export JSON…") {
+                                exportChatroomToFile(chatroom, format: .json)
+                            }
+                        } label: {
+                            Label("Export Chatroom", systemImage: "square.and.arrow.up")
                         }
-                        Button("Export Text…") {
-                            Task { await viewModel.exportSessionToFile(format: .text) }
+                        .disabled(
+                            !ChatRoomStore.shared.hasMessages(for: chatroom.id)
+                                || chatroomStore.isRunning(chatroomID: chatroom.id)
+                        )
+                    } else {
+                        Menu {
+                            Button("Export Markdown…") {
+                                Task { await viewModel.exportSessionToFile(format: .markdown) }
+                            }
+                            Button("Export Text…") {
+                                Task { await viewModel.exportSessionToFile(format: .text) }
+                            }
+                            Button("Export JSON…") {
+                                Task { await viewModel.exportSessionToFile(format: .json) }
+                            }
+                        } label: {
+                            Label("Export Session", systemImage: "square.and.arrow.up")
                         }
-                        Button("Export JSON…") {
-                            Task { await viewModel.exportSessionToFile(format: .json) }
-                        }
-                    } label: {
-                        Label("Export", systemImage: "square.and.arrow.up")
+                        .disabled(viewModel.transcript.isEmpty)
                     }
-                    .disabled(viewModel.transcript.isEmpty)
                 }
                 ToolbarItem(placement: .automatic) {
                     Button {
@@ -414,6 +537,14 @@ struct NewPiRootView: View {
             }
         } message: {
             Text("Enter a new name for this session. Leave empty to reset to the default name.")
+        }
+        .alert("导出失败", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("好", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
         }
         .sheet(item: $viewModel.pendingToolApproval) { request in
             NewPiToolApprovalSheet(viewModel: viewModel, request: request)
@@ -467,7 +598,12 @@ struct NewPiRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowSpike)) { _ in
             openWindow(id: "ui-arch-spike")
         }
+        .onChange(of: viewModel.projectURL) { _, newProject in
+            selectedChatroomID = nil
+            chatroomStore.setProject(newProject)
+        }
         .onAppear {
+            chatroomStore.setProject(viewModel.projectURL)
             // 无人值守 spike：NEWPI_SPIKE_AUTORUN=1 启动时自动打开 spike 窗口。
             if ProcessInfo.processInfo.environment["NEWPI_SPIKE_AUTORUN"] == "1" {
                 openWindow(id: "ui-arch-spike")
@@ -599,7 +735,6 @@ struct CreateChatRoomView: View {
 
     @State private var name = ""
     @State private var description = ""
-    @State private var projectPath = ""
     @State private var roles: [ChatRoomRole] = PresetRoleType.allCases.map { ChatRoomRole.from(preset: $0) }
     @State private var templates: [ChatRoomTemplate] = []
     @State private var selectedTemplateID: String?
@@ -638,11 +773,15 @@ struct CreateChatRoomView: View {
                 Section("基本信息") {
                     TextField("名称", text: $name)
                     TextField("描述", text: $description)
-                    HStack {
-                        TextField("项目文件夹", text: $projectPath)
-                        Button("选择…") {
-                            selectFolder()
-                        }
+                    LabeledContent("项目") {
+                        Text(viewModel.projectURL?.lastPathComponent ?? "未选择项目")
+                            .foregroundStyle(viewModel.projectURL == nil ? .secondary : .primary)
+                    }
+                    if let path = viewModel.projectURL?.path {
+                        Text(path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
                 }
 
@@ -692,7 +831,7 @@ struct CreateChatRoomView: View {
                     Button("创建") {
                         createChatroom()
                     }
-                    .disabled(name.isEmpty || projectPath.isEmpty)
+                    .disabled(name.isEmpty || viewModel.projectURL == nil)
                 }
             }
             .onAppear {
@@ -754,25 +893,16 @@ struct CreateChatRoomView: View {
         invalidatedRoleIDs = result.invalidatedRoleIDs
     }
 
-    private func selectFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "选择项目文件夹"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = false
-
-        if panel.runModal() == .OK, let url = panel.url {
-            projectPath = url.path
-        }
-    }
 
     private func createChatroom() {
         guard !name.isEmpty else {
             errorMessage = "请输入名称"
             return
         }
-        guard !projectPath.isEmpty else {
-            errorMessage = "请选择项目文件夹"
+        // 创建时重新读取当前项目，不依赖表单打开时的快照；这样即使项目状态在
+        // sheet 存活期间发生变化，也不会把聊天室保存到一个已经离开的目录。
+        guard let projectPath = viewModel.projectURL?.standardizedFileURL.path else {
+            errorMessage = "请先打开项目"
             return
         }
 
@@ -1886,4 +2016,3 @@ struct RolePickerSheet: View {
         )
     )
 }
-

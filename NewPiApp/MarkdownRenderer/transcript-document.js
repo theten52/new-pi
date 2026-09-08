@@ -1024,7 +1024,10 @@
   const streamingHeightStep = 160;
   function applyStreamingHeightStep(el, op, state) {
     if (op.streaming) {
-      const natural = el.offsetHeight;
+      // el 可能已经被上一批设置了固定 height；offsetHeight 此时只会返回旧档位，
+      // 无法感知内部内容继续增长。scrollHeight 会包含溢出的真实内容高度，因而能
+      // 正确跨入后续 160pt 档位，避免长回答永久卡在第一档。
+      const natural = Math.max(el.scrollHeight, el.firstElementChild ? el.firstElementChild.scrollHeight : 0);
       const stepped = Math.ceil(Math.max(1, natural) / streamingHeightStep) * streamingHeightStep;
       if (stepped > (state.steppedHeight || 0)) {
         state.steppedHeight = stepped;

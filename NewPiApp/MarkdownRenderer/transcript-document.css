@@ -391,3 +391,181 @@ html, body {
 .detail-hidden {
   display: none;
 }
+
+/* ===== 系统外观适配 =====
+   WKWebView 背景是透明的，颜色必须跟随宿主窗口，而不能继续依赖只支持浅色的
+   github-markdown-light.css。这里集中覆盖该表中影响可读性的固定颜色。 */
+:root {
+  color-scheme: light dark;
+  --newpi-text: #1d1d1f;
+  --newpi-secondary: rgba(60, 60, 67, 0.72);
+  --newpi-tertiary: rgba(60, 60, 67, 0.52);
+  --newpi-border: rgba(60, 60, 67, 0.14);
+  --newpi-surface: rgba(120, 120, 128, 0.10);
+  --newpi-code-surface: #f6f8fa;
+  --newpi-link: #0969da;
+  --newpi-bubble-alpha: 0.18;
+}
+
+.markdown-body {
+  color-scheme: inherit;
+  color: var(--newpi-text);
+  background: transparent;
+}
+
+.markdown-body a { color: var(--newpi-link); }
+.markdown-body blockquote,
+.markdown-body h6 { color: var(--newpi-secondary); }
+.markdown-body blockquote { border-left-color: var(--newpi-border); }
+.markdown-body h1,
+.markdown-body h2 { border-bottom-color: var(--newpi-border); }
+.markdown-body hr { background-color: var(--newpi-border); }
+.markdown-body code,
+.markdown-body tt { background-color: var(--newpi-surface); }
+.markdown-body .highlight pre,
+.markdown-body pre {
+  color: var(--newpi-text);
+  background-color: var(--newpi-code-surface);
+}
+.markdown-body table th,
+.markdown-body table td,
+.markdown-body table tr { border-color: var(--newpi-border); }
+.markdown-body table tr { background-color: transparent; }
+.markdown-body table tr:nth-child(2n) { background-color: var(--newpi-surface); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --newpi-text: #f2f2f7;
+    --newpi-secondary: rgba(235, 235, 245, 0.72);
+    --newpi-tertiary: rgba(235, 235, 245, 0.52);
+    --newpi-border: rgba(235, 235, 245, 0.16);
+    --newpi-surface: rgba(235, 235, 245, 0.10);
+    --newpi-code-surface: rgba(28, 28, 30, 0.92);
+    --newpi-link: #64a8ff;
+    --newpi-bubble-alpha: 0.22;
+  }
+
+  html, body { color: var(--newpi-text); }
+  .ti-user .bubble,
+  .ti-answer .card.answer,
+  .detail-row {
+    background: hsl(var(--tint, 212) 48% 58% / var(--newpi-bubble-alpha));
+  }
+  .detail-row { color: var(--newpi-secondary); }
+  .detail-row:hover {
+    background: hsl(var(--tint, 212) 48% 58% / 0.30);
+  }
+  .answer-hd,
+  .card-preview,
+  .card-badge,
+  .ti-system .sysline { color: var(--newpi-secondary); }
+  .ti-thinking .card,
+  .ti-tool .card {
+    color: var(--newpi-text);
+    background: var(--newpi-surface);
+    border-color: var(--newpi-border);
+  }
+  .card-title {
+    color: var(--newpi-text);
+    background: rgba(10, 132, 255, 0.22);
+  }
+  .card-title.thinking { background: rgba(191, 90, 242, 0.22); }
+  .card-chevron::before,
+  .detail-chevron::before { color: var(--newpi-tertiary); }
+  .card-body,
+  .card-cmd { border-color: var(--newpi-border); }
+  .card-sep { border-color: var(--newpi-border); }
+  .card-cmd {
+    color: #7db7ff;
+    background: rgba(10, 132, 255, 0.10);
+  }
+  .card.is-error .card-body,
+  .ti-error .sysline { color: #ff6961; }
+  .code-block-container { border-color: var(--newpi-border); }
+  .code-block-header {
+    color: var(--newpi-secondary);
+    background: var(--newpi-surface);
+    border-bottom-color: var(--newpi-border);
+  }
+  .code-block-copy { color: var(--newpi-secondary); }
+  .code-block-copy:hover { background: rgba(235, 235, 245, 0.12); }
+  .bubble-attachment {
+    border-color: var(--newpi-border);
+    background: var(--newpi-surface);
+  }
+  .bubble-attachment-missing {
+    color: var(--newpi-tertiary);
+    border-color: var(--newpi-border);
+  }
+  .bubble-attachment:hover,
+  .bubble-attachment:focus-visible { outline-color: var(--newpi-tertiary); }
+  .markdown-body kbd {
+    color: var(--newpi-text);
+    background: var(--newpi-surface);
+    border-color: var(--newpi-border);
+    box-shadow: inset 0 -1px 0 var(--newpi-border);
+  }
+  .markdown-body mark {
+    color: var(--newpi-text);
+    background: rgba(255, 214, 10, 0.24);
+  }
+  .markdown-body .footnotes {
+    color: var(--newpi-secondary);
+    border-color: var(--newpi-border);
+  }
+  .markdown-body .footnotes li:target { color: var(--newpi-text); }
+
+  /* highlight.js is bundled with GitHub's light-only theme. Override every
+     token family used by that stylesheet so syntax remains legible in dark
+     appearance rather than keeping light-theme foregrounds on a dark block. */
+  .hljs {
+    color: #c9d1d9;
+    background: transparent;
+  }
+  .hljs-doctag,
+  .hljs-keyword,
+  .hljs-meta .hljs-keyword,
+  .hljs-template-tag,
+  .hljs-template-variable,
+  .hljs-type,
+  .hljs-variable.language_ { color: #ff7b72; }
+  .hljs-title,
+  .hljs-title.class_,
+  .hljs-title.class_.inherited__,
+  .hljs-title.function_ { color: #d2a8ff; }
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-literal,
+  .hljs-meta,
+  .hljs-number,
+  .hljs-operator,
+  .hljs-selector-attr,
+  .hljs-selector-class,
+  .hljs-selector-id,
+  .hljs-variable { color: #79c0ff; }
+  .hljs-meta .hljs-string,
+  .hljs-regexp,
+  .hljs-string { color: #a5d6ff; }
+  .hljs-built_in,
+  .hljs-symbol { color: #ffa657; }
+  .hljs-code,
+  .hljs-comment,
+  .hljs-formula { color: #8b949e; }
+  .hljs-name,
+  .hljs-quote,
+  .hljs-selector-pseudo,
+  .hljs-selector-tag { color: #7ee787; }
+  .hljs-subst,
+  .hljs-emphasis,
+  .hljs-strong { color: #c9d1d9; }
+  .hljs-section { color: #1f6feb; }
+  .hljs-bullet { color: #f2cc60; }
+  .hljs-addition {
+    color: #aff5b4;
+    background-color: rgba(46, 160, 67, 0.24);
+  }
+  .hljs-deletion {
+    color: #ffdcd7;
+    background-color: rgba(248, 81, 73, 0.24);
+  }
+}

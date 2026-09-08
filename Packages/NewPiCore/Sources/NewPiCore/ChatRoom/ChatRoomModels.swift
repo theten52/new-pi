@@ -210,6 +210,13 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
 
+    private enum CodingKeys: String, CodingKey {
+        case id, name, description, roles, projectPath, currentPhase
+        case reviewRoundCount, selectedOptionID, votes, currentSpeakerIndex
+        case pausedAtRoundLimit, compactionSummary, compactedUpToMessageID
+        case createdAt, updatedAt
+    }
+
     public init(
         id: String = UUID().uuidString,
         name: String,
@@ -242,6 +249,28 @@ public struct ChatRoom: Codable, Identifiable, Sendable {
         self.compactedUpToMessageID = compactedUpToMessageID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// Additive runtime fields must not make rooms created by older NewPi builds disappear.
+    /// `currentSpeakerIndex` was added after the first chatroom format and is absent from
+    /// those files, so decode it with the same default used by the public initializer.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decode(String.self, forKey: .description)
+        roles = try container.decode([ChatRoomRole].self, forKey: .roles)
+        projectPath = try container.decode(String.self, forKey: .projectPath)
+        currentPhase = try container.decode(ChatRoomPhase.self, forKey: .currentPhase)
+        reviewRoundCount = try container.decode(Int.self, forKey: .reviewRoundCount)
+        selectedOptionID = try container.decodeIfPresent(String.self, forKey: .selectedOptionID)
+        votes = try container.decodeIfPresent([Vote].self, forKey: .votes) ?? []
+        currentSpeakerIndex = try container.decodeIfPresent(Int.self, forKey: .currentSpeakerIndex) ?? 0
+        pausedAtRoundLimit = try container.decodeIfPresent(Bool.self, forKey: .pausedAtRoundLimit)
+        compactionSummary = try container.decodeIfPresent(String.self, forKey: .compactionSummary)
+        compactedUpToMessageID = try container.decodeIfPresent(String.self, forKey: .compactedUpToMessageID)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
     
     /// 获取已配置的角色列表

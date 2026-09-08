@@ -1416,7 +1416,8 @@ final class NewPiViewModel: ObservableObject {
         activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
     }
 
-    func send(_ text: String) {
+    @discardableResult
+    func send(_ text: String) -> Bool {
         send(text, draftAttachments: [])
     }
 
@@ -1424,7 +1425,8 @@ final class NewPiViewModel: ObservableObject {
     ///
     /// 发送前做能力拦截：当前模型不支持图片时给出明确提示且不发送；
     /// 附件先落盘到会话附件目录（`SessionAttachments`），再组装成 `UserMessage`。
-    func send(_ text: String, draftAttachments: [DraftImageAttachment]) {
+    @discardableResult
+    func send(_ text: String, draftAttachments: [DraftImageAttachment]) -> Bool {
         guard let runtime = activeRuntime else {
             appendTranscript(
                 kind: .system,
@@ -1432,7 +1434,7 @@ final class NewPiViewModel: ObservableObject {
                     ? "Open a project first."
                     : "Start a new session first (⇧⌘N)."
             )
-            return
+            return false
         }
 
         // 能力拦截：有图片但当前模型不支持 → 提示且不发送。
@@ -1443,23 +1445,28 @@ final class NewPiViewModel: ObservableObject {
                     kind: .error,
                     body: "当前模型 \(modelName) 不支持图片输入。请在设置中为该模型开启「支持图片识别」，或切换到支持图片的模型。"
                 )
-                return
+                return false
             }
         }
 
         // 附件落盘：解码/缩放/压缩已在采集层完成，这里做体积校验 + 写入 + 组装路径引用。
         var attachments: [MessageAttachment] = []
         if !draftAttachments.isEmpty {
+            for draft in draftAttachments {
+                if let tooLarge = ImageAttachmentProcessor.validate(draft) {
+                    appendTranscript(kind: .error, body: tooLarge)
+                    return false
+                }
+            }
+            var writtenFiles: [URL] = []
             do {
                 let dir = try SessionAttachments.directory(for: runtime.sessionID)
                 for draft in draftAttachments {
-                    if let tooLarge = ImageAttachmentProcessor.validate(draft) {
-                        appendTranscript(kind: .error, body: tooLarge)
-                        return
-                    }
                     let ext = Self.fileExtension(for: draft.mediaType)
                     let fileName = "\(draft.id.uuidString).\(ext)"
-                    try draft.data.write(to: dir.appendingPathComponent(fileName))
+                    let fileURL = dir.appendingPathComponent(fileName)
+                    try draft.data.write(to: fileURL)
+                    writtenFiles.append(fileURL)
                     let relativePath = "\(runtime.sessionID.uuidString)/\(fileName)"
                     attachments.append(
                         MessageAttachment(
@@ -1471,8 +1478,11 @@ final class NewPiViewModel: ObservableObject {
                     )
                 }
             } catch {
+                for fileURL in writtenFiles {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
                 appendTranscript(kind: .error, body: "无法保存图片附件：\(error.localizedDescription)")
-                return
+                return false
             }
         }
 
@@ -1502,6 +1512,7 @@ final class NewPiViewModel: ObservableObject {
         Task {
             await runtime.session.prompt(message)
         }
+        return true
     }
 
     /// MIME 类型 → 文件扩展名。

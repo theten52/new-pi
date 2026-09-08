@@ -461,7 +461,7 @@ struct ChatRoomStoreTests {
         #expect(loaded.configuredRoles[0].modelID == "m-new")
     }
 
-    @Test("decodes legacy chatroom.json without pausedAtRoundLimit field")
+    @Test("decodes legacy chatroom.json without newer runtime fields")
     func legacyChatroomDecode() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("chatroom-tests-\(UUID().uuidString)", isDirectory: true)
@@ -480,7 +480,6 @@ struct ChatRoomStoreTests {
           "currentPhase": "discussion",
           "reviewRoundCount": 1,
           "votes": [],
-          "currentSpeakerIndex": 0,
           "createdAt": "2026-09-01T00:00:00Z",
           "updatedAt": "2026-09-01T00:00:00Z"
         }
@@ -494,6 +493,7 @@ struct ChatRoomStoreTests {
         let store = ChatRoomStore(baseDirectory: dir)
         let loaded = try store.load(id: "legacy-1")
         #expect(loaded.name == "旧格式房间")
+        #expect(loaded.currentSpeakerIndex == 0)
         #expect(loaded.pausedAtRoundLimit == nil)
     }
 }

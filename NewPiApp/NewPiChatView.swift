@@ -247,9 +247,11 @@ struct NewPiSessionPanel: View {
         // 空文本 + 有图片也可发送（识图场景常只发图）；拦截与体积校验在 ViewModel.send。
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty,
               !runtime.isStreaming else { return }
+        // 只有消息通过模型能力、附件体积与落盘等全部校验并真正进入会话后，
+        // 才清空草稿。失败时保留用户文本和图片，便于修正配置后重试。
+        guard viewModel.send(text, draftAttachments: drafts) else { return }
         input = ""
         draftAttachments = []
-        viewModel.send(text, draftAttachments: drafts)
         // 发送 = 明确要看最新内容的意图（聊天应用惯例）：显式钉底，
         // 否则用户停在中部时，流式输出按保锚纪律不跟随（看起来像没反应）。
         docController.scrollToBottom()

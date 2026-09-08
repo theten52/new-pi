@@ -115,8 +115,7 @@ struct NewPiSettingsView: View {
             )
         }
         .sheet(isPresented: $showingTemplateManager) {
-            // NewPiVendorTemplateManagerView(viewModel: viewModel)
-            Text("模板管理器 - 待集成")
+            NewPiVendorTemplateManagerView(viewModel: viewModel)
         }
         .sheet(item: $editingProfile) { profile in
             NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
