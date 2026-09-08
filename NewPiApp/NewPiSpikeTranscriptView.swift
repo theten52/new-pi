@@ -1,3 +1,4 @@
+#if DEBUG
 import AppKit
 import Foundation
 import NewPiCore
@@ -563,3 +564,5 @@ struct NewPiSpikeTranscriptView: View {
         .onAppear { model.startAutorunIfNeeded() }
     }
 }
+
+#endif

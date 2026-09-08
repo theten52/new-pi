@@ -94,3 +94,10 @@ rm -rf build/derived && ./scripts/package.sh
 ```bash
 hdiutil create -volname NewPi -srcfolder dist/NewPi.app -ov -format UDZO dist/NewPi.dmg
 ```
+
+## 聊天室 App 层守卫验证
+
+macOS + Swift 6 环境运行 `scripts/validation/check-chatroom-controller.sh`。
+脚本编译真实聊天室控制器，检查运行/取消收尾/待审批的删除保护，以及失效目录的发言拦截和恢复。
+转录适配器使用空测试替身；不会调用模型、执行工具或修改已有聊天数据。
+可用 `NEWPI_VALIDATION_SCRATCH` 指定 SwiftPM 临时构建目录。

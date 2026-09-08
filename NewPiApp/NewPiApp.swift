@@ -116,17 +116,21 @@ struct NewPiApp: App {
                     NotificationCenter.default.post(name: .newPiShowLogs, object: nil)
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
+                #if DEBUG
                 Button("UI Architecture Spike") {
                     NotificationCenter.default.post(name: .newPiShowSpike, object: nil)
                 }
+                #endif
             }
         }
         // UI 架构 spike（一次性验证工具，不接入生产路径）：独立窗口。
         // 用 Window（单实例）而非 WindowGroup——后者对同一 id 重复 openWindow 会开多个窗口，
         // 导致 autorun 序列被多个模型实例并发执行。
+        #if DEBUG
         Window("UI Architecture Spike", id: "ui-arch-spike") {
             NewPiSpikeTranscriptView()
         }
+        #endif
         // API 监控：独立非模态窗口（单实例），可与主窗口并行——边监控边使用 APP。
         Window("API 监控", id: "api-metrics") {
             NewPiMetricsView()
@@ -146,7 +150,9 @@ final class NewPiRootViewModelStore {
 extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
+    #if DEBUG
     static let newPiShowSpike = Notification.Name("com.new-pi.showSpike")
+    #endif
     static let newPiShowMetrics = Notification.Name("com.new-pi.showMetrics")
 }
 
@@ -230,6 +236,7 @@ struct NewPiRootView: View {
     @State private var showLogs = false
     /// 当前在 detail 区平铺展示的聊天室 id（nil = 显示 session 对话）。
     @State private var selectedChatroomID: String?
+    @State private var collapsedChatroomFolders: Set<String> = []
     @State private var showingCreateChatroom = false
     @State private var chatroomToEdit: ChatRoom?
     @State private var chatroomToDelete: ChatRoom?
@@ -318,33 +325,60 @@ struct NewPiRootView: View {
                 showingCreateChatroom = true
             }
 
-            ForEach(chatroomStore.chatrooms) { chatroom in
-                Button {
-                    selectedChatroomID = chatroom.id
+            ForEach(chatroomFolderIDs, id: \.self) { folder in
+                DisclosureGroup(isExpanded: Binding(
+                    get: { !collapsedChatroomFolders.contains(folder) },
+                    set: { expanded in
+                        if expanded { collapsedChatroomFolders.remove(folder) }
+                        else { collapsedChatroomFolders.insert(folder) }
+                    }
+                )) {
+                    ForEach(chatroomsByFolder[folder] ?? []) { chatroom in
+                        chatroomRow(chatroom)
+                    }
                 } label: {
-                    ChatRoomSidebarRow(
-                        chatroom: chatroom,
-                        isActive: chatroom.id == selectedChatroomID
-                    )
-                }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    Button {
-                        chatroomToEdit = chatroom
-                    } label: {
-                        Label("编辑聊天室", systemImage: "pencil")
-                    }
-                    // 运行中禁编辑（对齐 DetailView 编辑菜单的守卫；review #2）
-                    .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
-                    Button(role: .destructive) {
-                        chatroomToDelete = chatroom
-                    } label: {
-                        Label("删除聊天室", systemImage: "trash")
-                    }
-                    .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
-                    .help("请先停止聊天室运行再删除")
+                    Label("\(folder) (\(chatroomsByFolder[folder]?.count ?? 0))", systemImage: "folder")
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(folder)
                 }
             }
+        }
+    }
+
+    private var chatroomsByFolder: [String: [ChatRoom]] {
+        Dictionary(grouping: chatroomStore.chatrooms) { ChatRoomWorkingDirectory.groupID(for: $0.projectPath) }
+    }
+
+    private var chatroomFolderIDs: [String] { chatroomsByFolder.keys.sorted() }
+
+    private func chatroomRow(_ chatroom: ChatRoom) -> some View {
+        Button {
+            selectedChatroomID = chatroom.id
+        } label: {
+            ChatRoomSidebarRow(
+                chatroom: chatroom,
+                isActive: chatroom.id == selectedChatroomID,
+                directoryIssue: chatroomStore.directoryIssues[chatroom.id]
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                chatroomToEdit = chatroom
+            } label: {
+                Label("编辑聊天室", systemImage: "pencil")
+            }
+            // 运行中禁编辑（对齐 DetailView 编辑菜单的守卫；review #2）
+            .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
+            Button(role: .destructive) {
+                chatroomToDelete = chatroom
+            } label: {
+                Label("删除聊天室", systemImage: "trash")
+            }
+            .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
+            .help("请先停止聊天室运行再删除")
         }
     }
 
@@ -577,6 +611,7 @@ struct NewPiRootView: View {
         .sheet(isPresented: $showingCreateChatroom) {
             CreateChatRoomView(viewModel: viewModel) { chatroom in
                 chatroomStore.reload()
+                collapsedChatroomFolders.remove(ChatRoomWorkingDirectory.groupID(for: chatroom.projectPath))
                 selectedChatroomID = chatroom.id
             }
         }
@@ -631,18 +666,25 @@ struct NewPiRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowLogs)) { _ in
             showLogs = true
         }
+        #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowSpike)) { _ in
             openWindow(id: "ui-arch-spike")
         }
+        #endif
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowMetrics)) { _ in
             openWindow(id: "api-metrics")
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            chatroomStore.refreshWorkingDirectories()
+        }
         .onAppear {
             chatroomStore.reload()
+            #if DEBUG
             // 无人值守 spike：NEWPI_SPIKE_AUTORUN=1 启动时自动打开 spike 窗口。
             if ProcessInfo.processInfo.environment["NEWPI_SPIKE_AUTORUN"] == "1" {
                 openWindow(id: "ui-arch-spike")
             }
+            #endif
         }
     }
 }
@@ -661,6 +703,7 @@ import SwiftUI
 struct ChatRoomSidebarRow: View {
     let chatroom: ChatRoom
     let isActive: Bool
+    var directoryIssue: ChatRoomWorkingDirectory.Issue? = nil
 
     @State private var isHovering = false
 
@@ -699,6 +742,12 @@ struct ChatRoomSidebarRow: View {
                 }
             }
             Spacer()
+            if let directoryIssue {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help(directoryIssue.localizedDescription + "\n" + chatroom.projectPath)
+                    .accessibilityLabel("工作目录不可用")
+            }
             PhaseBadge(phase: chatroom.currentPhase)
         }
         .padding(.vertical, 4)
@@ -977,10 +1026,8 @@ struct CreateChatRoomView: View {
 
         let expandedPath = (projectPath.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
             .expandingTildeInPath
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            errorMessage = "请选择有效的项目文件夹"
+        if let issue = ChatRoomWorkingDirectory.issue(for: expandedPath) {
+            errorMessage = issue.localizedDescription
             return
         }
         let normalizedProjectPath = URL(fileURLWithPath: expandedPath, isDirectory: true)
@@ -1523,6 +1570,24 @@ struct ChatRoomDetailView: View {
                 budgetBanner(budget)
             }
 
+            if let issue = controller.directoryIssue {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(issue.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(runtime.chatroom.projectPath)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    HStack {
+                        Text("恢复原目录或连接磁盘后重新检查；历史对话仍可查看。")
+                            .font(.caption)
+                        Spacer()
+                        Button("重新检查") { ChatRoomRuntimeStore.shared.refreshWorkingDirectories() }
+                    }
+                }
+                .padding(10)
+                .background(.orange.opacity(0.08))
+            }
+
             // 消息列表
             messageList
 
@@ -1532,6 +1597,7 @@ struct ChatRoomDetailView: View {
         // 历史消息在控制器创建时加载；runningTask 不随视图显隐取消——审批 continuation
         // 由控制器持有的 approvalManager 承载，切走时挂起、切回时审批 sheet 自动重弹。
         // 发言收尾的落底对齐在渲染器 JS 侧完成（forkLock 翻转时的 RAF 追平）。
+        .onAppear { controller.refreshWorkingDirectory() }
         .alert(
             "聊天室提示",
             isPresented: Binding(
@@ -1691,7 +1757,7 @@ struct ChatRoomDetailView: View {
                 } label: {
                     Label("推进下一发言", systemImage: "play.fill")
                 }
-                .disabled(runtime.isRunning || runtime.chatroom.currentPhase == .completed)
+                .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
 
                 // 指定发言人
                 Button {
@@ -1699,7 +1765,7 @@ struct ChatRoomDetailView: View {
                 } label: {
                     Label("@指定", systemImage: "at")
                 }
-                .disabled(runtime.isRunning || runtime.chatroom.currentPhase == .completed)
+                .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
 
                 Spacer()
 

@@ -23,6 +23,7 @@ final class ChatRoomFlowController: ObservableObject {
     @Published private(set) var isTaskActive = false
     /// 流程错误（view 层 alert 展示；原 DetailView 的 @State flowError 上移）。
     @Published var flowError: String?
+    @Published private(set) var directoryIssue: ChatRoomWorkingDirectory.Issue?
     /// transcript 适配层（CHATROOM-FLAT-MD Phase 2）：派生 id 缓存随控制器存活，
     /// 保证 diff 期间 phase 分隔行 / 工具卡的条目 id 稳定。
     private var transcriptAdapter = ChatRoomTranscriptAdapter()
@@ -35,6 +36,7 @@ final class ChatRoomFlowController: ObservableObject {
         let manager = ChatRoomApprovalManager()
         self.approvalManager = manager
         self.runtime = ChatRoomRuntime(chatroom: chatroom)
+        self.directoryIssue = ChatRoomWorkingDirectory.issue(for: chatroom.projectPath)
         self.loop = ChatRoomLoop(
             approvalManager: manager,
             // 决策 #7（2026-09-05 调整）：自动压缩预算 = 各角色最小 context window
@@ -83,10 +85,21 @@ final class ChatRoomFlowController: ObservableObject {
             .store(in: &cancellables)
     }
 
+    func refreshWorkingDirectory() {
+        directoryIssue = ChatRoomWorkingDirectory.issue(for: runtime.chatroom.projectPath)
+    }
+
+    private func validateWorkingDirectory() -> Bool {
+        refreshWorkingDirectory()
+        guard let directoryIssue else { return true }
+        flowError = directoryIssue.localizedDescription
+        return false
+    }
+
     // MARK: - 发言推进（原 DetailView 的 trigger* 私有方法上移）
 
     func triggerNextSpeaker() {
-        guard !isTaskActive else { return }
+        guard !isBusy, validateWorkingDirectory() else { return }
         isTaskActive = true
         runningTask = Task { [weak self] in
             guard let self else { return }
@@ -95,6 +108,8 @@ final class ChatRoomFlowController: ObservableObject {
                 isTaskActive = false
             }
             do {
+                try Task.checkCancellation()
+                guard validateWorkingDirectory() else { return }
                 try await loop.triggerNextSpeaker(runtime: runtime)
             } catch is CancellationError {
                 // 用户停止运行，不算错误
@@ -105,7 +120,7 @@ final class ChatRoomFlowController: ObservableObject {
     }
 
     func triggerSpeaker(roleID: String) {
-        guard !isTaskActive else { return }
+        guard !isBusy, validateWorkingDirectory() else { return }
         isTaskActive = true
         runningTask = Task { [weak self] in
             guard let self else { return }
@@ -114,6 +129,8 @@ final class ChatRoomFlowController: ObservableObject {
                 isTaskActive = false
             }
             do {
+                try Task.checkCancellation()
+                guard validateWorkingDirectory() else { return }
                 try await loop.triggerSpeaker(roleID: roleID, runtime: runtime)
             } catch is CancellationError {
                 // 用户停止运行，不算错误
@@ -185,6 +202,7 @@ final class ChatRoomRuntimeStore: ObservableObject {
 
     /// sidebar 聊天室列表（ChatRoomStore.listAll 的内存镜像）。
     @Published private(set) var chatrooms: [ChatRoom] = []
+    @Published private(set) var directoryIssues: [String: ChatRoomWorkingDirectory.Issue] = [:]
     private var controllers: [String: ChatRoomFlowController] = [:]
     private var chatroomSyncCancellables: [String: AnyCancellable] = [:]
     private var controllerChangeCancellables: [String: AnyCancellable] = [:]
@@ -196,6 +214,14 @@ final class ChatRoomRuntimeStore: ObservableObject {
     /// 因此侧边栏始终展示全部聊天室，不随 Session 切换项目而过滤或取消运行。
     func reload() {
         chatrooms = (try? ChatRoomStore.shared.listAll()) ?? []
+        refreshWorkingDirectories()
+    }
+
+    func refreshWorkingDirectories() {
+        directoryIssues = Dictionary(uniqueKeysWithValues: chatrooms.compactMap { room in
+            ChatRoomWorkingDirectory.issue(for: room.projectPath).map { (room.id, $0) }
+        })
+        for controller in controllers.values { controller.refreshWorkingDirectory() }
     }
 
     /// 取（或惰性创建）某聊天室的流程控制器。
