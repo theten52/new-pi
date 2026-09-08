@@ -308,7 +308,6 @@ struct NewPiRootView: View {
             Button("新建聊天室") {
                 showingCreateChatroom = true
             }
-            .disabled(viewModel.projectURL == nil)
 
             ForEach(chatroomStore.chatrooms) { chatroom in
                 Button {
@@ -615,12 +614,8 @@ struct NewPiRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowMetrics)) { _ in
             openWindow(id: "api-metrics")
         }
-        .onChange(of: viewModel.projectURL) { _, newProject in
-            selectedChatroomID = nil
-            chatroomStore.setProject(newProject)
-        }
         .onAppear {
-            chatroomStore.setProject(viewModel.projectURL)
+            chatroomStore.reload()
             // 无人值守 spike：NEWPI_SPIKE_AUTORUN=1 启动时自动打开 spike 窗口。
             if ProcessInfo.processInfo.environment["NEWPI_SPIKE_AUTORUN"] == "1" {
                 openWindow(id: "ui-arch-spike")
@@ -646,6 +641,11 @@ struct ChatRoomSidebarRow: View {
 
     @State private var isHovering = false
 
+    private var projectFolderName: String {
+        let name = URL(fileURLWithPath: chatroom.projectPath).lastPathComponent
+        return name.isEmpty ? chatroom.projectPath : name
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if isActive {
@@ -661,15 +661,18 @@ struct ChatRoomSidebarRow: View {
                     .fontWeight(isActive ? .semibold : .regular)
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    ForEach(chatroom.configuredRoles) { role in
-                        Image(systemName: role.icon)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .help(role.name)
-                    }
+                    Label(projectFolderName, systemImage: "folder")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(chatroom.projectPath)
+                    Text("·")
+                        .foregroundStyle(.tertiary)
                     Text(chatroom.updatedAt.formatted(.relative(presentation: .named)))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
             Spacer()
@@ -756,6 +759,8 @@ struct CreateChatRoomView: View {
 
     @State private var name = ""
     @State private var description = ""
+    /// 聊天室自己的工作目录；与 Session 当前打开的项目无关，由用户显式选择。
+    @State private var projectPath = ""
     @State private var roles: [ChatRoomRole] = PresetRoleType.allCases.map { ChatRoomRole.from(preset: $0) }
     @State private var templates: [ChatRoomTemplate] = []
     @State private var selectedTemplateID: String?
@@ -794,16 +799,16 @@ struct CreateChatRoomView: View {
                 Section("基本信息") {
                     TextField("名称", text: $name)
                     TextField("描述", text: $description)
-                    LabeledContent("项目") {
-                        Text(viewModel.projectURL?.lastPathComponent ?? "未选择项目")
-                            .foregroundStyle(viewModel.projectURL == nil ? .secondary : .primary)
+                    HStack {
+                        TextField("项目文件夹", text: $projectPath)
+                            .font(.body.monospaced())
+                        Button("选择…") {
+                            selectFolder()
+                        }
                     }
-                    if let path = viewModel.projectURL?.path {
-                        Text(path)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
+                    Text("聊天室使用自己的工作目录，不会跟随 Session 当前打开的项目。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("角色配置") {
@@ -852,7 +857,10 @@ struct CreateChatRoomView: View {
                     Button("创建") {
                         createChatroom()
                     }
-                    .disabled(name.isEmpty || viewModel.projectURL == nil)
+                    .disabled(
+                        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || projectPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
                 }
             }
             .onAppear {
@@ -915,23 +923,53 @@ struct CreateChatRoomView: View {
     }
 
 
+    private func selectFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择聊天室工作目录"
+        panel.prompt = "选择"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+
+        let typedPath = (projectPath as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: typedPath, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            panel.directoryURL = URL(fileURLWithPath: typedPath, isDirectory: true)
+        }
+
+        if panel.runModal() == .OK, let url = panel.url {
+            projectPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+            errorMessage = nil
+        }
+    }
+
     private func createChatroom() {
-        guard !name.isEmpty else {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
             errorMessage = "请输入名称"
             return
         }
-        // 创建时重新读取当前项目，不依赖表单打开时的快照；这样即使项目状态在
-        // sheet 存活期间发生变化，也不会把聊天室保存到一个已经离开的目录。
-        guard let projectPath = viewModel.projectURL?.standardizedFileURL.path else {
-            errorMessage = "请先打开项目"
+
+        let expandedPath = (projectPath.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
+            .expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            errorMessage = "请选择有效的项目文件夹"
             return
         }
+        let normalizedProjectPath = URL(fileURLWithPath: expandedPath, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
 
         let chatroom = ChatRoom(
-            name: name,
+            name: trimmedName,
             description: description,
             roles: roles,
-            projectPath: projectPath
+            projectPath: normalizedProjectPath
         )
 
         do {
