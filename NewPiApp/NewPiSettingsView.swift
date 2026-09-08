@@ -2,109 +2,105 @@ import AppKit
 import NewPiCore
 import SwiftUI
 
+enum NewPiSettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case providers
+    case toolsAndSafety
+    case diagnostics
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .providers: "Providers"
+        case .toolsAndSafety: "Tools & Safety"
+        case .diagnostics: "Diagnostics"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: "gearshape"
+        case .providers: "server.rack"
+        case .toolsAndSafety: "wrench.and.screwdriver"
+        case .diagnostics: "waveform.path.ecg"
+        }
+    }
+}
+
 struct NewPiSettingsView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @StateObject private var mcpBridge = MCPPluginManagerBridge()
     @StateObject private var approvalBridge = ApprovalPolicySettingsBridge()
-    @Environment(\.openWindow) private var openWindow
+    @State private var selectedTab: NewPiSettingsTab? = .general
+    @State private var navigationHistory: [NewPiSettingsTab] = [.general]
+    @State private var historyIndex = 0
+    @State private var isHistoryNavigation = false
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
     @State private var showLogs = false
     @State private var showingTemplateManager = false
 
+    private var activeTab: NewPiSettingsTab {
+        selectedTab ?? .general
+    }
+
     var body: some View {
-        Form {
-            Section("Default Provider") {
-                Picker("Default for new sessions", selection: defaultProfileBinding) {
-                    ForEach(viewModel.providerConfig.profiles) { profile in
-                        Text(profile.name).tag(profile.id)
-                    }
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(selection: $selectedTab) {
+                ForEach(NewPiSettingsTab.allCases) { tab in
+                    Label(tab.title, systemImage: tab.systemImage)
+                        .tag(tab)
                 }
-                Text("只影响之后新建的会话；已有会话保持各自选择的模型（会话内可在状态栏的模型菜单中切换，选择会随会话记住）。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                Text(Self.versionText)
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 8)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 6, trailing: 0))
             }
+            .listStyle(.sidebar)
+            .newPiSoftScrollEdgeEffect()
+            .navigationTitle("Settings")
+            .frame(width: 210)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 210, max: 230)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            settingsDetail
+                .navigationTitle(activeTab.title)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .navigationTitle("Settings")
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 800, minHeight: 540)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: goBack) {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(!canGoBack)
+                .help("Back")
 
-            Section("Providers") {
-                if viewModel.providerListItems.isEmpty {
-                    Text("No providers configured.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(viewModel.providerListItems) { item in
-                        NewPiProviderRow(
-                            item: item,
-                            onEdit: { editingProfile = item.profile },
-                            onDelete: {
-                                Task { await viewModel.deleteProfile(id: item.profile.id) }
-                            },
-                            canDelete: viewModel.providerListItems.count > 1
-                        )
-                    }
+                Button(action: goForward) {
+                    Image(systemName: "chevron.right")
                 }
-
-                Button("Add Provider…") {
-                    showingAddSheet = true
-                }
-                Button("Manage Templates…") {
-                    showingTemplateManager = true
-                }
-            }
-
-            Section("Credentials") {
-                Toggle("Store API keys in Keychain", isOn: useKeychainBinding)
-                Text("Off by default for Xcode debugging (UserDefaults + optional .env). When on, saved keys are also written to Keychain.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !viewModel.useKeychainForCredentials {
-                    Text("If macOS still asks for your login password, open each provider → paste API key → Save once (stored locally, no Keychain).")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            Section("Paths") {
-                LabeledContent("Providers") {
-                    Text("~/.new-pi/agent/providers.json")
-                        .font(.caption.monospaced())
-                }
-                LabeledContent("MCP") {
-                    Text("~/.new-pi/agent/mcp.json")
-                        .font(.caption.monospaced())
-                }
-            }
-
-            Section("危险评估") {
-                Toggle("LLM 补充评估（消耗 token）", isOn: $approvalBridge.llmSupplementEnabled)
-                Text("LLM 评估失败时降级为工具基线等级，绝不降为低风险。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("重置为默认规则") {
-                    approvalBridge.resetToDefaults()
-                }
-            }
-
-            NewPiMCPSettingsView(bridge: mcpBridge)
-
-            Section("Debug") {
-                Button("View Logs") {
-                    showLogs = true
-                }
-                Button("API 监控") {
-                    openWindow(id: "api-metrics")
-                }
+                .disabled(!canGoForward)
+                .help("Forward")
             }
         }
-        .formStyle(.grouped)
-        .padding()
-        .frame(minWidth: 520, minHeight: 420)
-        .navigationTitle("Settings")
+        .onChange(of: selectedTab) { _, _ in
+            recordNavigation()
+        }
         .sheet(isPresented: $showingAddSheet) {
             NewPiAddProviderSheet(
                 vendorTemplates: viewModel.vendorTemplates,
                 onVendorSelect: { preset in
                     showingAddSheet = false
-                    let profile = VendorPresets.makeProfile(from: preset)
-                    editingProfile = profile
+                    editingProfile = VendorPresets.makeProfile(from: preset)
                 },
                 onCustomSelect: {
                     showingAddSheet = false
@@ -125,6 +121,171 @@ struct NewPiSettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private var settingsDetail: some View {
+        switch activeTab {
+        case .general:
+            generalSettings
+        case .providers:
+            providerSettings
+        case .toolsAndSafety:
+            toolsAndSafetySettings
+        case .diagnostics:
+            diagnosticsSettings
+        }
+    }
+
+    private var generalSettings: some View {
+        Form {
+            Section("Default Provider") {
+                Picker("Default for new sessions", selection: defaultProfileBinding) {
+                    ForEach(viewModel.providerConfig.profiles) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                Text("只影响之后新建的会话；已有会话保持各自选择的模型（会话内可在状态栏的模型菜单中切换，选择会随会话记住）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Credentials") {
+                Toggle("Store API keys in Keychain", isOn: useKeychainBinding)
+                Text("Off by default for Xcode debugging (UserDefaults + optional .env). When on, saved keys are also written to Keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !viewModel.useKeychainForCredentials {
+                    Text("If macOS still asks for your login password, open each provider → paste API key → Save once (stored locally, no Keychain).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Section("Configuration Files") {
+                LabeledContent("Providers") {
+                    Text("~/.new-pi/agent/providers.json")
+                        .font(.caption.monospaced())
+                }
+                LabeledContent("MCP") {
+                    Text("~/.new-pi/agent/mcp.json")
+                        .font(.caption.monospaced())
+                }
+            }
+        }
+        .newPiSettingsFormStyle()
+    }
+
+    private var providerSettings: some View {
+        Form {
+            Section("Providers") {
+                if viewModel.providerListItems.isEmpty {
+                    ContentUnavailableView(
+                        "No providers configured",
+                        systemImage: "server.rack",
+                        description: Text("Add a provider to start a session.")
+                    )
+                } else {
+                    ForEach(viewModel.providerListItems) { item in
+                        NewPiProviderRow(
+                            item: item,
+                            onEdit: { editingProfile = item.profile },
+                            onDelete: {
+                                Task { await viewModel.deleteProfile(id: item.profile.id) }
+                            },
+                            canDelete: viewModel.providerListItems.count > 1
+                        )
+                    }
+                }
+            }
+
+            Section {
+                HStack(spacing: 8) {
+                    Button("Add Provider…") {
+                        showingAddSheet = true
+                    }
+                    Button("Manage Templates…") {
+                        showingTemplateManager = true
+                    }
+                }
+            }
+        }
+        .newPiSettingsFormStyle()
+    }
+
+    private var toolsAndSafetySettings: some View {
+        Form {
+            Section("危险评估") {
+                Toggle("LLM 补充评估（消耗 token）", isOn: $approvalBridge.llmSupplementEnabled)
+                Text("LLM 评估失败时降级为工具基线等级，绝不降为低风险。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("重置为默认规则") {
+                    approvalBridge.resetToDefaults()
+                }
+            }
+
+            NewPiMCPSettingsView(bridge: mcpBridge)
+        }
+        .newPiSettingsFormStyle()
+    }
+
+    private var diagnosticsSettings: some View {
+        Form {
+            Section("Diagnostics") {
+                LabeledContent("Application logs") {
+                    Button("View Logs") {
+                        showLogs = true
+                    }
+                }
+                LabeledContent("API performance") {
+                    Button("Open API Monitor") {
+                        NotificationCenter.default.post(name: .newPiShowMetrics, object: nil)
+                    }
+                }
+            }
+
+            Section {
+                Text("Diagnostics are intended for troubleshooting. Runtime stall probes are included only in Debug builds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .newPiSettingsFormStyle()
+    }
+
+    private var canGoBack: Bool {
+        historyIndex > 0
+    }
+
+    private var canGoForward: Bool {
+        historyIndex < navigationHistory.count - 1
+    }
+
+    private func goBack() {
+        guard canGoBack else { return }
+        isHistoryNavigation = true
+        historyIndex -= 1
+        selectedTab = navigationHistory[historyIndex]
+        DispatchQueue.main.async { isHistoryNavigation = false }
+    }
+
+    private func goForward() {
+        guard canGoForward else { return }
+        isHistoryNavigation = true
+        historyIndex += 1
+        selectedTab = navigationHistory[historyIndex]
+        DispatchQueue.main.async { isHistoryNavigation = false }
+    }
+
+    private func recordNavigation() {
+        guard !isHistoryNavigation, let selectedTab else { return }
+        guard navigationHistory.last != selectedTab else { return }
+        if historyIndex < navigationHistory.count - 1 {
+            navigationHistory = Array(navigationHistory.prefix(historyIndex + 1))
+        }
+        navigationHistory.append(selectedTab)
+        historyIndex = navigationHistory.count - 1
+    }
+
     private var defaultProfileBinding: Binding<String> {
         Binding(
             get: { viewModel.providerConfig.defaultProfileID ?? "" },
@@ -142,7 +303,32 @@ struct NewPiSettingsView: View {
             set: { viewModel.setUseKeychainForCredentials($0) }
         )
     }
+
+    private static let versionText: String = {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = info?["CFBundleVersion"] as? String ?? "0"
+        return "Version \(version) (\(build))"
+    }()
 }
+
+private extension View {
+    func newPiSettingsFormStyle() -> some View {
+        formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.top, 8, for: .scrollContent)
+    }
+
+    @ViewBuilder
+    func newPiSoftScrollEdgeEffect() -> some View {
+        if #available(macOS 26.0, *) {
+            scrollEdgeEffectStyle(.soft, for: .all)
+        } else {
+            self
+        }
+    }
+}
+
 
 struct NewPiProviderRow: View {
     let item: NewPiProviderListItem

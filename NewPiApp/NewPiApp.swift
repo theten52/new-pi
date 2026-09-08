@@ -90,21 +90,13 @@ struct NewPiApp: App {
         WindowGroup {
             NewPiRootView()
         }
-        // UI 架构 spike（一次性验证工具，不接入生产路径）：独立窗口。
-        // 用 Window（单实例）而非 WindowGroup——后者对同一 id 重复 openWindow 会开多个窗口，
-        // 导致 autorun 序列被多个模型实例并发执行。
-        Window("UI Architecture Spike", id: "ui-arch-spike") {
-            NewPiSpikeTranscriptView()
-        }
-        // API 监控：独立非模态窗口（单实例），可与主窗口并行——边监控边使用 APP。
-        Window("API 监控", id: "api-metrics") {
-            NewPiMetricsView()
-        }
-        .defaultSize(width: 860, height: 580)
-        Settings {
-            NewPiSettingsView(viewModel: sharedViewModel)
-        }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    NewPiSettingsWindowController.show()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Session") {
                     NotificationCenter.default.post(name: .newPiNewSession, object: nil)
@@ -121,11 +113,17 @@ struct NewPiApp: App {
                 }
             }
         }
-    }
-
-    @MainActor
-    private var sharedViewModel: NewPiViewModel {
-        NewPiRootViewModelStore.shared.viewModel
+        // UI 架构 spike（一次性验证工具，不接入生产路径）：独立窗口。
+        // 用 Window（单实例）而非 WindowGroup——后者对同一 id 重复 openWindow 会开多个窗口，
+        // 导致 autorun 序列被多个模型实例并发执行。
+        Window("UI Architecture Spike", id: "ui-arch-spike") {
+            NewPiSpikeTranscriptView()
+        }
+        // API 监控：独立非模态窗口（单实例），可与主窗口并行——边监控边使用 APP。
+        Window("API 监控", id: "api-metrics") {
+            NewPiMetricsView()
+        }
+        .defaultSize(width: 860, height: 580)
     }
 }
 
@@ -141,6 +139,7 @@ extension Notification.Name {
     static let newPiNewSession = Notification.Name("com.new-pi.newSession")
     static let newPiShowLogs = Notification.Name("com.new-pi.showLogs")
     static let newPiShowSpike = Notification.Name("com.new-pi.showSpike")
+    static let newPiShowMetrics = Notification.Name("com.new-pi.showMetrics")
 }
 
 private struct ChatRoomExportPayload: Codable {
@@ -612,6 +611,9 @@ struct NewPiRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiShowSpike)) { _ in
             openWindow(id: "ui-arch-spike")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newPiShowMetrics)) { _ in
+            openWindow(id: "api-metrics")
         }
         .onChange(of: viewModel.projectURL) { _, newProject in
             selectedChatroomID = nil
