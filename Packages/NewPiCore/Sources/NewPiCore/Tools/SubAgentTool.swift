@@ -88,6 +88,7 @@ public struct SubAgentTool: AgentTool {
             toolApprovalTracker: context.toolApprovalTracker,
             dangerEvaluator: context.dangerEvaluator,
             dangerCache: context.dangerCache,
+            projectScope: context.projectScope,
             auditLogger: context.auditLogger
         )
 

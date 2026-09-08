@@ -227,6 +227,10 @@ struct NewPiSettingsView: View {
     private var toolsAndSafetySettings: some View {
         Form {
             Section("危险评估") {
+                Toggle("项目根内文件操作免审批", isOn: $approvalBridge.projectScopeAutoApprove)
+                Text("项目/聊天室根路径下的文件修改与删除（write/edit 及目标全在根内的 rm、mv 等命令）不再弹审批；sudo、强制推送等高危操作仍每次确认。项目根选在个人主目录或系统目录时自动失效。对新会话生效。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("LLM 补充评估（消耗 token）", isOn: $approvalBridge.llmSupplementEnabled)
                 Text("LLM 评估失败时降级为工具基线等级，绝不降为低风险。")
                     .font(.caption)
