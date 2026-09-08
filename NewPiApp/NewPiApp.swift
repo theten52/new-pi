@@ -233,6 +233,7 @@ struct NewPiRootView: View {
     @State private var showingCreateChatroom = false
     @State private var chatroomToEdit: ChatRoom?
     @State private var chatroomToDelete: ChatRoom?
+    @State private var chatroomDeleteError: String?
     /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
     @State private var sessionDisplayLimit = 5
     @State private var renameTarget: SessionSummary?
@@ -340,6 +341,8 @@ struct NewPiRootView: View {
                     } label: {
                         Label("删除聊天室", systemImage: "trash")
                     }
+                    .disabled(chatroomStore.isRunning(chatroomID: chatroom.id))
+                    .help("请先停止聊天室运行再删除")
                 }
             }
         }
@@ -596,8 +599,12 @@ struct NewPiRootView: View {
         ) {
             Button("删除「\(chatroomToDelete?.name ?? "")」", role: .destructive) {
                 if let chatroom = chatroomToDelete {
-                    try? chatroomStore.delete(chatroom)
-                    if selectedChatroomID == chatroom.id { selectedChatroomID = nil }
+                    do {
+                        try chatroomStore.delete(chatroom)
+                        if selectedChatroomID == chatroom.id { selectedChatroomID = nil }
+                    } catch {
+                        chatroomDeleteError = error.localizedDescription
+                    }
                 }
                 chatroomToDelete = nil
             }
@@ -606,6 +613,14 @@ struct NewPiRootView: View {
             }
         } message: {
             Text("将删除聊天室配置与全部对话记录，不可恢复。")
+        }
+        .alert("无法删除聊天室", isPresented: Binding(
+            get: { chatroomDeleteError != nil },
+            set: { if !$0 { chatroomDeleteError = nil } }
+        )) {
+            Button("好", role: .cancel) { chatroomDeleteError = nil }
+        } message: {
+            Text(chatroomDeleteError ?? "")
         }
         .onReceive(NotificationCenter.default.publisher(for: .newPiNewSession)) { _ in
             selectedChatroomID = nil

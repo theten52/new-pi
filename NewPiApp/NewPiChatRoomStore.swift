@@ -19,6 +19,8 @@ final class ChatRoomFlowController: ObservableObject {
     /// 审批 continuation 由本控制器持有的 approvalManager 承载，切回时审批 sheet
     /// 会随 pendingApprovals 自动重弹，任务无需中断。
     private var runningTask: Task<Void, Never>?
+    /// 从点击推进到任务完全退出均为 true，用于消除 runtime.isRunning 设置前的竞态窗口。
+    @Published private(set) var isTaskActive = false
     /// 流程错误（view 层 alert 展示；原 DetailView 的 @State flowError 上移）。
     @Published var flowError: String?
     /// transcript 适配层（CHATROOM-FLAT-MD Phase 2）：派生 id 缓存随控制器存活，
@@ -84,7 +86,14 @@ final class ChatRoomFlowController: ObservableObject {
     // MARK: - 发言推进（原 DetailView 的 trigger* 私有方法上移）
 
     func triggerNextSpeaker() {
-        runningTask = Task {
+        guard !isTaskActive else { return }
+        isTaskActive = true
+        runningTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                runningTask = nil
+                isTaskActive = false
+            }
             do {
                 try await loop.triggerNextSpeaker(runtime: runtime)
             } catch is CancellationError {
@@ -96,7 +105,14 @@ final class ChatRoomFlowController: ObservableObject {
     }
 
     func triggerSpeaker(roleID: String) {
-        runningTask = Task {
+        guard !isTaskActive else { return }
+        isTaskActive = true
+        runningTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                runningTask = nil
+                isTaskActive = false
+            }
             do {
                 try await loop.triggerSpeaker(roleID: roleID, runtime: runtime)
             } catch is CancellationError {
@@ -113,7 +129,12 @@ final class ChatRoomFlowController: ObservableObject {
     /// 未决审批会被 approvalManager 以「已取消」拒绝并唤醒循环。
     func cancelRunning() {
         runningTask?.cancel()
-        runningTask = nil
+    }
+
+    /// Task 刚创建、模型正在输出或工具审批等待期间都视为忙碌。
+    /// 不能只看 runtime.isRunning：Task 从点击到 speak() 设置状态之间存在一个短窗口。
+    var isBusy: Bool {
+        isTaskActive || runtime.isRunning || !approvalManager.pendingApprovals.isEmpty
     }
 
     /// 消息 → transcript items（CHATROOM-FLAT-MD Phase 2，视图每次更新时调用；
@@ -166,6 +187,7 @@ final class ChatRoomRuntimeStore: ObservableObject {
     @Published private(set) var chatrooms: [ChatRoom] = []
     private var controllers: [String: ChatRoomFlowController] = [:]
     private var chatroomSyncCancellables: [String: AnyCancellable] = [:]
+    private var controllerChangeCancellables: [String: AnyCancellable] = [:]
     private init() {
         reload()
     }
@@ -188,6 +210,10 @@ final class ChatRoomRuntimeStore: ObservableObject {
                 guard let self, let index = self.chatrooms.firstIndex(where: { $0.id == updated.id }) else { return }
                 self.chatrooms[index] = updated
             }
+        // sidebar 的编辑/删除/导出禁用状态依赖 controller.isBusy；把 controller 的
+        // runtime、审批和任务状态变化继续转发给 store，避免菜单显示滞后。
+        controllerChangeCancellables[chatroom.id] = controller.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
         return controller
     }
 
@@ -197,21 +223,36 @@ final class ChatRoomRuntimeStore: ObservableObject {
     /// 在运行时应被禁用，这里亦防一手）。
     func applyEdit(_ updated: ChatRoom) {
         reload()
-        if let controller = controllers[updated.id], !controller.runtime.isRunning {
+        if let controller = controllers[updated.id], !controller.isBusy {
             controller.runtime.chatroom = updated
         }
     }
 
-    /// 某聊天室是否正在运行（供 sidebar 编辑入口做禁用守卫；未缓存的控制器视为未运行）。
+    /// 某聊天室是否正在运行或等待工具审批（供编辑、删除、导出入口统一做守卫）。
     func isRunning(chatroomID: String) -> Bool {
-        controllers[chatroomID]?.runtime.isRunning ?? false
+        controllers[chatroomID]?.isBusy ?? false
     }
 
-    /// 删除聊天室：磁盘配置 + 运行时缓存 + 列表镜像一并清理。
+    /// 删除聊天室：运行中一律拒绝，防止后台任务在目录删除后继续写消息或执行工具。
     func delete(_ chatroom: ChatRoom) throws {
+        guard !isRunning(chatroomID: chatroom.id) else {
+            throw ChatRoomRuntimeStoreError.cannotDeleteWhileRunning
+        }
         try ChatRoomStore.shared.delete(id: chatroom.id)
         controllers.removeValue(forKey: chatroom.id)
         chatroomSyncCancellables.removeValue(forKey: chatroom.id)
+        controllerChangeCancellables.removeValue(forKey: chatroom.id)
         reload()
+    }
+}
+
+private enum ChatRoomRuntimeStoreError: LocalizedError {
+    case cannotDeleteWhileRunning
+
+    var errorDescription: String? {
+        switch self {
+        case .cannotDeleteWhileRunning:
+            "聊天室正在运行或等待工具审批，请先停止运行再删除。"
+        }
     }
 }
