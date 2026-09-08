@@ -38,11 +38,9 @@ struct NewPiSessionPanel: View {
     @ObservedObject var viewModel: NewPiViewModel
 
     @State private var input = ""
-    /// composer 输入框的实测内容高度（由 NewPiComposerTextView 回报，固定 4 行）。
-    @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
     @State private var draftAttachments: [DraftImageAttachment] = []
-    /// 发送成功礼花触发序号：每次 `runtime.isStreaming` 由 false→true 自增一。
+    /// 回答完成礼花触发序号：每次最终答复真正落定后自增一。
     @State private var confettiTrigger = 0
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
@@ -132,11 +130,9 @@ struct NewPiSessionPanel: View {
             // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
             runtime.docController = docController
         }
-        .onChange(of: runtime.isStreaming) { oldValue, newValue in
-            // 仅「false→true」触发：这是 send() 通过全部本地校验、进入发送流程的唯一翻转点
-            //（能力拦截 / 附件校验 / 落盘失败都在 isStreaming=true 之前 return）。
-            // 观察源是面板级 runtime 而非 viewModel 镜像，后台会话的礼花只在自己的面板炸开，
-            // 天然多会话隔离；onChange 默认 initial:false，切进流式会话不会误放。
+        .onChange(of: runtime.finalAnswerComplete) { oldValue, newValue in
+            // 礼花表达“任务完成”，而不是“请求刚开始”。只有最终答复（无后续工具调用）
+            // 落定时才触发；本地校验失败、请求刚发出、中间工具轮次和取消都不会误放。
             if oldValue == false && newValue == true {
                 confettiTrigger += 1
             }
@@ -182,20 +178,16 @@ struct NewPiSessionPanel: View {
                         NewPiDraftAttachmentStrip(drafts: $draftAttachments)
                     }
 
-                    // 多行输入框（NSTextView）：真实多行、自动增高，
+                    // 固定 4 行输入框（NSTextView）：超出后内部滚动，
                     // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
                     NewPiComposerTextView(
                         text: $input,
                         isDisabled: runtime.isStreaming,
                         placeholder: "Message NewPi…",
                         onSubmit: sendComposerInput,
-                        onImagesPicked: appendDrafts,
-                        onHeightChange: { newHeight in
-                            guard abs(composerInputHeight - newHeight) > 0.5 else { return }
-                            composerInputHeight = newHeight
-                        }
+                        onImagesPicked: appendDrafts
                     )
-                    .frame(height: composerInputHeight)
+                    .frame(height: NewPiComposerScrollView.fixedHeight)
                     // 高亮：与状态栏一致的淡 accent 填充 + 描边。
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -331,7 +323,7 @@ private struct NewPiDraftAttachmentStrip: View {
 
 // MARK: - Multiline composer (NSTextView)
 
-/// 多行输入框：基于 NSTextView，支持真实多行输入、随内容自动增高（达上限后滚动），
+/// 多行输入框：基于 NSTextView，固定显示 4 行，超出后内部滚动；
 /// Return 发送 / Shift+Return 换行。替代原先近似单行的 TextField(axis: .vertical)。
 struct NewPiComposerTextView: NSViewRepresentable {
     @Binding var text: String
@@ -340,10 +332,6 @@ struct NewPiComposerTextView: NSViewRepresentable {
     var onSubmit: () -> Void = {}
     /// 图片采集回调（输入框拖拽 / ⌘V 粘贴）：汇入外层草稿附件条。
     var onImagesPicked: ([DraftImageAttachment]) -> Void = { _ in }
-    /// 内容高度变化回调：外层据此用 .frame(height:) 精确控制高度，
-    /// 不依赖 intrinsicContentSize（NSScrollView hugging 优先级低，会被 VStack 拉伸）。
-    var onHeightChange: (CGFloat) -> Void = { _ in }
-
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -400,13 +388,6 @@ struct NewPiComposerTextView: NSViewRepresentable {
             textView.string = text
             textView.scrollToEndOfDocument(nil)
         }
-        scrollView.invalidateIntrinsicContentSize()
-        // 首次布局 / 宽度变化后重报高度。异步避免在 view update 周期内改 @State。
-        let report = onHeightChange
-        DispatchQueue.main.async {
-            let height = scrollView.measuredContentHeight
-            if height > 0 { report(height) }
-        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -420,43 +401,17 @@ struct NewPiComposerTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
             parent.text = textView.string
-            // 内容行数变化 → 重新测量高度，驱动 composer 自动增高。
-            if let scrollView = textView.enclosingScrollView as? NewPiComposerScrollView {
-                scrollView.invalidateIntrinsicContentSize()
-                parent.onHeightChange(scrollView.measuredContentHeight)
-            }
         }
     }
 }
 
-/// 自适应高度的 ScrollView：高度由内容行数决定，夹在 [单行, 4 行] 之间。
+/// 固定 4 行高的 ScrollView；内容超过 4 行后由 NSScrollView 内部滚动。
 final class NewPiComposerScrollView: NSScrollView {
-    /// 最多显示 4 行，超出后内部滚动。
-    var maxVisibleLines: CGFloat = 4
-    /// 布局未就绪时的兜底高度（4 行：13pt 字体约 16pt/行 + 内边距 14pt）。
-    static let fallbackHeight: CGFloat = 78
-
-    /// 当前内容应有的高度（默认 4 行，超出 4 行后内部滚动）。
-    var measuredContentHeight: CGFloat {
-        guard let textView = documentView as? NSTextView,
-              let layoutManager = textView.layoutManager,
-              let container = textView.textContainer,
-              container.size.width > 0 else {
-            return Self.fallbackHeight
-        }
-        layoutManager.ensureLayout(for: container)
-        let usedHeight = layoutManager.usedRect(for: container).height
-        let insets = textView.textContainerInset
-        let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let lineHeight = layoutManager.defaultLineHeight(for: font)
-        let fourLines = lineHeight * maxVisibleLines + insets.height * 2
-        let contentHeight = usedHeight + insets.height * 2
-        // 下限=上限=4 行：空输入也保持 4 行高，内容超出后滚动。
-        return ceil(min(max(contentHeight, fourLines), fourLines))
-    }
+    /// 13pt 系统字体约 16pt/行，加上 NSTextView 上下各 7pt 内边距。
+    static let fixedHeight: CGFloat = 78
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: measuredContentHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.fixedHeight)
     }
 }
 

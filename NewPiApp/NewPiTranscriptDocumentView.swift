@@ -299,10 +299,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
             // UI 侧指标：diff 计算耗时（每次 flush 都会触发；transcript 越大越贵）。
             let diffDuration = Date().timeIntervalSince(diffStart)
-            Task {
+            let diffOpsCount = ops.count
+            Task { [diffDuration, diffOpsCount] in
                 await LLMMetricsRecorder.shared.record(UITranscriptDiffMetric(
                     duration: diffDuration,
-                    opsCount: ops.count
+                    opsCount: diffOpsCount
                 ))
             }
 

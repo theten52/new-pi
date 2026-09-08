@@ -57,6 +57,7 @@ enum NewPiAgentStatusIconSize {
 struct NewPiAgentStatusIcon: View {
     let presentation: NewPiAgentStatusPresentation
     var size: NewPiAgentStatusIconSize = .toolbar
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -71,7 +72,7 @@ struct NewPiAgentStatusIcon: View {
             Image(systemName: presentation.systemImage)
                 .font(.system(size: size.symbolSize, weight: .semibold))
                 .foregroundStyle(foregroundColor)
-                .symbolEffect(.pulse, isActive: presentation.isActive)
+                .symbolEffect(.pulse, isActive: presentation.isActive && !reduceMotion)
         }
         .accessibilityHidden(true)
     }
@@ -271,6 +272,7 @@ struct NewPiAgentStatusBar: View {
 struct NewPiStatusBreathingLabel: View {
     let text: String
     let isActive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// 呼吸相位：开关翻转驱动透明度在亮/暗间往复，形成连续呼吸。
     @State private var breathing = false
@@ -283,16 +285,23 @@ struct NewPiStatusBreathingLabel: View {
             .font(.subheadline)
             .lineLimit(1)
             .foregroundStyle(textColor)
-            .opacity(isActive ? (breathing ? 1.0 : 0.55) : 1.0)
-            .animation(isActive ? .easeInOut(duration: 1.1) : nil, value: breathing)
+            .opacity(shouldAnimate ? (breathing ? 1.0 : 0.55) : 1.0)
+            .animation(shouldAnimate ? .easeInOut(duration: 1.1) : nil, value: breathing)
             .onReceive(timer) { _ in
-                guard isActive else { return }
+                guard shouldAnimate else {
+                    breathing = false
+                    return
+                }
                 breathing.toggle()
             }
     }
 
     private var textColor: Color {
         isActive ? Color.green : Color.secondary
+    }
+
+    private var shouldAnimate: Bool {
+        isActive && !reduceMotion
     }
 }
 

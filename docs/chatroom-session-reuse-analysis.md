@@ -23,7 +23,7 @@
 |------|------|
 | `SessionRuntime` | 观测运行时：`transcript`、`isStreaming`、`streamingBubbleComplete`/`finalAnswerComplete`（状态提前收敛，不等 agentEnd）、token 用量（累计/本轮/速率滑动窗口）、**详情组状态机**（turn/marker/manualOverride 跨 rebuild 稳定）、**流式合并缓冲**（text/thinking delta 攒批 + 节流 flush）、LRU 会话缓存 |
 | `NewPiViewModel` | 会话生命周期（后台线程构建、主线程组装）、keptAliveRuntimes 保活面板、模型热切换、provider 管理 |
-| `NewPiSessionPanel` | 会话 UI：多行 Composer（高度自适应 + 图片附件/粘贴/拖拽）、user markers、审批 sheet、状态栏（token 速率等） |
+| `NewPiSessionPanel` | 会话 UI：多行 Composer（固定 4 行、超出滚动 + 图片附件/粘贴/拖拽）、user markers、审批 sheet、状态栏（token 速率等） |
 | `NewPiTranscriptDocumentView` + JS | 单文档渲染管线：diff → ops → WKWebView（markdown-it/hljs、流式/最终双渲染、详情组折叠、fork、minimap、滚动状态机） |
 | `ScrollPositionStore` | 滚动锚点持久化 |
 
@@ -64,13 +64,13 @@
 > 完成自动收起，长工具循环不再刷屏；thinking 卡保持内联（讨论期的思考
 > 是该发言的主要内容，不折叠）。
 > ② Composer：聊天室输入框替换为 Session 的 `NewPiComposerTextView`
-> （多行、自动增高、Return 发送 / Shift+Return 换行）；发言进行中保持
+> （多行、固定 4 行高并在超出后内部滚动、Return 发送 / Shift+Return 换行）；发言进行中保持
 > 可输入——发送即插话（steering），这是与 Session 语义的有意差异。
 > ③ 用量显示：输入栏空闲态展示 `runtime.usage.newPiCompactText` 累计
 > token（逐发言由 messageEnd 事件累加）。
 
 1. **详情组折叠**（收益最大）：把 adapter 的 `detailTurnID` 从恒 nil 改为按「同一发言内的 thinking/工具卡」分组复用 Session 的详情组渲染——一次发言几十张工具卡（如 500 轮那次）会折叠成一行「处理详情」，彻底解决刷屏。
-2. **Composer 输入框复用**：多行 + 高度自适应 + 图片附件，聊天室插话体验直接对齐 Session。
+2. **Composer 输入框复用**：多行 + 固定 4 行高并在超出后滚动 + 图片附件，聊天室插话体验直接对齐 Session。
 3. **token 用量显示**：`ChatRoomLLMResponse` 透传 `UsageStats`，角色气泡/状态栏展示，与预算横幅互为补充。
 4. **流式节流收敛**：provider 层 120ms 攒批与 Session 的合并缓冲思路统一，二选一。
 

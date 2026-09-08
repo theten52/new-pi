@@ -188,10 +188,14 @@ private struct SessionRow: View {
                     .fill(Color.accentColor.opacity(0.15))
             } else if isHovering {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.13))
+                    .fill(.thinMaterial)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+                            .fill(Color.accentColor.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
                     )
             }
         }
@@ -668,10 +672,14 @@ struct ChatRoomSidebarRow: View {
                     .fill(Color.accentColor.opacity(0.15))
             } else if isHovering {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.13))
+                    .fill(.thinMaterial)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+                            .fill(Color.accentColor.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
                     )
             }
         }
@@ -1418,8 +1426,6 @@ struct ChatRoomDetailView: View {
     @ObservedObject var controller: ChatRoomFlowController
 
     @State private var inputText = ""
-    /// Composer 实测内容高度（NewPiComposerTextView 回报，自动增高、超限滚动）。
-    @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     @State private var showingVoteSheet = false
     @State private var showingRolePicker = false
     @State private var showingEndDiscussionDialog = false
@@ -1680,20 +1686,16 @@ struct ChatRoomDetailView: View {
                 contextText: chatroomContextText
             )
 
-            // 输入框（Phase A：复用 Session 的多行 Composer）——真实多行、自动增高、
+            // 输入框（Phase A：复用 Session 的多行 Composer）——固定 4 行、超出后滚动，
             // Return 发送 / Shift+Return 换行；发言进行中保持可输入（插话走 steering）。
             NewPiComposerTextView(
                 text: $inputText,
                 placeholder: "输入消息…（Return 发送，Shift+Return 换行；发言中发送 = 插话）",
                 onSubmit: {
                     sendUserMessage()
-                },
-                onHeightChange: { newHeight in
-                    guard abs(composerInputHeight - newHeight) > 0.5 else { return }
-                    composerInputHeight = newHeight
                 }
             )
-            .frame(height: composerInputHeight)
+            .frame(height: NewPiComposerScrollView.fixedHeight)
 
             HStack {
                 Spacer()

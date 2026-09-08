@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 「发送成功」的小礼花：在 Send 按钮位置炸开一片低饱和彩色粒子，向上飞进 transcript 区域，
+/// 「回答完成」的小礼花：在 Send 按钮位置炸开一片低饱和彩色粒子，向上飞进 transcript 区域，
 /// 约 1 秒内自然消散。
 ///
 /// 设计约束（与多会话保活架构 / Swift 6 strict concurrency 的协同）：

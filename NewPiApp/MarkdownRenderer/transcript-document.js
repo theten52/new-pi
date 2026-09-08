@@ -602,13 +602,19 @@
       const card = header.closest(".card");
       if (card) {
         card.classList.toggle("expanded");
+        // 卡片会在 thinking delta / 工具结果到达时整体重建。把用户的展开选择
+        // 存进条目的长命 state，而不是只留在即将被替换的 DOM class 上。
+        const ti = card.closest(".ti");
+        const id = ti ? ti.getAttribute("data-iid") : null;
+        const state = id ? items.get(id) : null;
+        if (state) {
+          state.cardExpanded = card.classList.contains("expanded");
+        }
         // 折叠/展开改变布局：走统一的批次纪律（非底部保持视口锚定）。
         const plan = Scroll.beginBatch();
         Scroll.endBatch(plan);
         scheduleTurnOffsetsReport();
         // 展开态高度变了，已固化的占位高过时——重新预热该条目。
-        const ti = card.closest(".ti");
-        const id = ti ? ti.getAttribute("data-iid") : null;
         if (id) {
           Warmer.warmed.delete(id);
           Warmer.schedule();
@@ -833,7 +839,8 @@
     el.textContent = "";
 
     const card = document.createElement("div");
-    card.className = "card" + (op.toolError ? " is-error" : "");
+    card.className = "card" + (op.toolError ? " is-error" : "") +
+      (state.cardExpanded ? " expanded" : "");
 
     const header = document.createElement("button");
     header.type = "button";
