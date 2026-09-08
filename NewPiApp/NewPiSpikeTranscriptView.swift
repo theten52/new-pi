@@ -302,8 +302,12 @@ final class NewPiSpikeModel: ObservableObject {
             guard pid > 0, pid != selfPID else { continue }
             // pbi_comm 截断到 15 字符，装不下 "com.apple.WebKit.*"——用全路径判断。
             var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-            guard proc_pidpath(pid, &pathBuf, UInt32(MAXPATHLEN)) > 0 else { continue }
-            guard String(cString: pathBuf).contains("com.apple.WebKit") else { continue }
+            let pathLength = proc_pidpath(pid, &pathBuf, UInt32(MAXPATHLEN))
+            guard pathLength > 0 else { continue }
+            let processPath = pathBuf.withUnsafeBytes { bytes in
+                String(decoding: bytes.prefix(Int(pathLength)), as: UTF8.self)
+            }
+            guard processPath.contains("com.apple.WebKit") else { continue }
             webkitSeen += 1
             let responsible = _responsiblePID(pid)
             guard responsible == selfPID || responsible == selfResponsible else { continue }

@@ -1,5 +1,6 @@
 import AppKit
 import NewPiCore
+import os
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -22,11 +23,20 @@ struct NewPiApp: App {
     enum MainRunloopWatchdog {
         static func install() {
             let interval: TimeInterval = 0.5
-            var expected = Date().addingTimeInterval(interval)
+            // Timer 的 block 是 @Sendable。用锁封装下一次预期时刻，既消除 Swift 6
+            // 对捕获可变局部变量的数据竞争警告，也让诊断代码在回调线程变化时仍安全。
+            let expectedTick = OSAllocatedUnfairLock(
+                initialState: Date().addingTimeInterval(interval)
+            )
             // .common 模式：滚动/拖拽 tracking 期间也照常打点（否则用户滚动会误报漂移）。
             let timer = Timer(timeInterval: interval, repeats: true) { _ in
                 let now = Date()
-                let drift = now.timeIntervalSince(expected)
+                let drift = expectedTick.withLock { expected in
+                    let drift = now.timeIntervalSince(expected)
+                    // 以实际触发时刻重排预期，避免追赶期连报。
+                    expected = now.addingTimeInterval(interval)
+                    return drift
+                }
                 if drift > 1.0 {
                     NewPiLogger.error(
                         category: "app",
@@ -34,8 +44,6 @@ struct NewPiApp: App {
                         details: "drift=\(String(format: "%.2f", drift))s（主线程这段时间完全不可用）"
                     )
                 }
-                // 以实际触发时刻重排预期，避免追赶期连报。
-                expected = now.addingTimeInterval(interval)
             }
             RunLoop.main.add(timer, forMode: .common)
 
@@ -72,7 +80,10 @@ struct NewPiApp: App {
 
     init() {
         _ = NewPiLogStore.shared
+        // STALL-VERIFY 是开发期诊断设施；Release 不应常驻两个定时探针或每分钟写心跳日志。
+        #if DEBUG
         MainRunloopWatchdog.install()
+        #endif
     }
 
     var body: some Scene {
