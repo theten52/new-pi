@@ -144,3 +144,14 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 覆盖 Session 形态首次加载、聊天室 A/B/A 冷恢复及跨类型切回；不包括 SessionManager 解码、完整 SwiftUI 导航或 Session 保活命中。
 探针使用真实生产源码，只有诊断 logger/metrics 替换为空实现，滚动 sessionID 为 nil，不写用户滚动位置。
 文件读取紧接着 fixture 写入，可能命中 OS 页缓存；不能作为真实磁盘冷读或整个 App 的首屏性能结论。
+
+## 共用审批 UI 验证
+
+`bash scripts/validation/check-approval-ui.sh` 编译真实 `NewPiApprovalContent`，通过独立 Accessibility 进程操作按钮/菜单并验证回调范围：
+
+- 聊天室普通风险有“本聊天室内允许”，没有永久授权选项。
+- 高风险无记忆授权菜单，只允许一次。
+- Session 保留“一直允许”选项。
+
+需要 macOS 图形登录和辅助功能权限。使用 `NEWPI_UI_DARK=1` 验证深色模式；可设置 `NEWPI_UI_SNAPSHOTS=/private/tmp/newpi-approval-ui` 保存原生窗口截图。
+探针仅验证 UI 回调，不执行命令、不写授权；临时进程退出后清理。Core 的 `ChatRoomAuthorizationTests` 覆盖真正的授权记忆、隔离、撤销、取消、兼容工具与多角色引擎链路。

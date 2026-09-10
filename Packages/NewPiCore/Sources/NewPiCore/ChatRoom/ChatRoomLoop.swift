@@ -71,6 +71,7 @@ public final class ChatRoomLoop {
     private let mcpToolsProvider: (@Sendable () async -> [any AgentTool])?
     /// 发言进行中的用户插话队列（steering）：由 AgentLoop 的 steeringProvider 消费。
     private var steeringQueue: [AgentMessage] = []
+    private let auditLogger: ToolApprovalAuditLogger?
 
     public init(
         store: ChatRoomStore = .shared,
@@ -78,7 +79,8 @@ public final class ChatRoomLoop {
         approvalManager: ChatRoomApprovalManager = ChatRoomApprovalManager(),
         contextBudgetTokens: ((ChatRoom) -> Int?)? = nil,
         engineProvider: ((ChatRoomRole) throws -> ChatRoomRoleEngine)? = nil,
-        mcpToolsProvider: (@Sendable () async -> [any AgentTool])? = nil
+        mcpToolsProvider: (@Sendable () async -> [any AgentTool])? = nil,
+        auditLogger: ToolApprovalAuditLogger? = nil
     ) {
         self.store = store
         self.llmFactory = llmFactory ?? ChatRoomLLMProviderFactoryImpl(approvalManager: approvalManager)
@@ -86,6 +88,7 @@ public final class ChatRoomLoop {
         self.contextBudgetTokens = contextBudgetTokens
         self.engineProvider = engineProvider
         self.mcpToolsProvider = mcpToolsProvider
+        self.auditLogger = auditLogger
     }
 
     /// 发言进行中的用户插话：进入当前发言的 steering 队列，由 AgentLoop 在
@@ -570,6 +573,7 @@ public final class ChatRoomLoop {
             }
 
             try Task.checkCancellation()
+            let approvalPolicy = approvalManager.policyStore.load()
             let config = AgentLoopConfig(
                 model: engine.model,
                 llm: engine.llm,
@@ -588,13 +592,17 @@ public final class ChatRoomLoop {
                         roleName: role.name
                     )
                 },
-                dangerEvaluator: DangerEvaluator(),
+                toolApprovalTracker: approvalManager.tracker,
+                dangerEvaluator: DangerEvaluator(policy: approvalPolicy,
+                    llmSupplementEnabled: approvalPolicy.llmSupplementEnabled),
+                dangerCache: DangerAssessmentCache(),
                 // 项目根内文件操作免审批（PROJECT-SCOPE-AUTO-APPROVE）：
                 // 根 = 聊天室 projectPath，开关走持久化策略。
                 projectScope: ProjectScopePolicy(
                     root: projectURL,
-                    isEnabled: ApprovalPolicyStore().load().projectScopeAutoApprove
-                )
+                    isEnabled: approvalPolicy.projectScopeAutoApprove
+                ),
+                auditLogger: auditLogger
             )
 
             let stream = AgentLoop().run(

@@ -225,6 +225,9 @@ public actor ChatRoomToolExecutor {
 
         switch result {
         case .approved:
+            guard !Task.isCancelled else {
+                return ChatRoomToolResult(toolCallID: toolCallID, output: "写入已取消", isError: true)
+            }
             break // 继续执行
         case .rejected(let reason):
             return ChatRoomToolResult(

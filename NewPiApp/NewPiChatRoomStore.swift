@@ -73,7 +73,8 @@ final class ChatRoomFlowController: ObservableObject {
                 return ChatRoomRoleEngine(llm: llm, model: model)
             },
             // Phase B：MCP 工具注入
-            mcpToolsProvider: { await MCPToolLoader.loadAgentTools() }
+            mcpToolsProvider: { await MCPToolLoader.loadAgentTools() },
+            auditLogger: store.approvalAuditLogger(for: chatroom.id)
         )
         // 历史消息在控制器创建时加载一次（原 DetailView.onAppear 的 loadMessages 上移）。
         self.runtime.messages = (try? store.loadMessages(for: chatroom.id)) ?? []
@@ -148,6 +149,16 @@ final class ChatRoomFlowController: ObservableObject {
     /// 未决审批会被 approvalManager 以「已取消」拒绝并唤醒循环。
     func cancelRunning() {
         runningTask?.cancel()
+    }
+
+    func clearToolAuthorizations() {
+        guard !isBusy else { return }
+        // 重置期间也阻止启动发言，避免授权检查与 reset 交错。
+        isTaskActive = true
+        runningTask = Task {
+            defer { runningTask = nil; isTaskActive = false }
+            await approvalManager.clearRememberedApprovals()
+        }
     }
 
     /// Task 刚创建、模型正在输出或工具审批等待期间都视为忙碌。

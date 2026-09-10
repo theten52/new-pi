@@ -32,6 +32,11 @@ public final class ChatRoomStore: Sendable {
     }
     
     // MARK: - ChatRoom CRUD
+
+    /// 审批审计与聊天室一起存储，删除聊天室时一并清理；不使用 Session 的全局授权文件。
+    public func approvalAuditLogger(for id: String) -> ToolApprovalAuditLogger {
+        ToolApprovalAuditLogger(fileURL: chatroomDirectory(for: id).appendingPathComponent("approval-audit.jsonl"))
+    }
     
     /// 保存聊天室配置
     public func save(_ chatroom: ChatRoom) throws {

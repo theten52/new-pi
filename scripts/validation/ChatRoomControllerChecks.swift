@@ -155,6 +155,29 @@ struct ChatRoomControllerChecks {
         store.refreshWorkingDirectories()
         precondition(observations.storeChanges == beforeRefresh, "Unchanged directory health must not notify")
 
+        // 工具授权清除是独立的短任务；运行中不能清除，清除期间不能启动新发言。
+        let grantTask = Task {
+            await controller.approvalManager.approvalDecision(
+                for: ToolApprovalRequest(id: "remembered", toolName: "bash", arguments: .object([:]), summary: "mock"),
+                roleID: "role", roleName: "Role")
+        }
+        for _ in 0..<100 where controller.approvalManager.pendingApprovals.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let grantID = controller.approvalManager.pendingApprovals.first!.id
+        controller.approvalManager.approve(id: grantID, scope: .session)
+        let grant = await grantTask.value
+        precondition(grant == .allowSession)
+        controller.runtime.isRunning = true
+        controller.clearToolAuthorizations()
+        precondition(controller.approvalManager.hasRememberedApprovals)
+        controller.runtime.isRunning = false
+        controller.clearToolAuthorizations()
+        precondition(controller.isTaskActive)
+        controller.triggerNextSpeaker()
+        for _ in 0..<100 where controller.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+        precondition(!controller.isBusy && !controller.approvalManager.hasRememberedApprovals)
+
         // 移除控制器订阅后，外部保留的旧控制器不能继续使列表失效。
         try store.delete(room)
         let afterDelete = observations.storeChanges

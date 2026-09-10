@@ -1613,9 +1613,11 @@ struct ChatRoomDetailView: View {
         .sheet(item: pendingApprovalItem) { approval in
             ChatRoomApprovalSheet(
                 approval: approval,
-                onApprove: { approvalManager.approve(id: approval.id) },
+                chatroom: runtime.chatroom,
+                onApprove: { scope in approvalManager.approve(id: approval.id, scope: scope) },
                 onReject: { approvalManager.reject(id: approval.id) }
             )
+            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showingEditConfig) {
             EditChatRoomView(
@@ -1679,6 +1681,10 @@ struct ChatRoomDetailView: View {
                     showingEditConfig = true
                 }
                 .disabled(runtime.isRunning)
+                Button("清除本聊天室工具授权") {
+                    controller.clearToolAuthorizations()
+                }
+                .disabled(controller.isBusy || !approvalManager.hasRememberedApprovals)
                 Divider()
                 Button("停止当前运行") {
                     controller.cancelRunning()
@@ -2074,46 +2080,19 @@ struct VoteSheet: View {
 
 struct ChatRoomApprovalSheet: View {
     let approval: ChatRoomApprovalManager.PendingApproval
-    let onApprove: () -> Void
+    let chatroom: ChatRoom
+    let onApprove: (ApprovalScope) -> Void
     let onReject: () -> Void
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("工具审批", systemImage: "checkmark.shield")
-                .font(.headline)
-
-            HStack {
-                Image(systemName: "person.fill")
-                    .foregroundStyle(.secondary)
-                Text(approval.roleName.isEmpty ? "未知角色" : approval.roleName)
-                    .font(.subheadline)
-                Spacer()
-            }
-
-            ScrollView {
-                Text(approval.description)
-                    .font(.callout)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-
-            HStack {
-                Spacer()
-                Button("拒绝", role: .destructive) {
-                    onReject()
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                Button("批准") {
-                    onApprove()
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
+        NewPiApprovalContent(request: approval.request,
+            chatroom: .init(name: chatroom.name,
+                role: approval.roleName.isEmpty ? "未知角色" : approval.roleName,
+                directory: chatroom.projectPath)) { decision in
+            if decision.approved { onApprove(decision.scope) }
+            else { onReject() }
         }
-        .padding()
-        .frame(minWidth: 440, minHeight: 300)
+        .id(approval.id)
     }
 }
 
