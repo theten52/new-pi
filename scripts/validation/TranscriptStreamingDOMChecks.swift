@@ -78,11 +78,47 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         check(!!answer.querySelector('pre code'), 'final markdown must retain code block');
         check(node('user').textContent.includes('User steering'), 'user steering must not disappear');
         apply([{op:'forkLock',locked:false}]);
+        if (benchmark) {
+          const results = [];
+          const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          for (const [name, count, tools] of [['short',20,false], ['long',500,false], ['tools',200,true]]) {
+            const ops = [{op:'reset'}, {op:'forkLock',locked:true}];
+            for (let i=0; i<count; i++) {
+              if (tools) {
+                ops.push({op:'upsert',id:`g${i}`,kind:'detailGroup',detailTurnID:`s${i}`,collapsed:true,body:''});
+                ops.push({op:'upsert',id:`t${i}`,kind:'thinking',detailTurnID:`s${i}`,body:'Reasoning. '.repeat(100),streaming:false});
+                ops.push({op:'upsert',id:`c${i}`,kind:'tool',detailTurnID:`s${i}`,toolName:'read',command:'file.swift',body:'Tool output\n'.repeat(100),streaming:false});
+              }
+              ops.push({op:'upsert',id:`a${i}`,kind:'assistant',body:`History ${i} text. `.repeat(80),streaming:false});
+            }
+            ops.push({op:'upsert',id:'live',kind:'assistant',body:'Streaming',streaming:true});
+            const coldStart = performance.now();
+            apply(ops);
+            const coldApplyMs = performance.now()-coldStart;
+            await frames();
+            const times=[];
+            let body='Streaming';
+            for(let i=0;i<30;i++) {
+              body+=' delta';
+              const start=performance.now();
+              apply([{op:'upsert',id:'live',kind:'assistant',body,streaming:true}]);
+              times.push(performance.now()-start);
+              await frames();
+            }
+            times.sort((a,b)=>a-b);
+            results.push({name, rows:document.querySelectorAll('.ti').length, updates:30,
+              coldApplyMs, applyP50ms:times[14], applyP95ms:times[27]});
+          }
+          // JS synchronous apply timings include serialization and forced layout, not GPU/frame presentation.
+          return JSON.stringify({benchmark:'WKWebView synchronous apply; not end-to-end latency', results},null,2);
+        }
         return 'PASS: WKWebView non-last streaming, stable DOM, thinking expansion, message finalization, steering retained';
         """#
         Task { @MainActor in
             do {
-                let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
+                let result = try await webView.callAsyncJavaScript(script,
+                    arguments: ["benchmark": ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_PERFORMANCE"] == "1"],
+                    in: nil, contentWorld: .page)
                 print(result ?? "missing result")
                 exit(0)
             } catch { print("FAIL: \(error)"); exit(1) }
@@ -101,7 +137,8 @@ struct Runner {
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         let runner = TranscriptStreamingDOMChecks(root: root)
         try runner.run()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { print("FAIL: WebView test timeout"); exit(1) }
+        let timeout: Double = ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_PERFORMANCE"] == "1" ? 120 : 20
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { print("FAIL: WebView test timeout"); exit(1) }
         withExtendedLifetime(runner) { NSApp.run() }
     }
 }

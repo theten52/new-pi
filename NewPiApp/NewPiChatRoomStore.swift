@@ -32,12 +32,13 @@ final class ChatRoomFlowController: ObservableObject {
     /// providers.json 读取器：自动压缩预算 + 角色引擎构造都需要各角色配置
     private let configStore = ProviderConfigStore()
 
-    init(chatroom: ChatRoom) {
+    init(chatroom: ChatRoom, store: ChatRoomStore = .shared) {
         let manager = ChatRoomApprovalManager()
         self.approvalManager = manager
         self.runtime = ChatRoomRuntime(chatroom: chatroom)
         self.directoryIssue = ChatRoomWorkingDirectory.issue(for: chatroom.projectPath)
         self.loop = ChatRoomLoop(
+            store: store,
             approvalManager: manager,
             // 决策 #7（2026-09-05 调整）：自动压缩预算 = 各角色最小 context window
             contextBudgetTokens: { [configStore] room in
@@ -75,7 +76,7 @@ final class ChatRoomFlowController: ObservableObject {
             mcpToolsProvider: { await MCPToolLoader.loadAgentTools() }
         )
         // 历史消息在控制器创建时加载一次（原 DetailView.onAppear 的 loadMessages 上移）。
-        self.runtime.messages = (try? ChatRoomStore.shared.loadMessages(for: chatroom.id)) ?? []
+        self.runtime.messages = (try? store.loadMessages(for: chatroom.id)) ?? []
         // 转发 runtime / approvalManager 的变更，view 侧只需 @ObservedObject 本控制器。
         runtime.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
@@ -86,7 +87,8 @@ final class ChatRoomFlowController: ObservableObject {
     }
 
     func refreshWorkingDirectory() {
-        directoryIssue = ChatRoomWorkingDirectory.issue(for: runtime.chatroom.projectPath)
+        let issue = ChatRoomWorkingDirectory.issue(for: runtime.chatroom.projectPath)
+        if directoryIssue != issue { directoryIssue = issue }
     }
 
     private func validateWorkingDirectory() -> Bool {
@@ -154,8 +156,21 @@ final class ChatRoomFlowController: ObservableObject {
         isTaskActive || runtime.isRunning || !approvalManager.pendingApprovals.isEmpty
     }
 
-    /// 消息 → transcript items（CHATROOM-FLAT-MD Phase 2，视图每次更新时调用；
-    /// O(n) 全量重算，聊天室消息量级小，可接受）。
+    /// 列表只需要忙碌状态的翻转，不需要正文/Thinking/用量的每次发布。
+    /// 使用 publisher 的新值组合；@Published 在 willSet 发射，此时读取 isBusy 会得到旧值。
+    var busyChanges: AnyPublisher<Bool, Never> {
+        Publishers.CombineLatest3(
+            $isTaskActive,
+            runtime.$isRunning,
+            approvalManager.$pendingApprovals.map { !$0.isEmpty }
+        )
+        .map { taskActive, running, awaitingApproval in taskActive || running || awaitingApproval }
+        .removeDuplicates()
+        .eraseToAnyPublisher()
+    }
+
+    /// 消息 → transcript items，仍按视图更新全量适配。
+    /// 本轮只隔离列表通知；适配成本用 check-chatroom-performance.sh 跟踪。
     func transcriptSnapshot() -> (items: [NewPiTranscriptItem], tintHues: [UUID: Int]) {
         transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles, liveSpeech: runtime.liveSpeech)
     }
@@ -205,29 +220,33 @@ final class ChatRoomRuntimeStore: ObservableObject {
     @Published private(set) var directoryIssues: [String: ChatRoomWorkingDirectory.Issue] = [:]
     private var controllers: [String: ChatRoomFlowController] = [:]
     private var chatroomSyncCancellables: [String: AnyCancellable] = [:]
-    private var controllerChangeCancellables: [String: AnyCancellable] = [:]
-    private init() {
+    private var controllerChangeCancellables: [String: Set<AnyCancellable>] = [:]
+    private let store: ChatRoomStore
+
+    init(store: ChatRoomStore = .shared) {
+        self.store = store
         reload()
     }
 
     /// 聊天室与 Session 的当前项目相互独立：每个聊天室保存自己的工作目录，
     /// 因此侧边栏始终展示全部聊天室，不随 Session 切换项目而过滤或取消运行。
     func reload() {
-        chatrooms = (try? ChatRoomStore.shared.listAll()) ?? []
+        chatrooms = (try? store.listAll()) ?? []
         refreshWorkingDirectories()
     }
 
     func refreshWorkingDirectories() {
-        directoryIssues = Dictionary(uniqueKeysWithValues: chatrooms.compactMap { room in
+        let issues = Dictionary(uniqueKeysWithValues: chatrooms.compactMap { room in
             ChatRoomWorkingDirectory.issue(for: room.projectPath).map { (room.id, $0) }
         })
+        if directoryIssues != issues { directoryIssues = issues }
         for controller in controllers.values { controller.refreshWorkingDirectory() }
     }
 
     /// 取（或惰性创建）某聊天室的流程控制器。
     func controller(for chatroom: ChatRoom) -> ChatRoomFlowController {
         if let existing = controllers[chatroom.id] { return existing }
-        let controller = ChatRoomFlowController(chatroom: chatroom)
+        let controller = ChatRoomFlowController(chatroom: chatroom, store: store)
         controllers[chatroom.id] = controller
         // runtime.chatroom 随流程推进变化（阶段/轮数），同步回列表镜像让徽章即时刷新
         //（替代原 sheet onDismiss 的 loadChatrooms 刷新依赖）。
@@ -236,10 +255,17 @@ final class ChatRoomRuntimeStore: ObservableObject {
                 guard let self, let index = self.chatrooms.firstIndex(where: { $0.id == updated.id }) else { return }
                 self.chatrooms[index] = updated
             }
-        // sidebar 的编辑/删除/导出禁用状态依赖 controller.isBusy；把 controller 的
-        // runtime、审批和任务状态变化继续转发给 store，避免菜单显示滞后。
-        controllerChangeCancellables[chatroom.id] = controller.objectWillChange
-            .sink { [weak self] in self?.objectWillChange.send() }
+        // 跳过订阅的初始值，避免 body 中惰性创建控制器时再次使整个根视图失效。
+        // 仍同步发布忙碌边界，删除等命令继续直接读取 controller.isBusy 做最终守卫。
+        controller.busyChanges.dropFirst()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &controllerChangeCancellables[chatroom.id, default: []])
+        controller.$directoryIssue.removeDuplicates().dropFirst()
+            .sink { [weak self] issue in
+                guard let self, self.directoryIssues[chatroom.id] != issue else { return }
+                self.directoryIssues[chatroom.id] = issue
+            }
+            .store(in: &controllerChangeCancellables[chatroom.id, default: []])
         return controller
     }
 
@@ -264,7 +290,7 @@ final class ChatRoomRuntimeStore: ObservableObject {
         guard !isRunning(chatroomID: chatroom.id) else {
             throw ChatRoomRuntimeStoreError.cannotDeleteWhileRunning
         }
-        try ChatRoomStore.shared.delete(id: chatroom.id)
+        try store.delete(id: chatroom.id)
         controllers.removeValue(forKey: chatroom.id)
         chatroomSyncCancellables.removeValue(forKey: chatroom.id)
         controllerChangeCancellables.removeValue(forKey: chatroom.id)

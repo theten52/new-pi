@@ -107,3 +107,23 @@ macOS + Swift 6 环境运行 `scripts/validation/check-chatroom-controller.sh`�
 - `scripts/validation/check-chatroom-rendering.sh`：编译真实条目模型、共享流式判定和聊天室适配器，覆盖插话、Thinking、分段、完成态、中断标记及 Session 兼容。
 - `scripts/validation/check-transcript-dom.sh`：使用独立 WKWebView 加载真实 JS/CSS，验证非末尾消息继续流式、DOM 身份、卡片手动展开、正文定型；需要 macOS 图形登录会话，不发送模型请求。
 - Swift Package 的 `ChatRoomRenderingTests.swift` 覆盖 120ms 缓冲、事件/审批顺序、取消/失败保留及磁盘重载顺序。
+
+## 聊天室性能基线
+
+`bash scripts/validation/check-chatroom-performance.sh` 使用真实控制器、适配器和签名函数，输出短对话、长对话、多工具历史的 CSV。
+每个场景先预热，再合成 100 次正文更新；统计 Store/详情通知数，以及适配和签名比较的 P50/P95。
+Swift 探针以 `-O` 编译，链接 Debug Core；不是整个 Release App 的帧率测试。
+只读现有存储、不保存合成聊天室，不访问模型。
+
+对比通知优化前后（不切分支、不修改工作区）：
+
+```bash
+NEWPI_CONTROLLER_REVISION=e7b1daf bash scripts/validation/check-chatroom-performance.sh
+NEWPI_EXPECT_FILTERED_NOTIFICATIONS=1 bash scripts/validation/check-chatroom-performance.sh
+```
+
+`NEWPI_CONTROLLER_REVISION` 仅替换该基准中的控制器源码，要求与当前数据类型兼容；并非任意历史版本的完整 App 对比。
+
+`NEWPI_TRANSCRIPT_PERFORMANCE=1 bash scripts/validation/check-transcript-dom.sh` 在独立 WKWebView 中测量真实 JS/CSS 的首次载入和 30 次增量 apply。
+该计时包含同步 JSON 序列化、DOM 修改及被触发的同步布局，不含 Swift→JS 跨进程排队、异步绘制、GPU 提交和屏幕呈现。
+三个 DOM 场景与原生基准的体量相近，但不保证条目组成逐项相同（原生适配器还会插入阶段行）。
