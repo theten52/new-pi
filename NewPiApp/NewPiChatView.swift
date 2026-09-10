@@ -381,15 +381,14 @@ struct NewPiComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
         textView.placeholder = placeholder
-        textView.isEditable = !isDisabled
-        textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
-        // 发送后外部把 text 清空：同步回 textView（guard 防止打字途中回写打断输入）。
-        if textView.string != text {
-            textView.string = text
-            textView.scrollToEndOfDocument(nil)
+        if textView.isEditable != !isDisabled {
+            textView.isEditable = !isDisabled
         }
+        textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
+        context.coordinator.synchronizeText(text)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NewPiComposerTextView
         weak var textView: NewPiComposerInnerTextView?
@@ -398,8 +397,20 @@ struct NewPiComposerTextView: NSViewRepresentable {
             self.parent = parent
         }
 
+        func synchronizeText(_ text: String) {
+            guard let textView else { return }
+            // IME marked text 属于 AppKit 的未提交编辑，和 Binding 暂时不同是正常状态。
+            // 流式输出会反复调用 updateNSView，不能把旧 Binding 当成清空/替换命令。
+            guard !textView.hasMarkedText() else { return }
+            if textView.string != text {
+                textView.string = text
+                textView.scrollToEndOfDocument(nil)
+            }
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            guard !textView.hasMarkedText() else { return }
             parent.text = textView.string
         }
     }

@@ -155,3 +155,11 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 
 需要 macOS 图形登录和辅助功能权限。使用 `NEWPI_UI_DARK=1` 验证深色模式；可设置 `NEWPI_UI_SNAPSHOTS=/private/tmp/newpi-approval-ui` 保存原生窗口截图。
 探针仅验证 UI 回调，不执行命令、不写授权；临时进程退出后清理。Core 的 `ChatRoomAuthorizationTests` 覆盖真正的授权记忆、隔离、撤销、取消、兼容工具与多角色引擎链路。
+
+## 输出刷新期间输入草稿保护
+
+`NEWPI_EXPECT_DRAFT_FIX=1 bash scripts/validation/check-composer-streaming.sh` 用真实 SwiftUI `@State`、共用输入框和 AppKit NSTextInputClient 组词 API 模拟持续输出时的输入。
+覆盖普通文本/选区、未提交的中文拼音组词、空草稿多次组词、确认后发送、外部清空/恢复、同一事件循环内输入后立即发送及固定四行内部滚动。
+不调用模型、不改系统输入法或剪贴板。
+
+`NEWPI_COMPOSER_REVISION=dee1ff8 bash scripts/validation/check-composer-streaming.sh` 可复现旧代码的 `composition-preserved=false`；只在临时编译目录提取旧组件，不切换当前分支。
