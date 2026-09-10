@@ -78,6 +78,18 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         check(!!answer.querySelector('pre code'), 'final markdown must retain code block');
         check(node('user').textContent.includes('User steering'), 'user steering must not disappear');
         apply([{op:'forkLock',locked:false}]);
+        // 单文档最终渲染不能读取不用的旧高度；遗留高度上报模式仍保持测量。
+        for (const reportHeight of [false, true]) {
+          const article=document.createElement('article');
+          document.body.appendChild(article);
+          let reads=0;
+          const rect=article.getBoundingClientRect.bind(article);
+          article.getBoundingClientRect=() => { reads++; return rect(); };
+          const renderer=originalCreate(article,{reportHeight,postSnapshot:false});
+          renderer.renderFinal('Height mode check');
+          check(reportHeight ? reads>0 : reads===0, 'height reporting mode must control old-height reads');
+          article.remove();
+        }
         if (benchmark) {
           const results = [];
           const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));

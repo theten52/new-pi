@@ -495,7 +495,9 @@
     // 非流式（最终）渲染：全量重渲染 + hljs 高亮，归一化所有块
     //（例如流式结束时刚好闭合的代码围栏）
     function renderFinal(markdownSource) {
-      const preservedHeight = measureRootHeight();
+      // 单文档模式不消费旧高度。逐条插入历史时读取布局会迫使浏览器反复布局前序 DOM。
+      // 仅高度上报模式保留测量，避免冷加载出现每条消息一次无用的同步布局读取。
+      const preservedHeight = reportHeight ? measureRootHeight() : 0;
       if (reportHeight && preservedHeight > 1) {
         root.style.minHeight = preservedHeight + "px";
       }

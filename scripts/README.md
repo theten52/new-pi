@@ -127,3 +127,20 @@ NEWPI_EXPECT_FILTERED_NOTIFICATIONS=1 bash scripts/validation/check-chatroom-per
 `NEWPI_TRANSCRIPT_PERFORMANCE=1 bash scripts/validation/check-transcript-dom.sh` 在独立 WKWebView 中测量真实 JS/CSS 的首次载入和 30 次增量 apply。
 该计时包含同步 JSON 序列化、DOM 修改及被触发的同步布局，不含 Swift→JS 跨进程排队、异步绘制、GPU 提交和屏幕呈现。
 三个 DOM 场景与原生基准的体量相近，但不保证条目组成逐项相同（原生适配器还会插入阶段行）。
+
+## 历史冷加载与锚点恢复
+
+`bash scripts/validation/check-transcript-cold-load.sh` 编译真实 Coordinator、HTML 工厂、聊天室适配器和 WKWebView，使用临时生成的 500 条带代码块历史。
+对比前后的命令：
+
+```bash
+NEWPI_RENDERER_REVISION=0c5d8fc bash scripts/validation/check-transcript-cold-load.sh
+NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-load.sh
+```
+
+`NEWPI_RENDERER_REVISION` 仅在临时 App 的资源目录替换指定版本的 `markdown-renderer.js`，不修改工作区。
+测量 JSONL 读取、消息适配、外壳加载、原生 diff/编码/投递、JS apply 及首次投递后两个 RAF 的时间。
+检查多次待加载快照只投递一次、消息 ID 不重复、正文和代码非空、切回后的锚点偏差、重复快照不重复投递。
+覆盖 Session 形态首次加载、聊天室 A/B/A 冷恢复及跨类型切回；不包括 SessionManager 解码、完整 SwiftUI 导航或 Session 保活命中。
+探针使用真实生产源码，只有诊断 logger/metrics 替换为空实现，滚动 sessionID 为 nil，不写用户滚动位置。
+文件读取紧接着 fixture 写入，可能命中 OS 页缓存；不能作为真实磁盘冷读或整个 App 的首屏性能结论。
