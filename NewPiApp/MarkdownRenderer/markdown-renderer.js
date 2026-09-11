@@ -169,6 +169,55 @@
     return repaired;
   }
 
+  // 只优化顶层单围栏；列表/引用/混合块仍交给完整渲染，内容与缩进由 markdown-it 解析。
+  function singleFence(source) {
+    if (!fencePattern.test(source)) {
+      return null;
+    }
+    const tokens = markdown.parse(source, {});
+    return tokens.length === 1 && tokens[0].type === "fence" ? tokens[0] : null;
+  }
+
+  function appendFenceText(previous, source, fence) {
+    const cached = previous && previous.fence;
+    if (!cached || !fence || !source.startsWith(previous.source) ||
+        cached.info !== fence.info || cached.markup !== fence.markup) {
+      return false;
+    }
+    const text = cached.text;
+    let offset = text.length;
+    if (!fence.content.startsWith(text.data)) {
+      // markdown-it 会为未结束的末行补换行；下一批续写同一行时，只替换这一个补位。
+      offset -= 1;
+      if (offset < 0 || !text.data.endsWith("\n") ||
+          !fence.content.startsWith(text.data.slice(0, offset))) {
+        return false;
+      }
+    }
+    if (text.data !== fence.content) {
+      text.replaceData(offset, text.length - offset, fence.content.slice(offset));
+    }
+    previous.source = source;
+    return true;
+  }
+
+  function cacheFence(node, fence) {
+    if (!fence) {
+      return null;
+    }
+    const code = node.querySelector("pre code");
+    if (!code) {
+      return null;
+    }
+    if (!code.firstChild) {
+      code.appendChild(document.createTextNode(""));
+    }
+    if (code.childNodes.length !== 1 || code.firstChild.nodeType !== Node.TEXT_NODE) {
+      return null;
+    }
+    return { info: fence.info, markup: fence.markup, text: code.firstChild };
+  }
+
   // 标记出现奇数次，且最后一次出现后面紧跟非空白（可能是未闭合的起始标记）才修复；
   // 像 "2 ** 3" 这种两侧空白的不可能是加粗起始，保守不动。
   function needsClosingMarker(source, marker) {
@@ -447,17 +496,20 @@
       const split = splitBlocks(markdownSource);
       const blocks = split.blocks;
       const blockCount = blocks.length;
-      const frozenLimit = blockCount - 1;
+      const previousFrozenLimit = Math.max(0, renderedBlocks.length - 1);
 
       // 与上一帧的公共前缀（冻结块逐字节对齐）
       let common = 0;
       const maxCommon = Math.min(renderedBlocks.length, blockCount);
-      while (common < maxCommon && renderedBlocks[common].source === blocks[common]) {
+      while (common < maxCommon &&
+          renderedBlocks[common].source === blocks[common] &&
+          renderedBlocks[common].highlighted === (common < blockCount - 1)) {
         common += 1;
       }
 
-      // 冻结前缀分叉（源变短 / 内容被编辑）：退回全量重渲染
-      if (common < frozenLimit && common < renderedBlocks.length) {
+      // 上一批尾块本来就允许变化；补完尾块并新增块不算冻结前缀分叉。
+      // 高亮状态也参与比较，让未改正文的旧尾块在冻结时补上高亮。
+      if (common < previousFrozenLimit && common < blockCount) {
         while (root.firstChild) {
           root.removeChild(root.firstChild);
         }
@@ -478,13 +530,19 @@
         const blockSource = blocks[i];
         // 冻结块已完结：带 hljs 高亮渲染；尾块流式渲染（无高亮 + 修复未闭合结构）
         const renderSource = isTail ? repairTailSource(blockSource, split.tailFenceMarker) : blockSource;
+        const fence = isTail ? singleFence(renderSource) : null;
+        // 保留 pre/code/按钮和 Text 节点身份，避免每个 delta 重建整个增长中的代码表面。
+        if (isTail && appendFenceText(renderedBlocks[i], blockSource, fence)) {
+          continue;
+        }
         const node = renderBlockNode(renderSource, !isTail);
+        const rendered = { source: blockSource, node: node, highlighted: !isTail, fence: cacheFence(node, fence) };
         if (i < renderedBlocks.length) {
           root.replaceChild(node, renderedBlocks[i].node);
-          renderedBlocks[i] = { source: blockSource, node: node };
+          renderedBlocks[i] = rendered;
         } else {
           root.appendChild(node);
-          renderedBlocks.push({ source: blockSource, node: node });
+          renderedBlocks.push(rendered);
         }
       }
 

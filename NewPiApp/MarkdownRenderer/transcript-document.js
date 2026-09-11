@@ -190,6 +190,7 @@
       // 平滑滚动持续数百毫秒：期间抑制用户接管误判（时间戳写到未来）
       this.lastProgrammaticScrollAt = Date.now() + 700;
       state.el.scrollIntoView({ block: "start", behavior: "smooth" });
+      Poller.arm();
     },
 
     scrollToBottom: function (smooth) {
@@ -280,6 +281,11 @@
       this.raf = null;
       if (performance.now() > this.activeUntil) {
         this.heights.clear();
+        // 到达边界的滚轮/同位置跳转可能不产生 scrollend，仍需恢复空闲预热。
+        if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
+          Scroll.onScrollSettled();
+          Warmer.schedule();
+        }
         return;
       }
       // pinnedBottom / jumpingToTarget / restoringAnchor 由各自意图逻辑持滚动权，不补偿。
@@ -343,7 +349,8 @@
     pending: false,
 
     schedule: function () {
-      if (this.pending) {
+      if (this.pending || forkLocked ||
+          Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
         return;
       }
       this.pending = true;
@@ -357,11 +364,10 @@
     },
 
     runChunk: function () {
-      // 用户主动滚动/跳转中让路（避免滚动中塞布局工作），稍后再试。
+      // 用户主动滚动/跳转中让路，由滚动结束重新唤醒，不持续排空转计时器。
       // restoringAnchor 不让路：恢复 RAF 每帧都在校正锚点，预热的高度变化
       // 会被同一纪律覆盖——否则会白等 3s 恢复窗口，用户恰在这几秒内开始滚动。
       if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
-        this.schedule();
         return;
       }
       // 流式期间暂停预热（实验：BACKLOG-STALL 根因验证）。
@@ -369,7 +375,6 @@
       // 让 applyOps 排队等待，表现就是「输出暂停、滚动一泵就续上」。
       // 流式结束后（forkLocked=false）恢复预热；代价是流式期间滚动条高度略虚。
       if (forkLocked) {
-        this.schedule();
         return;
       }
       const kids = main.children;
@@ -1097,6 +1102,9 @@
         // 锁住（进入流式）或解锁（流式结束）都只影响 fork 按钮，历史条目自身 streaming 位不变。
         const wasLocked = forkLocked;
         forkLocked = !!op.locked;
+        if (wasLocked && !forkLocked) {
+          Warmer.schedule();
+        }
         const forkButtons = main.querySelectorAll(".ti-action-fork");
         for (let i = 0; i < forkButtons.length; i += 1) {
           const btn = forkButtons[i];
