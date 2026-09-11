@@ -1575,7 +1575,13 @@ struct ChatRoomDetailView: View {
     /// 平铺模式下视图显隐不再影响讨论流程。
     @ObservedObject var controller: ChatRoomFlowController
 
-    @State private var inputText = ""
+    @ObservedObject private var draft: NewPiComposerDraft
+
+    init(viewModel: NewPiViewModel, controller: ChatRoomFlowController) {
+        self.viewModel = viewModel
+        self.controller = controller
+        _draft = ObservedObject(wrappedValue: controller.composerDraft)
+    }
     @State private var showingVoteSheet = false
     @State private var showingRolePicker = false
     @State private var showingEndDiscussionDialog = false
@@ -1821,7 +1827,7 @@ struct ChatRoomDetailView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     // 保留聊天室运行中 Return 插话的既有行为，不把它改成停止。
                     NewPiComposerTextView(
-                        text: $inputText,
+                        text: $draft.text,
                         placeholder: runtime.isRunning ? "写下你的补充，Return 发送插话…" : "向聊天室发送消息…",
                         onSubmit: sendUserMessage
                     )
@@ -1839,11 +1845,11 @@ struct ChatRoomDetailView: View {
                             .buttonStyle(.borderless)
                             .font(.caption)
                             .opacity(runtime.isRunning ? 1 : 0)
-                            .disabled(!runtime.isRunning || inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(!runtime.isRunning || draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityHidden(!runtime.isRunning)
                         NewPiComposerPrimaryAction(
                             isRunning: runtime.isRunning,
-                            canSend: !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                            canSend: !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                             onSend: sendUserMessage,
                             onStop: { controller.cancelRunning() }
                         )
@@ -2053,10 +2059,10 @@ struct ChatRoomDetailView: View {
     // MARK: - 辅助方法
 
     private func sendUserMessage() {
-        let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         controller.userSpeak(content: content)
-        inputText = ""
+        draft.text = ""
         // 发送 = 明确要看最新内容的意图（与 Session 面板 sendComposerInput 对齐，
         // PIN-FIX）：显式钉底。否则用户停在中部时讨论输出按保锚纪律不跟随，
         // 看起来像没反应；且发言到流式首批 forkLock 之间没有任何重新武装机制。

@@ -37,9 +37,14 @@ struct NewPiSessionPanel: View {
     @ObservedObject var runtime: SessionRuntime
     @ObservedObject var viewModel: NewPiViewModel
 
-    @State private var input = ""
-    /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
-    @State private var draftAttachments: [DraftImageAttachment] = []
+    /// 草稿归 runtime 所有；只观察此对象，不让逐键输入通知根列表。
+    @ObservedObject private var draft: NewPiComposerDraft
+
+    init(runtime: SessionRuntime, viewModel: NewPiViewModel) {
+        self.runtime = runtime
+        self.viewModel = viewModel
+        _draft = ObservedObject(wrappedValue: runtime.composerDraft)
+    }
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
 
@@ -156,13 +161,13 @@ struct NewPiSessionPanel: View {
 
             NewPiComposerSurface {
                 VStack(alignment: .leading, spacing: 8) {
-                    if !draftAttachments.isEmpty {
-                        NewPiDraftAttachmentStrip(drafts: $draftAttachments)
+                    if !draft.attachments.isEmpty {
+                        NewPiDraftAttachmentStrip(drafts: $draft.attachments)
                     }
 
                     // 只换外壳；保持 NSTextView、四行视口与 IME/草稿同步机制不变。
                     NewPiComposerTextView(
-                        text: $input,
+                        text: $draft.text,
                         isDisabled: false,
                         placeholder: runtime.isStreaming ? "先写下一条消息，当前任务结束后发送…" : "继续提问，或告诉 NewPi 下一步做什么…",
                         onSubmit: sendComposerInput,
@@ -184,7 +189,7 @@ struct NewPiSessionPanel: View {
                         Spacer(minLength: 8)
                         NewPiComposerPrimaryAction(
                             isRunning: runtime.isStreaming,
-                            canSend: !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty,
+                            canSend: !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.attachments.isEmpty,
                             onSend: sendComposerInput,
                             onStop: { viewModel.abort() }
                         )
@@ -218,16 +223,16 @@ struct NewPiSessionPanel: View {
     }
 
     private func sendComposerInput() {
-        let text = input
-        let drafts = draftAttachments
+        let text = draft.text
+        let drafts = draft.attachments
         // 空文本 + 有图片也可发送（识图场景常只发图）；拦截与体积校验在 ViewModel.send。
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty,
               !runtime.isStreaming else { return }
         // 只有消息通过模型能力、附件体积与落盘等全部校验并真正进入会话后，
         // 才清空草稿。失败时保留用户文本和图片，便于修正配置后重试。
         guard viewModel.send(text, draftAttachments: drafts) else { return }
-        input = ""
-        draftAttachments = []
+        draft.text = ""
+        draft.attachments = []
         // 发送 = 明确要看最新内容的意图（聊天应用惯例）：显式钉底，
         // 否则用户停在中部时，流式输出按保锚纪律不跟随（看起来像没反应）。
         docController.scrollToBottom()
@@ -251,7 +256,7 @@ struct NewPiSessionPanel: View {
             NSSound.beep()
             return
         }
-        draftAttachments.append(contentsOf: newDrafts)
+        draft.attachments.append(contentsOf: newDrafts)
     }
 }
 

@@ -187,6 +187,8 @@ struct TokenRateTracker {
 /// runtime 会被映射到 ViewModel 的 @Published 属性上。
 @MainActor
 final class SessionRuntime: ObservableObject {
+    /// 独立观察的易失草稿；详情视图切到聊天室再重建时继续复用。
+    let composerDraft = NewPiComposerDraft()
     var latencyTrace: RequestLatencyTrace?
     var latencyFirstTextItemID: UUID?
     let session: AgentSession

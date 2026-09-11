@@ -249,6 +249,19 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 
 ## 输出刷新期间输入草稿保护
 
+### 导航重建与草稿归属
+
+`bash scripts/validation/check-draft-navigation.sh` 提取生产草稿声明、初始化、绑定及 Session 提交守卫，
+用真实运行时/控制器和 NSTextView 验证强制重建后的 Session/Room 草稿隔离、图片保留、接受/拒绝发送与父级零通知。
+ViewModel 发送后端和 transcript 渲染是测试替身；不等于正式 App 导航、模型发送或图片采集验收。
+Session 不启动事件循环，聊天室用临时存储及空角色配置，不访问用户会话、不调用模型；需要 macOS 图形会话，不请求 AX 权限。
+
+`NEWPI_DRAFT_REVISION=61259c1 bash scripts/validation/check-draft-navigation.sh` 在临时目录提取旧版生产声明，
+会在 Room A→B→A 保留断言失败；不切分支、不覆盖工作区。仅用于相容版本的失败对照，非任意版本完整构建。
+生命周期边界见[修复记录](../docs/dev-notes/2026-09-12-navigation-draft-lifetime.md)。
+
+### 流式刷新与输入法组词
+
 `NEWPI_EXPECT_DRAFT_FIX=1 bash scripts/validation/check-composer-streaming.sh` 用真实 SwiftUI `@State`、共用输入框和 AppKit NSTextInputClient 组词 API 模拟持续输出时的输入。
 覆盖普通文本/选区、未提交的中文拼音组词、空草稿多次组词、确认后发送、外部清空/恢复、同一事件循环内输入后立即发送及固定四行内部滚动。
 不调用模型、不改系统输入法或剪贴板。

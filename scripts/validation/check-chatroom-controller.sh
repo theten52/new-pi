@@ -10,6 +10,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 xcrun swiftc -swift-version 6 -parse-as-library -I "$BIN/Modules" \
   "$ROOT/NewPiApp/NewPiChatRoomStore.swift" \
+  "$ROOT/NewPiApp/NewPiComposerDraft.swift" "$ROOT/NewPiApp/ImageAttachmentProcessor.swift" \
   "$ROOT/scripts/validation/ChatRoomControllerChecks.swift" \
   "$BIN"/NewPiCore.build/*.o -o "$TMP/check"
 "$TMP/check"

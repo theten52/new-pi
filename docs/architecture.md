@@ -179,6 +179,11 @@ transcript-document.css                  → content-visibility 与 intrinsic he
 不使用普通会话的分支树。切换聊天室视图可重建 WebView，但不会销毁正在运行的控制器。
 详见 [聊天室设计](chatroom-design.md)。
 
+输入草稿由各 `SessionRuntime` / `ChatRoomFlowController` 持有独立 `NewPiComposerDraft`，
+输入面板直接观察草稿，父运行时及根列表不转发逐键通知。视图重建不清草稿，但 runtime 淘汰、
+切项目或退出后的保留不在保证内；没有磁盘草稿持久化。实现与验证见
+[草稿生命周期记录](dev-notes/2026-09-12-navigation-draft-lifetime.md)。
+
 ## MCP plugins (Phase 7a)
 
 External tools via [Model Context Protocol](https://modelcontextprotocol.io/) stdio servers.
