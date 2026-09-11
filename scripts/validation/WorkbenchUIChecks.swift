@@ -33,6 +33,7 @@ private final class WorkbenchModel: ObservableObject {
     let controller = TranscriptDocumentController()
     // 几何读数仅供断言，不参与视图布局与滚动，也不触发新一轮发布。
     var frames: [String: CGRect] = [:]
+    weak var coordinateView: NSView?
     var sends = 0
     var stops = 0
     var submitAttempts = 0
@@ -139,6 +140,7 @@ private struct WorkbenchRoot: View {
                         isActive: model.running),
                     usageText: metric(0), lastTurnUsageText: metric(1), cacheHitRateText: metric(2),
                     contextText: metric(3), tokenRateText: metric(4))
+                    .measure("status", model: model)
 
                 NewPiComposerSurface {
                     VStack(alignment: .leading, spacing: 8) {
@@ -181,11 +183,27 @@ private struct WorkbenchRoot: View {
         }
         .background(NewPiWorkbenchStyle.surface)
         .coordinateSpace(name: "workbench")
+        .background(WorkbenchCoordinateView(model: model))
     }
 
     private func metric(_ index: Int) -> String? {
         model.hasMetrics ? WorkbenchModel.metrics[index] : nil
     }
+}
+
+/// 仅把探针里的 SwiftUI 坐标转换到所属 NSWindow，不拦截事件、不影响布局。
+private struct WorkbenchCoordinateView: NSViewRepresentable {
+    let model: WorkbenchModel
+    final class Anchor: NSView {
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> Anchor {
+        let view = Anchor()
+        model.coordinateView = view
+        return view
+    }
+    func updateNSView(_ view: Anchor, context: Context) {}
 }
 
 /// 整窗检查使用与 root 相同的生产外壳和标签组件，列表数据固定且不访问真实存储。
@@ -315,6 +333,8 @@ struct WorkbenchUIChecks {
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentViewController = host
+        // 赋值 contentViewController 会采用其初始 fitting size；之后再设置探针的实际视口。
+        window.setContentSize(NSSize(width: 900, height: 820))
         window.title = "NewPi · 文档工作台原生验证"
         window.appearance = NSAppearance(named: .aqua)
         window.level = .floating
@@ -337,6 +357,11 @@ struct WorkbenchUIChecks {
         try require(!web.configuration.websiteDataStore.isPersistent && model.controller.sessionID == nil,
             "nonPersistent WebKit；storeKey=nil，无会话/滚动数据落盘")
         await check("Markdown 与详情交互") { try await checkDocument(web, model: model) }
+
+        if ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_INTERACTION"] == "1" {
+            try await checkMouseInteractions(model, host: host.view, window: window, web: web, editor: editor)
+            return
+        }
 
         if fullWindow {
             try await checkFullWindow(model, host: host.view, window: window, web: web, editor: editor)
@@ -734,6 +759,149 @@ struct WorkbenchUIChecks {
             }
             NSApp.sendEvent(event)
         }
+    }
+
+    /// 通过正常 AppKit 事件命中生产 SwiftUI Button；不用 AXPress 或直接调用模型回调。
+    private static func click(_ point: NSPoint, in view: NSView, window: NSWindow) async throws {
+        guard view.window === window, view.bounds.contains(point) else { throw Failure("鼠标目标不在探针窗口内") }
+        window.makeKeyAndOrderFront(nil)
+        let location = view.convert(point, to: nil)
+        let hit = window.contentView.flatMap { root in root.hitTest(root.convert(location, from: nil)) }
+        print("MOUSE: local=\(point) anchor=\(view.frame) window=\(location) key=\(window.isKeyWindow) active=\(NSApp.isActive) hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil")")
+        guard hit != nil else { throw Failure("鼠标未命中探针内容，不能把未投递的点击算作通过") }
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else {
+                throw Failure("不能创建窗口内鼠标事件")
+            }
+            // 原生控件 mouseDown 可能进入 tracking loop；两事件先排队，不能同步等待 mouseDown 返回再发 up。
+            NSApp.postEvent(event, atStart: false)
+        }
+        try await Task.sleep(for: .milliseconds(200))
+    }
+
+    // 某些 SwiftUI 节点未声明完整协议，但公开的对象返回型 NSAccessibility getter 仍可调用。
+    // 不读取私有属性，不对 CGRect/Bool 返回值使用不安全的 perform/函数指针转换。
+    private static func publicTexts(_ root: NSObject) -> [String] {
+        var pending: [NSObject] = [root], seen = Set<ObjectIdentifier>(), texts: [String] = []
+        while let object = pending.popLast(), seen.count < 2000 {
+            guard seen.insert(ObjectIdentifier(object)).inserted, !(object is WKWebView) else { continue }
+            for selector in [#selector(NSAccessibilityProtocol.accessibilityLabel),
+                             #selector(NSAccessibilityProtocol.accessibilityTitle),
+                             #selector(NSAccessibilityProtocol.accessibilityValue)] where object.responds(to: selector) {
+                if let text = object.perform(selector)?.takeUnretainedValue() as? String { texts.append(text) }
+            }
+            let children = #selector(NSAccessibilityProtocol.accessibilityChildren)
+            if object.responds(to: children), let values = object.perform(children)?.takeUnretainedValue() as? [NSObject] {
+                pending.append(contentsOf: values)
+            }
+            if let view = object as? NSView { pending.append(contentsOf: view.subviews) }
+        }
+        return texts
+    }
+
+    private static func checkMouseInteractions(_ model: WorkbenchModel, host: NSView, window: NSWindow,
+                                               web: WKWebView, editor: NewPiComposerInnerTextView) async throws {
+        try await settle(web)
+        guard let anchor = model.coordinateView else { throw Failure("缺少窗口坐标转换视图") }
+        window.makeKeyAndOrderFront(nil)
+        NSRunningApplication.current.activate(options: [])
+        try await eventually("鼠标探针窗口获得焦点") { window.isKeyWindow }
+        func type(_ text: String) async throws {
+            window.makeFirstResponder(editor)
+            editor.setSelectedRange(NSRange(location: 0, length: (editor.string as NSString).length))
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            try await settle(web)
+        }
+        func clickAction() async throws {
+            guard let rect = model.frames["action"] else { throw Failure("主按钮几何缺失") }
+            try await click(NSPoint(x: rect.midX, y: rect.midY), in: anchor, window: window)
+            try await settle(web)
+        }
+        try await type("")
+        try await clickAction()
+        try require(model.sends == 0 && model.stops == 0 && !model.running, "真实鼠标：空白主按钮不发送或停止")
+        try await type("鼠标发送的固定任务")
+        try await clickAction()
+        print("MOUSE RESULT: sends=\(model.sends) stops=\(model.stops) attempts=\(model.submitAttempts) running=\(model.running) draft=\(model.draft)")
+        try require(model.sends == 1 && model.stops == 0 && model.running && model.draft.isEmpty,
+                    "真实鼠标：发送按钮仅提交一次并清空已接受草稿")
+        try await type("停止后必须保留的下一条草稿")
+        try returnKey(window: window, editor: editor)
+        try await settle(web)
+        try require(model.sends == 1 && model.stops == 0 && model.running, "真实鼠标模式：运行中 Return 不触发停止")
+        try await clickAction()
+        try require(model.sends == 1 && model.stops == 1 && !model.running && model.draft == "停止后必须保留的下一条草稿"
+                    && editor.string == model.draft && find(in: host, as: NewPiComposerInnerTextView.self) === editor,
+                    "真实鼠标：停止按钮仅停止一次，保留同一 NSTextView 与草稿")
+
+        for populated in [true, false] {
+            model.hasMetrics = populated
+            try await settle(web)
+            guard let status = model.frames["status"] else { throw Failure("缺少状态栏几何") }
+            // 状态栏没有模型菜单；右端是固定大小的用量按钮（外侧 padding 10，文字及内边距）。
+            let point = NSPoint(x: status.maxX - 24, y: status.midY)
+            let before = Set(NSApp.windows.filter(\.isVisible).map(ObjectIdentifier.init))
+            try await click(point, in: anchor, window: window)
+            var popover: NSWindow?
+            try await eventually("真实鼠标：用量 popover 打开") {
+                popover = NSApp.windows.first { candidate in
+                    candidate.isVisible && !before.contains(ObjectIdentifier(candidate)) && candidate.contentView.map {
+                        publicTexts($0).contains("用量明细")
+                    } == true
+                }
+                return popover != nil
+            }
+            guard let popup = popover, let content = popup.contentView else { throw Failure("未找到用量窗口") }
+            let texts = publicTexts(content)
+            for title in ["累计用量", "最近一轮", "缓存命中率", "上下文占用", "输出速率"] {
+                try require(texts.contains(title), "用量弹层包含 \(title)")
+            }
+            if populated {
+                try require(WorkbenchModel.metrics.allSatisfy(texts.contains), "用量弹层显示全部五项真实传入值")
+            } else {
+                try require(texts.contains("暂无数据") && !WorkbenchModel.metrics.contains(where: texts.contains),
+                            "用量弹层无数据时不残留旧指标")
+            }
+            try await click(point, in: anchor, window: window)
+            try await eventually("真实鼠标：用量 popover 关闭") { !popup.isVisible }
+        }
+        model.hasMetrics = true
+        print("PASS: native mouse send/stop/usage interactions; no AX permission, direct callbacks or model requests")
+        if ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_FULL_WINDOW"] == "1" {
+            try await checkSidebarClick(model, host: host, window: window, web: web, editor: editor)
+        }
+        try require(failed.isEmpty, "交互模式基础 Markdown 检查无失败")
+    }
+
+    private static func checkSidebarClick(_ model: WorkbenchModel, host: NSView, window: NSWindow,
+                                          web: WKWebView, editor: NewPiComposerInnerTextView) async throws {
+        func toggleButton() -> NSView? {
+            var pending: [NSView] = [window.contentView?.superview ?? host]
+            while let view = pending.popLast() {
+                if view is NSButton && publicTexts(view).contains("显示或隐藏侧栏") { return view }
+                pending.append(contentsOf: view.subviews)
+            }
+            return nil
+        }
+        guard let button = toggleButton() else {
+            print("SKIP: 原生窗口未暴露侧栏 toolbar 按钮，不能据此认定产品按钮缺失")
+            if strict { throw Failure("strict: 无法验证侧栏鼠标开关") }
+            return
+        }
+        let originalLeft = host.convert(web.bounds, from: web).minX
+        let draft = editor.string
+        try require(originalLeft >= 225, "点击前侧栏实际可见")
+        try await click(NSPoint(x: button.bounds.midX, y: button.bounds.midY), in: button, window: window)
+        try await eventually("真实鼠标：侧栏已收起") { host.convert(web.bounds, from: web).minX < 30 }
+        guard let reopen = toggleButton() else { throw Failure("侧栏收起后失去展开按钮") }
+        try await click(NSPoint(x: reopen.bounds.midX, y: reopen.bounds.midY), in: reopen, window: window)
+        try await eventually("真实鼠标：侧栏恢复原宽度") {
+            abs(host.convert(web.bounds, from: web).minX - originalLeft) < 1
+        }
+        try require(find(in: host, as: NewPiComposerInnerTextView.self) === editor && editor.string == draft
+                    && model.draft == draft, "侧栏收起/展开保留同一输入框与草稿")
     }
 
     // 仅使用 AppKit 的进程内接口；不调用 AXUIElement、CGEvent 或需要系统权限的 UI 脚本。

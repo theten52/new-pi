@@ -1,7 +1,7 @@
 # 2026-09-12 · A 文档工作台 UI 实施与验证边界
 
 > 用户已选择 **A · 文档工作台**：第一批阅读面/输入区、第二批生产外壳/侧栏/身份栏/角色栏已接入；HTML 原型不进入生产。
-> 当前分支 `feat/document-workbench-ui`；第一批 checkpoint `eb95816`、ignore 调整 `db37b18` 已提交。
+> 当前分支 `feat/document-workbench-ui`；第一批 checkpoint `eb95816`、ignore 调整 `db37b18`、第二批外壳 `1715150` 已提交。
 > 第二批整窗布局、聊天室守卫和完整 Debug 构建已通过；布局检查不等于完整截图或全量交互验收，玻璃侧栏截图仍为 **UNVERIFIED**。第一批性能数据保留历史边界。
 
 ## 1. 选择与范围
@@ -48,7 +48,7 @@
 `NewPiAgentStatusBar` 的 popover 固定五项：累计用量、最近一轮、缓存命中率、上下文占用、输出速率。
 普通会话从 runtime/ViewModel 传入已有统计或估算；输出速率是流式文本估算，不冒充 provider 精确计量。
 每项可为 nil/空白，展示“暂无数据”，不填假数字；聊天室目前只传累计用量与上下文占用，其余保持缺省。
-存在视图与数据接线不代表真实弹层点击已经验收，见下方 AX 限制。
+后续鼠标事件探针已验证弹层实际开关及有值/无值数据，见下方鼠标验证；这不等于 VoiceOver 或真实会话计量已完整验收。
 
 ### 外观与高对比
 
@@ -109,11 +109,31 @@ fixture 读取可能命中页缓存，不能视为真实磁盘冷读性能。
 - 本机无屏幕录制权限；不请求权限、不抓桌面或其他窗口，不以 HTML 重绘替代原生截图。
 - 显式 toolbar 侧栏按钮接入后，完整 `NewPi` scheme Debug 构建最终通过（`BUILD SUCCEEDED`）；`check-chatroom-controller.sh` 通过通知隔离、目录传播、运行/审批/取消与删除守卫、订阅清理检查。未启动生产会话，未替换 `dist`，没有重新宣称第二批性能提升。
 
+### 后续：窗口内鼠标事件验证
+
+新增入口：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_INTERACTION=1 bash scripts/validation/check-transcript-cold-load.sh`。
+再加 `NEWPI_WORKBENCH_FULL_WINDOW=1` 可在生产共享分栏外壳中运行同一组交互；本轮两种模式均实跑。
+此模式验证交互而非生成截图，不运行前述全宽度/外观截图矩阵。
+
+- 使用探针自己的坐标转换视图与实测控件区域，投递 `NSEvent.leftMouseDown/leftMouseUp` 到所属 NSWindow。
+	必须命中窗口内容；不调用 send/stop 模型回调冒充按钮，也不使用系统 AX 或 CGEvent 输入权限。
+- 已验证：空白点击不发送、非空点击仅发送一次且清空接受的草稿、运行中 Return 不停止、点击停止只触发一次并保留同一 NSTextView 和下一条草稿。
+- 已验证：用量点击真正打开/关闭 popover；公开 `NSAccessibility` 对象型 getter 读取到五个标题和全部五项传入值；切换为空值后出现“暂无数据”且不残留旧值。
+	仅调用公开 label/title/value/children 接口，不强转未声明的协议，不调用私有属性，不对 CGRect/Bool 返回值做不安全转换。
+- 修正了探针尺寸：`NSWindow.contentViewController` 赋值后重新设置 900×820 视口，避免初始 fitting size 导致点击落在窗口外。
+- 完整外壳模式中的侧栏按钮定位仍 **SKIP**：独立 NSHostingController 探针未暴露可定位的原生 toolbar 按钮。
+	不据此推断正式 WindowGroup 缺少按钮；strict 模式遇到该缺口非零退出。
+
+新验证补齐的是按钮功能与弹层数据接线，不追溯把旧的 9 项 AX SKIP 改成 PASS，
+也不证明系统工具栏、完整 VoiceOver、所有宽度/外观组合的鼠标交互或真实聊天室 steering 已通过。
+本轮没有生产代码改动，没有访问真实会话、执行模型或修改系统权限。
+
 ## 4. 尚需人工验收与结果回填
 
 - [x] 回填第一批统一横向 24 后的最终 WKWebView 复跑及完整 Debug 构建结果，保留无页面焦点的 SKIP。
 - [x] 回填第一批冷加载与呈现回归的命令、数值和限制，不覆盖旧修复记录，不声称第二批性能重跑或严格性能对照。
 - [x] 回填第二批显式 toolbar 后的最终 Debug build/controller 结果；整窗布局复跑仍通过。
+- [x] 独立与整窗探针的真实鼠标送停、草稿保留、用量开关和有值/无值展示通过；系统 toolbar 定位仍 SKIP。
 - [ ] 用户实机验收第二批外壳/侧栏/唯一 header/角色栏、原生侧栏显示/隐藏与玻璃材质；完成原型同内容视觉对照，现有不完整截图不能替代。
 - [ ] 实际 App 侧边栏切换 Session/聊天室、草稿与滚动恢复；宽窄窗口目录 header 与全部阶段操作可达。
 - [ ] 实际聊天室手动推进/指定角色/讨论/投票/执行/Review/暂停收尾，运行中 Return 与显式插话、停止互不混淆。

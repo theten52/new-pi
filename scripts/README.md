@@ -189,12 +189,22 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 
 全窗口产物为同目录下 `shell-{1200,900}-{light,dark}-{session,room}.png`，但**完整截图 UNVERIFIED**：
 根 NSView `cacheDisplay` + WK snapshot 在 macOS Tahoe 的玻璃侧栏区域空白，即使尝试实际 `NSSplitView` 子视图缓存仍无有效像素。
-生成 PNG 或退出码 0 不等于完整视觉捕获，未完成与原型同内容对照验收；当前玻璃缺口只打印 `UNVERIFIED`，不保证 strict 因此失败。
+生成 PNG 或退出码 0 不等于完整视觉捕获，未完成与原型同内容对照验收；玻璃缺口计入 SKIP/PARTIAL，strict 会因此失败。
 本机无录屏权限，不请求权限、不抓桌面；独立 component 模式的按钮/popover **9 项 AX SKIP** 仍需单独解决。
 
-第一批 WK/Debug 复跑及 cold/performance 数据已记录，不能当作第二批性能重跑；完整 Debug build 已至少成功一轮，
-新显式 toolbar 侧栏按钮后的最终 build/controller 待主 agent 运行回填，不预报结果。
+第一批 WK/Debug 复跑及 cold/performance 数据已记录，不能当作第二批性能重跑；
+显式 toolbar 侧栏按钮后的完整 Debug build 和聊天室 controller 守卫最终复跑已通过。
 八项原型对照、人工验收清单及证据边界见 [实施记录](../docs/dev-notes/2026-09-12-document-workbench-ui.md)。
+
+### 原生鼠标送停与用量验证
+
+运行 `NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_INTERACTION=1 bash scripts/validation/check-transcript-cold-load.sh`。
+可追加 `NEWPI_WORKBENCH_FULL_WINDOW=1` 使用完整生产共享外壳；该模式只验证交互，不运行全尺寸截图矩阵。
+两种模式已实跑：窗口内真实鼠标事件触发送停，断言回调次数、禁用行为和草稿保留；用量 popover 实际开关，
+公开对象型可访问性 getter 核对五项传入值及无值时无旧数据。不直接调用 fixture 回调作为通过证据，不请求系统输入或录屏权限。
+
+完整窗口的侧栏 toolbar 按钮在独立宿主中仍无法定位，明确 SKIP；加 `NEWPI_WORKBENCH_UI_STRICT=1` 时因此失败。
+鼠标检查通过不等于旧 AX 按压检查或 VoiceOver 已通过，也不包括真实会话网络调用、聊天室阶段业务及全部外观组合。
 
 ## 共用审批 UI 验证
 
