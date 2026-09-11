@@ -130,6 +130,9 @@ struct NewPiSessionPanel: View {
             // 流式直连通道（STREAMING-LAYOUT-ISOLATION）：runtime ↔ 本面板控制器结对。
             // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
             runtime.docController = docController
+            if let latency = runtime.latencyTrace {
+                docController.beginLatencyTrace(latency, firstTextItemID: runtime.latencyFirstTextItemID)
+            }
         }
         .onDisappear {
             docController.setVisible(false)

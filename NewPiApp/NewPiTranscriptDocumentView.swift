@@ -15,6 +15,13 @@ final class TranscriptDocumentController: ObservableObject {
     fileprivate weak var coordinator: NewPiTranscriptDocumentView.Coordinator?
     /// 滚动锚点持久化所属会话（由视图挂载时注入）。
     var sessionID: UUID?
+    fileprivate var latencyTrace: RequestLatencyTrace?
+    fileprivate var latencyFirstTextItemID: UUID?
+
+    func beginLatencyTrace(_ trace: RequestLatencyTrace, firstTextItemID: UUID?) {
+        latencyTrace = trace
+        latencyFirstTextItemID = firstTextItemID
+    }
 
     func jumpTo(_ id: UUID) {
         coordinator?.jumpTo(id)
@@ -147,6 +154,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        private var frameProbeTrace: RequestLatencyTrace?
+        private var frameProbeTimeout: Task<Void, Never>?
         private weak var webView: WKWebView?
         private weak var controller: TranscriptDocumentController?
         private var isPageLoaded = false
@@ -221,6 +230,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         }
 
         func detach() {
+            cancelFrameProbe()
             pageGeneration += 1
             isPageLoaded = false
             isSending = false
@@ -478,15 +488,45 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             literal = literal.replacingOccurrences(of: "</", with: "<\\/")
             isSending = true
             let generation = pageGeneration
-            webView.evaluateJavaScript("window.transcriptDoc.apply(\(literal));") { [weak self] _, error in
+            var script = "window.transcriptDoc.apply(\(literal));"
+            var probe: RequestLatencyTrace?
+            if let trace = controller?.latencyTrace,
+               let itemID = controller?.latencyFirstTextItemID,
+               ops.contains(where: {
+                   $0["op"] as? String == "upsert" && $0["id"] as? String == itemID.uuidString
+                       && ($0["body"] as? String)?.isEmpty == false
+               }), trace.mark(.firstJSDispatch) {
+                probe = trace
+                cancelFrameProbe()
+                frameProbeTrace = trace
+                // 两次 RAF 仅是浏览器帧机会，不代表 CA/WindowServer 已把像素送到显示器。
+                // 参数是原生生成 UUID；模型正文仍只通过上面的 JSON 编码进入文档。
+                script += """
+                requestAnimationFrame(function() { requestAnimationFrame(function() {
+                  window.webkit.messageHandlers.uiTiming.postMessage({
+                    firstTextFrameRunID: '\(trace.id.uuidString)', documentVisible: !document.hidden
+                  });
+                }); }); void 0;
+                """
+                frameProbeTimeout = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    guard let self, self.frameProbeTrace?.id == trace.id else { return }
+                    trace.mark(.frameNotObserved)
+                }
+            }
+            let dispatchedProbe = probe
+            webView.evaluateJavaScript(script) { [weak self] _, error in
                 guard let self, self.pageGeneration == generation else { return }
                 self.isSending = false
                 if let error {
+                    dispatchedProbe?.mark(.presentationUnavailable)
+                    if dispatchedProbe != nil { self.cancelFrameProbe() }
                     // 完整打印 NSError（含 WKJavaScriptException* userInfo），localizedDescription 会丢行号。
                     NewPiLogger.error(category: "app", message: "Transcript doc apply failed", details: "\(error)")
                     self.invalidateAppliedState()
                     return
                 }
+                dispatchedProbe?.mark(.firstDOMAcknowledged)
                 self.flushPending()
             }
             // PAINT-GATE（STREAMING-LAYOUT-ISOLATION 的回归修复）：布局隔离移除了
@@ -494,6 +534,13 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             // WKWebView 的远程图层事务无人合成、画面冻结（滚动能救活同因）。
             // 派发 ops 后主动弄脏视图，把合成调度回来。代价为标记脏，实际绘制在下一 vsync。
             webView.setNeedsDisplay(.infinite)
+        }
+
+        private func cancelFrameProbe() {
+            frameProbeTimeout?.cancel()
+            frameProbeTimeout = nil
+            frameProbeTrace?.mark(.presentationUnavailable)
+            frameProbeTrace = nil
         }
 
         private func invalidateAppliedState() {
@@ -514,6 +561,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         // 单点故障对策（BACKLOG-SINGLE-DOC 风险表）：内容进程终止 = 整条 transcript 白屏。
         // 重建外壳 + 全量重放（签名表已重置，所有条目重新 upsert）。
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            cancelFrameProbe()
             NewPiLogger.error(category: "app", message: "Transcript document process terminated, rebuilding")
             invalidateAppliedState()
             // 重建后按当前会话的保存位置再恢复一次（白屏重建前刚存下的位置）。
@@ -621,6 +669,19 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             case "uiTiming":
                 // JS applyOps 耗时（DOM 应用 + 批量提交）回传 → 上报 UI 指标。
                 guard let body = message.body as? [String: Any] else { return }
+                if let runID = body["firstTextFrameRunID"] as? String {
+                    guard let trace = frameProbeTrace, trace.id.uuidString == runID else { return }
+                    if body["documentVisible"] as? Bool == true,
+                       webView?.window?.occlusionState.contains(.visible) == true {
+                        trace.mark(.firstFrameCallback)
+                    } else {
+                        trace.mark(.presentationUnavailable)
+                    }
+                    frameProbeTimeout?.cancel()
+                    frameProbeTimeout = nil
+                    frameProbeTrace = nil
+                    return
+                }
                 let duration = (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
                 let opsCount = (body["opsCount"] as? NSNumber)?.intValue ?? 0
                 // PROBE（BACKLOG-STALL 定位）：JS 执行完成时刻。与「PROBE stream flush」

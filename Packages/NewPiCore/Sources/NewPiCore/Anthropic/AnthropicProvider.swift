@@ -394,6 +394,7 @@ public struct AnthropicProvider: LLMProvider, Sendable {
                         secrets: redactionSecrets
                     )
 
+                    perf.markRequestSent()
                     let (bytes, response) = try await session.bytes(for: request)
                     perf.markResponse()
                     httpStatus = (response as? HTTPURLResponse)?.statusCode
@@ -573,6 +574,7 @@ public struct AnthropicProvider: LLMProvider, Sendable {
         hasTools: Bool
     ) -> LLMRequestMetric {
         LLMRequestMetric(
+            runID: timing.runID,
             startedAt: timing.startedAt,
             providerName: "Anthropic",
             preset: "anthropic",

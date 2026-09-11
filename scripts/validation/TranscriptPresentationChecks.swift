@@ -136,6 +136,8 @@ struct TranscriptPresentationChecks {
         defer { if let sampler, sampler.isRunning { sampler.terminate() } }
         for turn in 1...3 {
             let id = UUID()
+            let latency = RequestLatencyTrace()
+            model.controller.beginLatencyTrace(latency, firstTextItemID: id)
             model.items.append(NewPiTranscriptItem(kind: .user, body: "Print 200 lines, turn \(turn)"))
             model.items.append(NewPiTranscriptItem(id: id, kind: .assistant, body: "```text\n"))
             model.running = true
@@ -200,6 +202,13 @@ struct TranscriptPresentationChecks {
                 """, arguments: ["expected": chunks.dropFirst().dropLast().joined(separator: "\n") + "\n"],
                 in: nil, contentWorld: .page) as? Bool
             guard complete == true else { throw Failure(message: "Final 200-line content mismatch") }
+            guard latency.hasReached(.firstJSDispatch),
+                  latency.hasReached(.firstDOMAcknowledged),
+                  latency.hasReached(.firstFrameCallback),
+                  !latency.hasReached(.frameNotObserved),
+                  !latency.hasReached(.presentationUnavailable) else {
+                throw Failure(message: "First text frame milestones were not correlated")
+            }
             let end = ContinuousClock.now
             try await Task.sleep(for: .seconds(2))
             heartbeat.cancel()

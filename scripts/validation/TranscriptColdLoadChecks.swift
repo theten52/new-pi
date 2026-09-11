@@ -86,6 +86,10 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "uiTiming", let body = message.body as? [String: Any] {
+            if body["firstTextFrameRunID"] != nil {
+                coordinator.userContentController(userContentController, didReceive: message)
+                return
+            }
             applyCount += 1
             domMS += (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
         }
@@ -248,6 +252,8 @@ struct TranscriptColdLoadChecks {
         precondition(body?.contains("Latest streaming 99") == true, "Latest live text must win")
 
         page.controller.setVisible(false)
+        let hiddenTrace = RequestLatencyTrace()
+        page.controller.beginLatencyTrace(hiddenTrace, firstTextItemID: items.last!.id)
         let beforeHidden = page.applyCount
         for i in 0..<100 {
             latest[latest.count-1] = NewPiTranscriptItem(id: items.last!.id, kind: .assistant, body: "Hidden final \(i)")
@@ -257,9 +263,11 @@ struct TranscriptColdLoadChecks {
         page.coordinator.endLiveApply()
         try await Task.sleep(for: .milliseconds(100))
         precondition(page.applyCount == beforeHidden, "Hidden document must not receive content batches")
+        precondition(!hiddenTrace.hasReached(.firstJSDispatch), "Hidden content must not be logged as displayed")
         page.controller.setVisible(true)
         try await wait { page.applyCount == beforeHidden+1 }
         let resumed = try await page.webView.evaluateJavaScript("document.querySelector('main').lastElementChild.textContent") as? String
+        precondition(hiddenTrace.hasReached(.firstJSDispatch), "First text probe must follow deferred latest content")
         precondition(resumed?.contains("Hidden final 99") == true, "Showing a completed background turn must replay the latest snapshot")
 
         let added = NewPiTranscriptItem(kind: .user, body: "Appended user", messageIndex: 20)
@@ -312,6 +320,33 @@ struct TranscriptColdLoadChecks {
         precondition(liveText.contains("Live recovery </script>") && liveText.contains("quoted") && liveText.contains("中文"),
             "Live snapshot must survive JSON escaping and Markdown typography")
         precondition(liveRecovery?["locked"] as? Bool == true, "Process replay must retain live fork lock")
+        // 帧未回调不能伪装呈现成功；重建取消旧探针后，迟到消息也不能归给下一次发送。
+        _ = try await page.webView.evaluateJavaScript("""
+            window.savedRAF = window.requestAnimationFrame;
+            window.requestAnimationFrame = function() { return 0; };
+            true;
+            """)
+        let missingFrameTrace = RequestLatencyTrace()
+        page.controller.beginLatencyTrace(missingFrameTrace, firstTextItemID: latest.last!.id)
+        latest[latest.count-1] = NewPiTranscriptItem(id: latest.last!.id, kind: .assistant, body: "Missing frame probe")
+        page.controller.applyLive(items: latest, isStreaming: true, streamingBubbleComplete: false, tintHues: hues)
+        try await wait { missingFrameTrace.hasReached(.firstDOMAcknowledged) }
+        try await Task.sleep(for: .milliseconds(3200))
+        precondition(missingFrameTrace.hasReached(.frameNotObserved))
+        precondition(!missingFrameTrace.hasReached(.firstFrameCallback))
+        page.loaded = false
+        page.coordinator.webViewWebContentProcessDidTerminate(page.webView)
+        try await wait { page.loaded }
+        precondition(missingFrameTrace.hasReached(.presentationUnavailable))
+        _ = try await page.webView.callAsyncJavaScript("""
+            window.webkit.messageHandlers.uiTiming.postMessage({
+              firstTextFrameRunID: oldRunID, documentVisible:true
+            });
+            return true;
+            """, arguments: ["oldRunID": missingFrameTrace.id.uuidString], in: nil, contentWorld: .page)
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(!missingFrameTrace.hasReached(.firstFrameCallback))
+        print("PASS: missing frame reports timeout, page replacement cancels probe, stale frame ignored")
         print("PASS: deduplicated UI notifications; single-flight/latest-only content; hidden catch-up; append/reorder/metadata; static and hidden-live process recovery")
     }
 

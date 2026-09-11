@@ -187,6 +187,8 @@ struct TokenRateTracker {
 /// runtime 会被映射到 ViewModel 的 @Published 属性上。
 @MainActor
 final class SessionRuntime: ObservableObject {
+    var latencyTrace: RequestLatencyTrace?
+    var latencyFirstTextItemID: UUID?
     let session: AgentSession
     let fileURL: URL
     let sessionID: UUID
@@ -1420,6 +1422,9 @@ final class NewPiViewModel: ObservableObject {
     /// 附件先落盘到会话附件目录（`SessionAttachments`），再组装成 `UserMessage`。
     @discardableResult
     func send(_ text: String, draftAttachments: [DraftImageAttachment]) -> Bool {
+        let latency = RequestLatencyTrace()
+        var accepted = false
+        defer { if !accepted { latency.mark(.sendRejected) } }
         guard let runtime = activeRuntime else {
             appendTranscript(
                 kind: .system,
@@ -1502,14 +1507,21 @@ final class NewPiViewModel: ObservableObject {
         runtime.detailLiveTurnIDByUser[userItemID] = liveTurnID
         runtime.isStreaming = true
         runtime.agentActivity = .thinking
+        runtime.latencyTrace = latency
+        runtime.latencyFirstTextItemID = nil
+        runtime.docController?.beginLatencyTrace(latency, firstTextItemID: nil)
         reflectActive()
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
         let message = attachments.isEmpty
             ? AgentMessage.user(text)
             : AgentMessage.user(text, attachments: attachments)
         Task {
-            await runtime.session.prompt(message)
+            await RequestLatencyContext.$current.withValue(latency) {
+                await runtime.session.prompt(message)
+            }
         }
+        accepted = true
+        latency.mark(.sendAccepted)
         return true
     }
 
@@ -1593,10 +1605,16 @@ final class NewPiViewModel: ObservableObject {
             // STALL-VERIFY：消费端（后台）textDelta 序号，与 AgentSession bcast 序号对齐，
             // 两端时间差 = 生产→后台消费的投递延迟（已不含 MainActor 变量）。
             var probeConsumedTextCount = 0
+            var latency: RequestLatencyTrace?
+            var observedFirstText = false
             for await event in stream {
                 if Task.isCancelled { return }
                 switch event {
                 case let .textDelta(delta):
+                    if !delta.isEmpty && !observedFirstText {
+                        observedFirstText = true
+                        latency?.mark(.firstConsumerText)
+                    }
                     probeConsumedTextCount += 1
                     if probeConsumedTextCount % 100 == 0 {
                         NewPiLogger.info(
@@ -1615,8 +1633,13 @@ final class NewPiViewModel: ObservableObject {
                         self?.pokeStreamingFlushFromBackground(on: runtime)
                     }
                 default:
-                    if case .agentStart = event { runStartedAt = Date() }
+                    if case .agentStart = event {
+                        runStartedAt = Date()
+                        latency = await runtime.latencyTrace
+                        observedFirstText = false
+                    }
                     if case .agentEnd = event, let runStartedAt {
+                        latency?.mark(.agentEnded)
                         NewPiLogger.info(
                             category: "app",
                             message: "UI: run wall time",
@@ -1825,6 +1848,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.agentActivity = .thinking
         case .agentEnd:
             runtime.isStreaming = false
+            runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
             freezeStreamingThinking(on: runtime)
@@ -1840,8 +1864,10 @@ final class NewPiViewModel: ObservableObject {
                 await refreshSessionList()
             }
         case let .error(error):
+            runtime.latencyTrace?.mark(.failed)
             appendTranscript(kind: .error, body: error.localizedDescription, on: runtime)
             runtime.isStreaming = false
+            runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
             if runtime === activeRuntime {
@@ -2355,6 +2381,16 @@ final class NewPiViewModel: ObservableObject {
         let start = Date()
         appendOrUpdateAssistant(drained.text, into: &items, on: runtime)
         let elapsed = Date().timeIntervalSince(start)
+        if runtime.latencyTrace?.mark(.firstUIFlush) == true {
+            runtime.latencyFirstTextItemID = items.last(where: { $0.kind == .assistant })?.id
+            if let latency = runtime.latencyTrace {
+                if let controller = runtime.docController {
+                    controller.beginLatencyTrace(latency, firstTextItemID: runtime.latencyFirstTextItemID)
+                } else {
+                    latency.mark(.presentationUnavailable)
+                }
+            }
+        }
         storeFlushTarget(items, live: liveDriven, on: runtime)
         // PROBE（BACKLOG-STALL 定位）：flush 派发时刻。与「PROBE dom applied」
         // （JS 执行完成时刻）、stall gap 三者对齐即可定位阻塞段。

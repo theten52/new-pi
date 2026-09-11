@@ -28,6 +28,7 @@ public struct AgentLoop: Sendable {
                         """
                     )
                     continuation.yield(.agentStart)
+                    RequestLatencyContext.current?.mark(.agentStarted)
 
                     try appendMessage(prompt, to: &context, continuation: continuation)
                     // 增量持久化：用户消息一到就落盘，避免生成途中切换 session 时
@@ -56,13 +57,18 @@ public struct AgentLoop: Sendable {
                         )
                         continuation.yield(.turnStart)
 
-                        try await compactionService.compactIfNeeded(
-                            context: &context,
-                            config: config,
-                            continuation: continuation
-                        )
+                        RequestLatencyContext.current?.mark(.preparationStarted)
+                        // 压缩可能自己调用模型；不能让它抢占“本轮答复首字”的计时点。
+                        try await RequestLatencyContext.$current.withValue(nil) {
+                            try await compactionService.compactIfNeeded(
+                                context: &context,
+                                config: config,
+                                continuation: continuation
+                            )
+                        }
 
                         AgentMessageHistoryRepair.repairOrphanedToolCalls(in: &context.messages)
+                        RequestLatencyContext.current?.mark(.preparationFinished)
 
                         let assistant = try await streamAssistant(
                             context: context,

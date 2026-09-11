@@ -338,6 +338,7 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         secrets: redactionSecrets
                     )
 
+                    perf.markRequestSent()
                     let (bytes, response) = try await session.bytes(for: request)
                     perf.markResponse()
                     httpStatus = (response as? HTTPURLResponse)?.statusCode
@@ -516,6 +517,7 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
             pricing: profile.modelDefinition(for: model.modelID)?.pricing
         )
         return LLMRequestMetric(
+            runID: timing.runID,
             startedAt: timing.startedAt,
             providerName: profile.name,
             preset: profile.preset.rawValue,

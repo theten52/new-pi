@@ -58,6 +58,7 @@ public actor AgentSession {
     }
 
     public func prompt(_ message: AgentMessage) {
+        RequestLatencyContext.current?.mark(.promptReceived)
         runTask?.cancel()
         let promptSummary: String = switch message {
         case let .user(user):

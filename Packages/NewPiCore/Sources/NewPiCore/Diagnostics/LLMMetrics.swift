@@ -8,7 +8,9 @@ import Foundation
 /// 一次 LLM API 调用的性能指标（一条 = 一次 LLM 请求）。
 public struct LLMRequestMetric: Codable, Sendable, Identifiable {
     public var id: UUID
-    /// 请求发出时刻。
+    /// 关联发送到 UI 的稀疏时间线；旧记录及非 Session 请求可以为空。
+    public var runID: UUID?
+    /// provider 计时起点，包含凭据读取与编码；实际 URLSession 调用另见 requestSent 日志阶段。
     public var startedAt: Date
     // —— 身份 ——
     public var providerName: String      // profile 显示名（如 "GLM 智谱 (Token Plan)"）
@@ -55,6 +57,7 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
 
     public init(
         id: UUID = UUID(),
+        runID: UUID? = nil,
         startedAt: Date = Date(),
         providerName: String,
         preset: String,
@@ -86,6 +89,7 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
         costCurrency: String? = nil
     ) {
         self.id = id
+        self.runID = runID
         self.startedAt = startedAt
         self.providerName = providerName
         self.preset = preset
@@ -542,6 +546,8 @@ public enum LLMMetricVendor {
 /// 请求内计时累加器（provider 流式循环内使用，单请求单线程，非跨线程共享）。
 /// 只记「时间戳点」，派生指标（TTFT/思考时长等）由 LLMRequestMetric 复算。
 public struct LLMRequestTiming {
+    private let latencyTrace: RequestLatencyTrace?
+    public var runID: UUID? { latencyTrace?.id }
     public var startedAt = Date()
     public var responseAt: Date?
     public var firstThinkingAt: Date?
@@ -555,11 +561,20 @@ public struct LLMRequestTiming {
     public var textDeltaCount = 0
     public var thinkingDeltaCount = 0
 
-    public init() {}
+    public init() {
+        latencyTrace = RequestLatencyContext.current
+        latencyTrace?.mark(.providerStarted)
+    }
+
+    /// 紧贴 URLSession.bytes 调用，区别于包含凭据读取/编码的 provider 起点。
+    public func markRequestSent() {
+        latencyTrace?.mark(.requestSent)
+    }
 
     /// HTTP 响应头到达（流首字节）。
     public mutating func markResponse() {
         if responseAt == nil { responseAt = Date() }
+        latencyTrace?.mark(.responseHeaders)
     }
 
     public mutating func markThinking() {
@@ -570,21 +585,27 @@ public struct LLMRequestTiming {
     }
 
     public mutating func markText(at now: Date = Date()) {
-        if firstTextAt == nil { firstTextAt = now }
+        if firstTextAt == nil {
+            firstTextAt = now
+            latencyTrace?.mark(.firstProviderText)
+        }
         lastTextAt = now
         textDeltaCount += 1
     }
 
     public mutating func markTextDone(at now: Date = Date()) {
         textDoneAt = now
+        latencyTrace?.mark(.textDone)
     }
 
     public mutating func markTerminal(at now: Date = Date()) {
         if terminalAt == nil { terminalAt = now }
+        latencyTrace?.mark(.terminalReceived)
     }
 
     public mutating func markEnd(at now: Date = Date()) {
         if endedAt == nil { endedAt = now }
+        latencyTrace?.mark(.providerEnded)
     }
 }
 

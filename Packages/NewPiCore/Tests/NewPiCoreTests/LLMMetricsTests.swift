@@ -4,6 +4,60 @@ import Testing
 
 @Suite("LLMMetrics")
 struct LLMMetricsTests {
+    @Test("发送时间线并发阶段只记录一次，运行之间隔离")
+    func latencyStagesAreDeduplicated() async {
+        let trace = RequestLatencyTrace()
+        let count = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<100 { group.addTask { trace.mark(.firstConsumerText) } }
+            var count = 0
+            for await first in group { if first { count += 1 } }
+            return count
+        }
+        #expect(count == 1)
+        #expect(trace.hasReached(.sendEntered))
+        #expect(trace.hasReached(.firstConsumerText))
+        #expect(!trace.hasReached(.firstFrameCallback))
+        let next = RequestLatencyTrace()
+        #expect(next.id != trace.id)
+        #expect(!next.hasReached(.firstConsumerText))
+    }
+
+    @Test("provider Task 继承运行 ID，压缩作用域不污染正文首字")
+    func latencyContextPropagation() async throws {
+        let trace = RequestLatencyTrace()
+        let runID = await RequestLatencyContext.$current.withValue(trace) {
+            await Task {
+                RequestLatencyContext.$current.withValue(nil) {
+                    var compressionTiming = LLMRequestTiming()
+                    compressionTiming.markText()
+                    #expect(compressionTiming.runID == nil)
+                }
+                #expect(!trace.hasReached(.firstProviderText))
+                var timing = LLMRequestTiming()
+                timing.markRequestSent()
+                timing.markResponse()
+                timing.markText()
+                timing.markTerminal()
+                timing.markEnd()
+                return timing.runID
+            }.value
+        }
+        #expect(runID == trace.id)
+        for stage: RequestLatencyTrace.Stage in [
+            .providerStarted, .requestSent, .responseHeaders, .firstProviderText, .terminalReceived, .providerEnded
+        ] {
+            #expect(trace.hasReached(stage))
+        }
+        #expect(RequestLatencyContext.current == nil)
+        var metric = sample(0)
+        metric.runID = runID
+        let restored = try JSONDecoder().decode(LLMRequestMetric.self, from: JSONEncoder().encode(metric))
+        #expect(restored.runID == trace.id)
+        metric.runID = nil
+        let legacy = try JSONDecoder().decode(LLMRequestMetric.self, from: JSONEncoder().encode(metric))
+        #expect(legacy.runID == nil)
+    }
+
     @Test("正文与协议尾段分开计时，保持旧总时长与速率口径")
     func streamTailTiming() throws {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
