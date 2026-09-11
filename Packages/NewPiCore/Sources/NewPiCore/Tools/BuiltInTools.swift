@@ -263,7 +263,7 @@ public struct EditTool: AgentTool {
         let updated = original.replacingOccurrences(of: oldString, with: newString)
         try updated.write(to: fileURL, atomically: true, encoding: .utf8)
 
-        return ToolResult(content: "Edited \(path). Snapshot: \(snapshotURL.lastPathComponent)")
+        return ToolResult(content: "Edited \(path). Snapshot: \(snapshotURL.path)")
     }
 }
 

@@ -46,6 +46,39 @@ JSONL tree entries with `id` and `parentID`, stored under:
 
 Swift protocol `NewPiExtension` for tools, slash commands, and lifecycle hooks. No TypeScript/jiti compatibility.
 
+## 编辑前文件备份
+
+内置 `edit` 工具在唯一匹配检查通过后、写入修改前，通过
+[`EditSnapshotStore`](../Packages/NewPiCore/Sources/NewPiCore/Tools/EditSnapshotStore.swift)
+保存完整原文件。`write` 和 `bash` 不经过此机制；它不是项目级撤销或 Git 提交，
+目前也没有快照管理/一键恢复 UI。工具结果返回可直接定位的备份完整路径。
+
+2026-09-11 起，新备份格式为：
+
+```text
+<项目>/.new-pi/snapshots/
+  v2-<规范化源文件绝对路径的 SHA256>/
+    source-path.txt
+    <UTC 时间戳>-<UUID>.snapshot
+```
+
+- `source-path.txt` 记录原文件完整路径，`.snapshot` 文件本身是未经包装的原文件内容。
+  按路径而非 basename 隔离配额，不同目录的同名文件不会互相淘汰。
+  路径先标准化并解析符号链接；同一源文件的路径别名归入同组。
+- 默认每个源文件最多 20 份、最长保留 30 天；每次成功创建备份后触发清理。
+  同秒重复编辑使用 UUID 避免重名；创建顺序依据备份修改时间，复制后显式更新该时间，
+  不沿用源文件可能很旧的修改时间。时间相同时按文件名确定顺序，当次新备份始终优先保留。
+- `RetentionPolicy` 的单项 `nil` 表示不限制，`.unlimited` 完全关闭清理；
+  非正数配置会阻止新备份创建并抛错，显式 `prune` 则记录错误且不删除。
+  备份创建失败会阻止这次 edit；清理失败会记录日志，但不让已成功备份的编辑因此失败。
+- 清理只处理有匹配源路径元数据的 v2 目录内、命名合法的普通快照文件；
+  不跟随符号链接，不递归删除子目录。旧平铺格式缺少路径归属，**既不迁移，也不自动删除**。
+- 创建和清理通过同进程锁串行化；这不是跨进程文件锁，不提供 App 与 CLI 同时修改同一文件的事务保证。
+  项目移动/文件改名后的新路径会形成新组，旧备份仍按原身份保留。
+
+回归覆盖同名文件隔离、路径别名、连续及并发备份、数量/年龄边界、旧格式保留、
+非法策略、元数据异常、非普通文件跳过和 `edit` 返回路径可读取。
+
 ## Credentials (Phase 2)
 
 Resolution order for Anthropic:
