@@ -21,12 +21,19 @@
 | `responseAt` | —（TTFB 近似） | 收到 HTTP 响应头/流首字节 |
 | `firstThinkingAt`/`lastThinkingAt` | — | 首个/最后一个 thinking delta |
 | `firstTextAt` | — | 首个正文 delta |
+| `lastTextAt` | — | 最后一个正文 delta；三种 provider 均记录，旧记录为 nil |
+| `textDoneAt` | — | Responses 最后一次 `output_text.done`；不是请求完成 |
+| `terminalAt` | — | Responses completed/incomplete/failed 解码时刻 |
 | `endedAt` | `gen_ai.server.completion.duration` 终点 | 流结束（正常/错误） |
 | `timeToFirstToken`（派生） | `gen_ai.server.time_to_first_token` | 首内容 token 延迟：网络+排队+prefill+思考准备 |
 | `thinkingDuration`（派生） | — | 思考段时长（reasoning 生成耗时） |
-| `textDuration`（派生） | — | 正文段时长 |
+| `textDuration`（派生） | — | 首正文到流结束，保留既有口径，包含协议尾段 |
+| `textEmissionDuration`（派生） | — | 首正文到末正文的接收跨度 |
+| `textTailDuration`（派生） | — | 末正文到 provider 标记结束，面板显示「尾」 |
+| `textToTerminalDuration`（派生） | — | 末正文到 Responses 终态 |
+| `terminalDrainDuration`（派生） | — | 终态到 provider 标记结束，不含指标落盘及 UI 处理 |
 | `totalDuration`（派生） | `gen_ai.client.operation.duration` | 端到端总耗时 |
-| `outputTokensPerSecond`（派生） | `1 / gen_ai.server.time_per_output_token` | 正文输出速率 |
+| `outputTokensPerSecond`（派生） | —（非独立测量的服务端 token 间隔） | 输出 token / textDuration，含协议尾段；输出 token 也可能含思考 |
 | `inputTokens` | `gen_ai.usage.input_tokens` | 输入 token |
 | `cachedInputTokens` | `gen_ai.usage.cached_tokens` | prompt cache 命中 |
 | `outputTokens` | `gen_ai.usage.output_tokens` | 输出 token |
@@ -54,6 +61,10 @@ UI 侧指标：`UIFlushMetric`（flush 耗时 / 合并字符 / 积压）——�
 - `NewPiViewModel.flushStreamingDelta`：每次流式 flush 后上报 `UIFlushMetric`。
 
 内容不含 prompt（隐私），JSONL 无密钥。
+
+2026-09-11 新增时间点均为可选字段，旧 JSONL 可直接解码。未记录 `lastTextAt` 时不臆造尾段。
+`output_text.done` 只更新计时，不重发该事件中的全文、不产生 completed、不截断后续工具/错误/usage。
+正文后无字的尾段可能包含合法协议事件，不能据此断言服务端纯等待，更不能静默超时后当作成功。
 
 ## 已知边界
 

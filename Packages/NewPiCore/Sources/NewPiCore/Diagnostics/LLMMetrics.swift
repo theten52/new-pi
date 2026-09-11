@@ -27,6 +27,12 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
     public var lastThinkingAt: Date?
     /// 首个正文（text）delta。
     public var firstTextAt: Date?
+    /// 最后一个正文 delta；旧记录缺失时不推算。
+    public var lastTextAt: Date?
+    /// Responses 最后一个 output_text.done，不代表整次请求完成。
+    public var textDoneAt: Date?
+    /// Responses completed/incomplete/failed 被解码的时刻。
+    public var terminalAt: Date?
     /// 流结束（正常完成 / 错误抛出）。
     public var endedAt: Date?
     // —— token 用量 ——
@@ -61,6 +67,9 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
         firstThinkingAt: Date? = nil,
         lastThinkingAt: Date? = nil,
         firstTextAt: Date? = nil,
+        lastTextAt: Date? = nil,
+        textDoneAt: Date? = nil,
+        terminalAt: Date? = nil,
         endedAt: Date? = nil,
         inputTokens: Int? = nil,
         cachedInputTokens: Int? = nil,
@@ -89,6 +98,9 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
         self.firstThinkingAt = firstThinkingAt
         self.lastThinkingAt = lastThinkingAt
         self.firstTextAt = firstTextAt
+        self.lastTextAt = lastTextAt
+        self.textDoneAt = textDoneAt
+        self.terminalAt = terminalAt
         self.endedAt = endedAt
         self.inputTokens = inputTokens
         self.cachedInputTokens = cachedInputTokens
@@ -123,10 +135,33 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
         return b.timeIntervalSince(a)
     }
 
-    /// 正文段时长（结束或最后正文 delta - 首正文 delta）。有 thinking 时用 endedAt 兜底可能含尾部。
+    /// 首正文到流结束的时长，保留既有速率口径（含协议尾段，不是纯正文生成时间）。
     public var textDuration: TimeInterval? {
         guard let a = firstTextAt, let b = endedAt else { return nil }
         return max(b.timeIntervalSince(a), 0)
+    }
+
+    /// 正文接收跨度；单个 delta 为 0，不能拿它当单 token 的生成耗时。
+    public var textEmissionDuration: TimeInterval? {
+        guard let firstTextAt, let lastTextAt else { return nil }
+        return max(0, lastTextAt.timeIntervalSince(firstTextAt))
+    }
+
+    /// 正文停止到 provider 流结束；可能含后续工具/协议事件，不等同于服务端纯等待。
+    public var textTailDuration: TimeInterval? {
+        guard let lastTextAt, let endedAt else { return nil }
+        return max(0, endedAt.timeIntervalSince(lastTextAt))
+    }
+
+    public var textToTerminalDuration: TimeInterval? {
+        guard let lastTextAt, let terminalAt else { return nil }
+        return max(0, terminalAt.timeIntervalSince(lastTextAt))
+    }
+
+    /// 终态解码到 provider 标记结束，不包含后续指标落盘和 UI 处理。
+    public var terminalDrainDuration: TimeInterval? {
+        guard let terminalAt, let endedAt else { return nil }
+        return max(0, endedAt.timeIntervalSince(terminalAt))
     }
 
     /// 端到端总耗时（请求发出 → 结束）。
@@ -134,7 +169,7 @@ public struct LLMRequestMetric: Codable, Sendable, Identifiable {
         endedAt?.timeIntervalSince(startedAt)
     }
 
-    /// 正文输出速率（token/s），按正文段计。
+    /// 既有输出速率（token/s），分母含正文之后的协议尾段。
     public var outputTokensPerSecond: Double? {
         guard let out = outputTokens, let d = textDuration, d > 0 else { return nil }
         return Double(out) / d
@@ -512,6 +547,9 @@ public struct LLMRequestTiming {
     public var firstThinkingAt: Date?
     public var lastThinkingAt: Date?
     public var firstTextAt: Date?
+    public var lastTextAt: Date?
+    public var textDoneAt: Date?
+    public var terminalAt: Date?
     public var endedAt: Date?
     /// delta 事件计数（粒度假设验证：事件数 × 每 flush 固定渲染成本 ≈ 排空时长）。
     public var textDeltaCount = 0
@@ -531,13 +569,22 @@ public struct LLMRequestTiming {
         thinkingDeltaCount += 1
     }
 
-    public mutating func markText() {
-        if firstTextAt == nil { firstTextAt = Date() }
+    public mutating func markText(at now: Date = Date()) {
+        if firstTextAt == nil { firstTextAt = now }
+        lastTextAt = now
         textDeltaCount += 1
     }
 
-    public mutating func markEnd() {
-        if endedAt == nil { endedAt = Date() }
+    public mutating func markTextDone(at now: Date = Date()) {
+        textDoneAt = now
+    }
+
+    public mutating func markTerminal(at now: Date = Date()) {
+        if terminalAt == nil { terminalAt = now }
+    }
+
+    public mutating func markEnd(at now: Date = Date()) {
+        if endedAt == nil { endedAt = now }
     }
 }
 

@@ -79,6 +79,17 @@ struct ResponsesMessageEncoderTests {
 
 @Suite("ResponsesSSEDecoder")
 struct ResponsesSSEDecoderTests {
+    @Test("正文 done 仅作为计时点，不重放整段文本或伪造请求完成")
+    func textDone() {
+        let events = ResponsesSSEDecoder().decodeLines([
+            #"data: {"type":"response.output_text.done","text":"already streamed"}"#
+        ])
+        #expect(events == [.textDone])
+        var parser = ResponsesStreamParser()
+        #expect(parser.parse(events: events).isEmpty)
+        #expect(parser.finish().isEmpty)
+    }
+
     @Test("parses text, reasoning, tool call, and completion events")
     func decodeStream() {
         let lines = [
@@ -115,6 +126,30 @@ struct ResponsesSSEDecoderTests {
 
 @Suite("ResponsesStreamParser")
 struct ResponsesStreamParserTests {
+    @Test("正文 done 之后仍保留工具、后续正文和最终 usage")
+    func eventsAfterTextDone() {
+        var parser = ResponsesStreamParser()
+        let before = parser.parse(events: [.textDelta("first"), .textDone])
+        #expect(before.count == 1)
+        let after = parser.parse(events: [
+            .functionCallMeta(outputIndex: 1, callID: "call_after_text", name: "read"),
+            .functionCallArgumentsDelta(outputIndex: 1, delta: #"{"path":"a.txt"}"#),
+            .textDelta("second"), .textDone,
+            .completed(status: "completed", incompleteReason: nil, inputTokens: 20, outputTokens: 30)
+        ])
+        #expect(after.count == 3)
+        #expect(after.contains { if case .textDelta("second") = $0 { true } else { false } })
+        #expect(after.contains {
+            if case let .toolCall(call) = $0 { call.id == "call_after_text" } else { false }
+        })
+        #expect(after.contains {
+            if case let .completed(reason, usage) = $0 {
+                reason == .toolUse && usage.inputTokens == 20 && usage.outputTokens == 30
+            } else { false }
+        })
+        #expect(parser.parse(events: [.textDone, .failed(message: "late failure")]).isEmpty)
+    }
+
     @Test("maps tool call completion to LLMStreamEvent toolCall")
     func toolCall() {
         var parser = ResponsesStreamParser()

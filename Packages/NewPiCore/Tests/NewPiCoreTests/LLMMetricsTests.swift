@@ -4,6 +4,63 @@ import Testing
 
 @Suite("LLMMetrics")
 struct LLMMetricsTests {
+    @Test("正文与协议尾段分开计时，保持旧总时长与速率口径")
+    func streamTailTiming() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var metric = sample(0)
+        metric.startedAt = start
+        metric.firstTextAt = start.addingTimeInterval(2)
+        metric.lastTextAt = start.addingTimeInterval(6)
+        metric.textDoneAt = start.addingTimeInterval(7)
+        metric.terminalAt = start.addingTimeInterval(13)
+        metric.endedAt = start.addingTimeInterval(14)
+        metric.outputTokens = 120
+        let restored = try JSONDecoder().decode(LLMRequestMetric.self, from: JSONEncoder().encode(metric))
+        #expect(restored.textEmissionDuration == 4)
+        #expect(restored.textTailDuration == 8)
+        #expect(restored.textToTerminalDuration == 7)
+        #expect(restored.terminalDrainDuration == 1)
+        #expect(restored.textDoneAt == metric.textDoneAt)
+        #expect(restored.totalDuration == 14)
+        #expect(restored.textDuration == 12)
+        #expect(restored.outputTokensPerSecond == 10)
+    }
+
+    @Test("旧指标没有尾段字段时不能臆造正文结束时刻")
+    func legacyTimingDecodes() throws {
+        var metric = sample(0)
+        metric.firstTextAt = metric.startedAt.addingTimeInterval(1)
+        metric.endedAt = metric.startedAt.addingTimeInterval(5)
+        let restored = try JSONDecoder().decode(LLMRequestMetric.self, from: JSONEncoder().encode(metric))
+        #expect(restored.lastTextAt == nil)
+        #expect(restored.textDoneAt == nil)
+        #expect(restored.terminalAt == nil)
+        #expect(restored.textTailDuration == nil)
+        #expect(restored.textEmissionDuration == nil)
+        #expect(restored.textDuration == 4)
+    }
+
+    @Test("text done 之后仍可接收正文，终态与结束时刻只记录首次")
+    func timingAccumulator() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var timing = LLMRequestTiming()
+        timing.markText(at: start)
+        timing.markTextDone(at: start.addingTimeInterval(1))
+        #expect(timing.endedAt == nil && timing.terminalAt == nil)
+        timing.markText(at: start.addingTimeInterval(2))
+        timing.markTextDone(at: start.addingTimeInterval(3))
+        timing.markTerminal(at: start.addingTimeInterval(4))
+        timing.markTerminal(at: start.addingTimeInterval(5))
+        timing.markEnd(at: start.addingTimeInterval(6))
+        timing.markEnd(at: start.addingTimeInterval(7))
+        #expect(timing.firstTextAt == start)
+        #expect(timing.lastTextAt == start.addingTimeInterval(2))
+        #expect(timing.textDoneAt == start.addingTimeInterval(3))
+        #expect(timing.terminalAt == start.addingTimeInterval(4))
+        #expect(timing.endedAt == start.addingTimeInterval(6))
+        #expect(timing.textDeltaCount == 2)
+    }
+
     private func sample(_ n: Int, provider: String = "P") -> LLMRequestMetric {
         LLMRequestMetric(providerName: provider, preset: "openaiCompatible", vendor: "deepseek", model: "m\(n)", mode: "chat")
     }

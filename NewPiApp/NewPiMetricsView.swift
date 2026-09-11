@@ -254,7 +254,12 @@ struct RequestRow: View {
                 Text("TTFT \(metric.timeToFirstToken.map { NewPiMetricsView.ms($0) } ?? "—")")
                 if let td = metric.thinkingDuration { Text("想 \(NewPiMetricsView.ms(td))").foregroundStyle(.purple) }
                 Text("总 \(metric.totalDuration.map { NewPiMetricsView.ms($0) } ?? "…")")
+                if let tail = metric.textTailDuration {
+                    Text("尾 \(NewPiMetricsView.ms(tail))")
+                        .help(tailTimingHelp)
+                }
                 Text(metric.outputTokensPerSecond.map { String(format: "%.1f tok/s", $0) } ?? "")
+                    .help("输出 token / 首正文到流结束的时间（含协议尾段），不是独立测量的正文生成速率")
                 Text(metric.outputTokens.map { "out \(NewPiMetricsView.k($0))" } ?? "")
                 if let td = metric.textDeltaCount {
                     // delta 事件数（正文 + 思考）：粒度假设验证——同 token 数下 Δ 越大事件越细。
@@ -282,6 +287,21 @@ struct RequestRow: View {
         } else {
             Text("✓").foregroundStyle(.green).font(.caption)
         }
+
+    }
+
+    private var tailTimingHelp: String {
+        var parts = ["末次正文到 provider 流结束；可能包含后续工具或协议事件，不是 UI 绘制耗时。"]
+        if let duration = metric.textEmissionDuration {
+            parts.append("正文接收跨度：\(NewPiMetricsView.ms(duration))")
+        }
+        if let duration = metric.textToTerminalDuration {
+            parts.append("末次正文 → Responses 终态：\(NewPiMetricsView.ms(duration))")
+        }
+        if let duration = metric.terminalDrainDuration {
+            parts.append("终态 → provider 标记结束：\(NewPiMetricsView.ms(duration))")
+        }
+        return parts.joined(separator: "\n")
     }
 }
 

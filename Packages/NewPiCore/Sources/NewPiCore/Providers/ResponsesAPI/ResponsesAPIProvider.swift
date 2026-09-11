@@ -122,9 +122,17 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                         for block in sseParser.feed(byte) {
                             let rawEvents = decoder.decodeLines(block)
                             for raw in rawEvents {
-                                if case let .failed(message) = raw {
+                                switch raw {
+                                case .textDone:
+                                    perf.markTextDone()
+                                case .completed:
+                                    perf.markTerminal()
+                                case let .failed(message):
+                                    perf.markTerminal()
                                     failedMessage = message
                                     didReachTerminal = true
+                                default:
+                                    break
                                 }
                             }
                             let parsed = parser.parse(events: rawEvents)
@@ -147,8 +155,16 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     for block in sseParser.finish() {
                         let rawEvents = decoder.decodeLines(block)
                         for raw in rawEvents {
-                            if case let .failed(message) = raw {
+                            switch raw {
+                            case .textDone:
+                                perf.markTextDone()
+                            case .completed:
+                                perf.markTerminal()
+                            case let .failed(message):
+                                perf.markTerminal()
                                 failedMessage = message
+                            default:
+                                break
                             }
                         }
                         let parsed = parser.parse(events: rawEvents)
@@ -287,6 +303,9 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
             firstThinkingAt: timing.firstThinkingAt,
             lastThinkingAt: timing.lastThinkingAt,
             firstTextAt: timing.firstTextAt,
+            lastTextAt: timing.lastTextAt,
+            textDoneAt: timing.textDoneAt,
+            terminalAt: timing.terminalAt,
             endedAt: timing.endedAt,
             inputTokens: usage.inputTokens,
             cachedInputTokens: usage.cacheReadTokens,

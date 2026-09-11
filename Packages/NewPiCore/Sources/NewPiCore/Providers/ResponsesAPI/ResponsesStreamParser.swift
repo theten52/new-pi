@@ -19,6 +19,9 @@ public struct ResponsesStreamParser: Sendable {
             switch event {
             case let .textDelta(text):
                 output.append(.textDelta(text))
+            case .textDone:
+                // 仅供 provider 计时；后面仍可能有文本、工具调用、usage 或失败终态。
+                break
             case let .reasoningDelta(text):
                 output.append(.thinkingDelta(text))
             case let .functionCallMeta(outputIndex, callID, name):

@@ -528,6 +528,7 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
             firstThinkingAt: timing.firstThinkingAt,
             lastThinkingAt: timing.lastThinkingAt,
             firstTextAt: timing.firstTextAt,
+            lastTextAt: timing.lastTextAt,
             endedAt: timing.endedAt,
             inputTokens: usage.inputTokens,
             cachedInputTokens: usage.cacheReadTokens,
