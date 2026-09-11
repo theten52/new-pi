@@ -44,7 +44,6 @@
   markdown.disable("image");
 
   const heightChangeThreshold = 4;
-  const fencePattern = /^ {0,3}(`{3,}|~{3,})/;
   const caretFinalHoldMilliseconds = 1400;
   // 光标用 class 查找（作用域限定在各实例 root 内），不再用文档级唯一 id——
   // 单文档内多个 renderer 实例共存时 id 会撞车。
@@ -96,55 +95,57 @@
   // renderedBlocks 与 root 的块节点一一对应（流式末尾的光标节点除外）。
   // 块只追加 / 只在尾部变化，因此索引对齐是稳定的。
 
-  // 按顶层块切分：空行是块边界；围栏代码块内部不切分，
-  // 闭合行（以相同 fence 标记开头）归属于该代码块。
+  // 使用全文解析的顶层语义边界：空行可能仍在列表、引用或缩进代码内，不能独立解析。
+  // tokens 已经过 inline/reference/typographer 处理，渲染时直接复用；source 仅用于缓存对齐。
   function splitBlocks(source) {
+    // 与 markdown-it 的 normalize 对齐，使 token.map 的行号能映射回渲染副本。
+    source = source.replace(/\r\n?/g, "\n").replace(/\u0000/g, "\uFFFD");
     const lines = source.split("\n");
-    const blocks = [];
-    let current = [];
-    let fenceMarker = null;
-
-    lines.forEach(function (line) {
-      if (fenceMarker === null && line.trim() === "") {
-        if (current.length > 0) {
-          blocks.push(current.join("\n"));
-          current = [];
+    function parse(renderSource) {
+      const env = {};
+      const tokens = markdown.parse(renderSource, env);
+      const blocks = [];
+      let start = 0;
+      let depth = 0;
+      tokens.forEach(function (token, index) {
+        depth += token.nesting;
+        if (depth === 0) {
+          const map = tokens[start].map;
+          blocks.push({
+            // map 不含行分隔符；仅追加 EOF 换行也会改变代码 token 的 content，必须参与缓存键。
+            source: lines.slice(map[0], map[1]).join("\n") + (map[1] < lines.length ? "\n" : ""),
+            tokens: tokens.slice(start, index + 1)
+          });
+          start = index + 1;
         }
-        return;
+      });
+      return { blocks: blocks, env: env, referencesKey: JSON.stringify(env.references || {}) };
+    }
+
+    const result = parse(source);
+    const tail = result.blocks[result.blocks.length - 1];
+    if (!tail) {
+      return result;
+    }
+    const leaves = tail.tokens.filter(function (token) { return token.block && token.nesting === 0; });
+    const lastLeaf = leaves[leaves.length - 1];
+    // markdown-it 原生支持 EOF 未闭合围栏，且保留真实 fence 长度/缩进；代码末尾不补行内标记。
+    // 只修复文档末尾的 inline 块，后面仍有引用定义时不能把修复符号追加到定义里。
+    // 表格单元格等合成 inline 没有 map；无法精确定位时不猜测尾部修复位置。
+    if (lastLeaf && lastLeaf.type === "inline" && lastLeaf.map) {
+      const end = lines.slice(0, lastLeaf.map[1]).join("\n").length;
+      // 只检查最后一个 inline 叶子，避免容器里先前代码块的 ** 被当作正文未闭合标记。
+      const inlineSource = lines.slice(lastLeaf.map[0], lastLeaf.map[1]).join("\n");
+      const repaired = repairTailSource(inlineSource);
+      if (repaired !== inlineSource && /^\s*$/.test(source.slice(end))) {
+        return parse(source.slice(0, end) + repaired.slice(inlineSource.length) + source.slice(end));
       }
-
-      current.push(line);
-
-      const fenceMatch = fencePattern.exec(line);
-      if (fenceMatch) {
-        const marker = fenceMatch[1].charAt(0) === "`" ? "```" : "~~~";
-        if (fenceMarker === null) {
-          fenceMarker = marker;
-        } else if (marker === fenceMarker) {
-          fenceMarker = null;
-          blocks.push(current.join("\n"));
-          current = [];
-        }
-      }
-    });
-
-    const result = { blocks: blocks, tailFenceMarker: null };
-    if (current.length > 0) {
-      blocks.push(current.join("\n"));
-      // 扫描结束时仍处于围栏内：尾块是一个未闭合的代码块
-      result.tailFenceMarker = fenceMarker;
     }
     return result;
   }
 
-  // 仅作用于渲染副本：修复尾部块未闭合的 Markdown 结构，绝不改动原始 source。
-  // 优先级：代码围栏 > 行内代码 > 加粗 / 删除线。
-  function repairTailSource(source, tailFenceMarker) {
-    if (tailFenceMarker !== null) {
-      // 未闭合的代码围栏：补一个闭合行，让代码块正常渲染而不是吞掉后续原始文本
-      return source + "\n" + tailFenceMarker;
-    }
-
+  // 仅作用于渲染副本：行内代码 > 加粗 / 删除线；围栏由全文 parser 处理。
+  function repairTailSource(source) {
     // 先剥掉已闭合的行内代码段，避免把代码内容里的标记（如 2 ** 3）当成加粗。
     // 同时识别双/多反引号代码段（``code``）：只认单反引号会把代码里的反引号
     // 误判成加粗/删除线标记而给尾块补上多余闭合符。
@@ -170,11 +171,7 @@
   }
 
   // 只优化顶层单围栏；列表/引用/混合块仍交给完整渲染，内容与缩进由 markdown-it 解析。
-  function singleFence(source) {
-    if (!fencePattern.test(source)) {
-      return null;
-    }
-    const tokens = markdown.parse(source, {});
+  function singleFence(tokens) {
     return tokens.length === 1 && tokens[0].type === "fence" ? tokens[0] : null;
   }
 
@@ -269,17 +266,17 @@
     });
   }
 
-  function renderBlockNode(blockSource, highlighted) {
+  function renderBlockNode(tokens, highlighted, env) {
     const node = document.createElement("div");
     node.className = "markdown-block";
     if (highlighted) {
-      node.innerHTML = markdown.render(blockSource);
+      node.innerHTML = markdown.renderer.render(tokens, markdown.options, env);
     } else {
       // 流式尾块：跳过 hljs 高亮（沿用 streamingRenderDepth 开关）；
       // try/finally 保证 render 抛异常时计数器不泄漏（否则后续渲染永远不再高亮）
       streamingRenderDepth += 1;
       try {
-        node.innerHTML = markdown.render(blockSource);
+        node.innerHTML = markdown.renderer.render(tokens, markdown.options, env);
       } finally {
         streamingRenderDepth -= 1;
       }
@@ -305,6 +302,7 @@
     const enableCaret = false;
 
     let renderedBlocks = [];
+    let referencesKey = "";
     let hasStreamed = false;
     let caretRemovalTimer = null;
     let lastPostedHeight = 0;
@@ -497,19 +495,22 @@
       const blocks = split.blocks;
       const blockCount = blocks.length;
       const previousFrozenLimit = Math.max(0, renderedBlocks.length - 1);
+        // 定义本身没有可见 token，但增删/改定义可能改变已冻结段落的链接；按全文环境失效。
+        const referencesChanged = referencesKey !== split.referencesKey;
+        referencesKey = split.referencesKey;
 
       // 与上一帧的公共前缀（冻结块逐字节对齐）
       let common = 0;
       const maxCommon = Math.min(renderedBlocks.length, blockCount);
-      while (common < maxCommon &&
-          renderedBlocks[common].source === blocks[common] &&
+        while (!referencesChanged && common < maxCommon &&
+          renderedBlocks[common].source === blocks[common].source &&
           renderedBlocks[common].highlighted === (common < blockCount - 1)) {
         common += 1;
       }
 
       // 上一批尾块本来就允许变化；补完尾块并新增块不算冻结前缀分叉。
       // 高亮状态也参与比较，让未改正文的旧尾块在冻结时补上高亮。
-      if (common < previousFrozenLimit && common < blockCount) {
+      if (referencesChanged || (common < previousFrozenLimit && common < blockCount)) {
         while (root.firstChild) {
           root.removeChild(root.firstChild);
         }
@@ -527,15 +528,15 @@
 
       for (let i = common; i < blockCount; i += 1) {
         const isTail = i === blockCount - 1;
-        const blockSource = blocks[i];
-        // 冻结块已完结：带 hljs 高亮渲染；尾块流式渲染（无高亮 + 修复未闭合结构）
-        const renderSource = isTail ? repairTailSource(blockSource, split.tailFenceMarker) : blockSource;
-        const fence = isTail ? singleFence(renderSource) : null;
+        const block = blocks[i];
+        const blockSource = block.source;
+        // 冻结块带高亮，尾块不高亮；tokens 已共享全文上下文并完成必要的尾部修复。
+        const fence = isTail ? singleFence(block.tokens) : null;
         // 保留 pre/code/按钮和 Text 节点身份，避免每个 delta 重建整个增长中的代码表面。
         if (isTail && appendFenceText(renderedBlocks[i], blockSource, fence)) {
           continue;
         }
-        const node = renderBlockNode(renderSource, !isTail);
+        const node = renderBlockNode(block.tokens, !isTail, split.env);
         const rendered = { source: blockSource, node: node, highlighted: !isTail, fence: cacheFence(node, fence) };
         if (i < renderedBlocks.length) {
           root.replaceChild(node, renderedBlocks[i].node);

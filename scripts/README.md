@@ -108,6 +108,27 @@ macOS + Swift 6 环境运行 `scripts/validation/check-chatroom-controller.sh`�
 - `scripts/validation/check-transcript-dom.sh`：使用独立 WKWebView 加载真实 JS/CSS，验证非末尾消息继续流式、DOM 身份、卡片手动展开、正文定型；需要 macOS 图形登录会话，不发送模型请求。
 - Swift Package 的 `ChatRoomRenderingTests.swift` 覆盖 120ms 缓冲、事件/审批顺序、取消/失败保留及磁盘重载顺序。
 
+### Markdown 收尾语义与原生呈现回归（2026-09-12）
+
+`./scripts/validation/check-transcript-dom.sh` 新增 19 个真实 WKWebView 语义用例，覆盖松散/嵌套列表、
+引用、表格、前向/后向及列表内 reference、typographer、长/未闭合/嵌套围栏、缩进代码和换行。
+字符级增量与同前缀一次性流式结果对照，另检查同源最后流式快照与最终态；四个列表/引用几何样例
+检查高度、滚动、末行位置、32px 尾距与上翻保锚。19 个用例已全部通过，四例 `heightDelta=0`、
+`scrollDelta=0`；既有 100 块 199 次插入与 200 行单围栏 0 次子树重建保持。
+
+原生 200 行三轮呈现对照（仓库根目录运行；基线只替换临时资源中的 renderer）：
+
+- 固定基线：`NEWPI_PRESENTATION_REPLAY=1 NEWPI_RENDERER_REVISION=5b6f302 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 ./scripts/validation/check-transcript-cold-load.sh`
+- 修复版：`NEWPI_PRESENTATION_REPLAY=1 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 ./scripts/validation/check-transcript-cold-load.sh`
+- 冷恢复：`NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 ./scripts/validation/check-transcript-cold-load.sh`
+
+基线实跑时使用 `NEWPI_RENDERER_REVISION=HEAD`，当时为 `5b6f302`；回溯命令固定提交，避免 HEAD 漂移。
+`NEWPI_PRESENTATION_REPLAY=1` 选择真实 SwiftUI/Coordinator/WKWebView 的可见合成呈现探针（`-Onone`），
+含状态栏、rail、礼花及正文/工具交替与折叠；不是持久 HTML replay，也不是完整 App 构建或全核心测试。
+上述对照已运行，仅支持该场景无明显性能退化，不宣称加速。500 条历史首载/切回、聊天室 A/B/A 的
+`heightReads=0`、`anchorErrorPX=0`，进程恢复等回归通过；首载无恢复锚点时偏差字段记 0，不能当作恢复精度证据。
+完整数据、解析成本与原始用户场景待验收边界见 [修复记录](../docs/dev-notes/2026-09-12-markdown-final-reflow.md)。
+
 ## 聊天室性能基线
 
 `bash scripts/validation/check-chatroom-performance.sh` 使用真实控制器、适配器和签名函数，输出短对话、长对话、多工具历史的 CSV。

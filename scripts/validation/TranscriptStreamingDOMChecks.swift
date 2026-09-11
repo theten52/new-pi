@@ -172,10 +172,94 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         }
         codeRenderer.renderStreaming('```text\nold text');
         codeRenderer.renderStreaming('```text\nedited');
-        check(codeRoot.querySelector('code').textContent === 'edited\n', 'non-append edits must replace stale code');
+        referenceRenderer.renderFinal('```text\nedited');
+        check(codeRoot.querySelector('code').textContent === reference.querySelector('code').textContent,
+          'non-append edits must match original-source fence content, without synthetic closing newline');
         codeRenderer.renderStreaming('```text\nedited\n```\n\nnext');
         check(codeRoot.textContent.includes('next'), 'new blocks after a fence must still render');
         codeRoot.remove();
+
+        // 同源末帧与最终全文解析必须一致；仅忽略流式包装与最终才添加的高亮 span。
+        const semanticHTML = root => {
+          const clone=root.cloneNode(true);
+          clone.querySelectorAll('.markdown-block').forEach(el=>el.replaceWith(...el.childNodes));
+          clone.querySelectorAll('pre code').forEach(el=>{ el.textContent=el.textContent; });
+          return clone.innerHTML.trim();
+        };
+        const markdownCases = [
+          ['loose ordered list', '1. First\n\n2. Second\n\n3. Third'],
+          ['loose unordered list', '- First\n\n- Second\n\n- Third'],
+          ['nested list', '- Parent\n\n  First paragraph\n\n  - Child one\n\n  - Child two\n\n- Next parent'],
+          ['blockquote paragraphs', '> First paragraph\n>\n> Second paragraph\n\n> Third paragraph'],
+          ['adjacent blocks', '# Heading\nParagraph\n\n---\n\n## Subheading\nNext paragraph'],
+          ['table', '| Name | Value |\n| --- | --- |\n| A | B |\n\nAfter table'],
+          ['forward reference', 'Read [the docs][guide].\n\nOther paragraph.\n\n[guide]: https://example.com "Guide"'],
+          ['earlier reference', '[guide]: https://example.com\n\nRead [the docs][guide].'],
+          ['reference in list', '- [First][guide]\n\n- [Second][guide]\n\n[guide]: https://example.com'],
+          ['typography and links', '"Hello" -- (c) ... https://example.com\n\nA **bold** and ~~deleted~~ word.'],
+          ['long fence', '````text\none\n```\n\ntwo\n````\n\nAfter fence'],
+          ['unfinished fence', '```text\nliteral ** and `'],
+          ['unfinished fence newline', '```text\nliteral ** and `\n'],
+          ['unfinished long fence', '````text\none\n```\n\ntwo'],
+          ['nested fence', '> ```text\n> literal ** and `\n> ```'],
+          ['list code then prose', '- Parent\n\n  ```text\n  **literal\n  ```\n\n  After code'],
+          ['indented code', '    literal ** and `\n\n    next line'],
+          ['fence then prose', '```swift\nlet value = 1\n```\n\nAfter fence'],
+          ['normalized newlines', '1. First\r\n\r\n2. Second\r\n\r\n3. A\u0000B']
+        ];
+        const semanticRoot=document.createElement('article');
+        semanticRoot.className='markdown-body';
+        semanticRoot.style.width='800px';
+        document.body.appendChild(semanticRoot);
+        const semanticRenderer=originalCreate(semanticRoot,{reportHeight:false,postSnapshot:false});
+        const semanticFailures=[];
+        for(const [name,source] of markdownCases){
+          semanticRenderer.renderStreaming('');
+          // 模拟逐行到达，而不是只检查一次性流式渲染。
+          let end=0;
+          for(const line of source.split('\n')){
+            end=Math.min(source.length,end+line.length+1);
+            semanticRenderer.renderStreaming(source.slice(0,end));
+          }
+          semanticRenderer.renderStreaming('');
+          for(let end=1;end<=source.length;end++){
+            const prefix=source.slice(0,end);
+            semanticRenderer.renderStreaming(prefix);
+            referenceRenderer.renderStreaming('');
+            referenceRenderer.renderStreaming(prefix);
+            if(semanticHTML(semanticRoot)!==semanticHTML(reference)){
+              semanticFailures.push(name+': incremental cache mismatch at character '+end);
+              break;
+            }
+          }
+          // 前缀检查失败也继续收集最终态差异，方便辨别缓存问题与分块语义问题。
+          semanticRenderer.renderStreaming(source);
+          const html=semanticHTML(semanticRoot), height=semanticRoot.getBoundingClientRect().height;
+          semanticRenderer.renderFinal(source);
+          const finalHeight=semanticRoot.getBoundingClientRect().height;
+          if(html!==semanticHTML(semanticRoot)) semanticFailures.push(name+': DOM mismatch');
+          if(Math.abs(height-finalHeight)>=1) semanticFailures.push(name+': height '+height+' -> '+finalHeight);
+        }
+        check(semanticFailures.length===0,'Markdown finalization: '+semanticFailures.join('; '));
+        // 定义变化会影响已冻结的旧段落，不能只按旧段落的 source 判断缓存命中。
+        const referencePrefix='Read [the docs][guide].\n\nStable paragraph\n\nTail';
+        for(const definition of [
+          '\n\n[guide]: https://example.com/one "One"',
+          '\n\n[guide]: https://example.com/two "Two"',
+          ''
+        ]){
+          const source=referencePrefix+definition;
+          semanticRenderer.renderStreaming(source);
+          const html=semanticHTML(semanticRoot);
+          referenceRenderer.renderFinal(source);
+          check(html===semanticHTML(reference),'reference add/change/remove must invalidate frozen output');
+        }
+        semanticRenderer.renderStreaming('**unfinished');
+        check(semanticRoot.querySelector('strong')?.textContent==='unfinished','tail repair must remain available');
+        semanticRenderer.renderFinal('**unfinished');
+        check(!semanticRoot.querySelector('strong') && semanticRoot.textContent.includes('**unfinished'),
+          'final render must use original source, never the repaired copy');
+        semanticRoot.remove();
 
         // 暂停时不再排预热轮询；无 upsert 的解锁也必须重新唤醒。
         let warmerSchedules = 0;
@@ -301,6 +385,38 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-16)<1,
           'short conversation must stay top aligned');
         check(node('short-answer').style.height==='', 'short conversation must also use natural height');
+        // 收尾不应改变末行屏幕位置；history 已有占位收敛后再比较，不掩盖变更本身。
+        const reflowGeometry=[];
+        for(const [name,body] of markdownCases.slice(0,4)){
+          apply([{op:'reset'},...history,{op:'forkLock',locked:true},
+            {op:'upsert',id:'semantic-tail',kind:'assistant',body,streaming:true},
+            {op:'scrollToBottom',smooth:false}]);
+          await frames();
+          for(let attempt=0;attempt<30;attempt++){
+            if(Math.abs(innerHeight-node('semantic-tail').getBoundingClientRect().bottom-32)<2) break;
+            apply([{op:'scrollToBottom',smooth:false}]);
+            await frames();
+          }
+          checkTail('semantic-tail',name+' streaming');
+          const before=node('semantic-tail').getBoundingClientRect(), scrollBefore=scrollY;
+          apply([{op:'upsert',id:'semantic-tail',kind:'assistant',body,streaming:false}]);
+          await frames();
+          const after=node('semantic-tail').getBoundingClientRect();
+          checkTail('semantic-tail',name+' final');
+          check(Math.abs(after.height-before.height)<1 && Math.abs(after.bottom-before.bottom)<1 &&
+            Math.abs(scrollY-scrollBefore)<1,name+': finalization must not move the last line or scroll position');
+          reflowGeometry.push({name,heightDelta:after.height-before.height,scrollDelta:scrollY-scrollBefore});
+          apply([{op:'jumpTo',id:'gap-history-5'}]);
+          await new Promise(r=>setTimeout(r,250));
+          window.dispatchEvent(new WheelEvent('wheel',{deltaY:-1}));
+          await frames();
+          const top=node('gap-history-5').getBoundingClientRect().top;
+          apply([{op:'upsert',id:'semantic-tail',kind:'assistant',body:body+'\n\nMore text',streaming:true}]);
+          apply([{op:'upsert',id:'semantic-tail',kind:'assistant',body:body+'\n\nMore text',streaming:false}]);
+          await frames();
+          check(Math.abs(node('gap-history-5').getBoundingClientRect().top-top)<1,
+            name+': finalization while reading history must preserve anchor');
+        }
         if (benchmark) {
           const results = [];
           const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -335,7 +451,7 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
           // JS synchronous apply timings include serialization and forced layout, not GPU/frame presentation.
           return JSON.stringify({benchmark:'WKWebView synchronous apply; not end-to-end latency', results},null,2);
         }
-        return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting, warmer pause/resume, natural-height alternation (${geometry.length} checks), 32px tail gap and history anchor`;
+        return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting, warmer pause/resume, natural-height alternation (${geometry.length} checks), 32px tail gap and history anchor; ${markdownCases.length} semantic cases, reference invalidation, tail repair; final reflow ${JSON.stringify(reflowGeometry)}`;
         """#
         Task { @MainActor in
             do {
