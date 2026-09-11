@@ -1429,6 +1429,11 @@ final class NewPiViewModel: ObservableObject {
             )
             return false
         }
+        // 草稿可在运行期间编辑，但任何发送入口都不能取消/覆盖当前 Agent 任务。
+        guard !runtime.isStreaming else {
+            NewPiLogger.info(category: "app", message: "Send rejected while agent is running")
+            return false
+        }
 
         // 能力拦截：有图片但当前模型不支持 → 提示且不发送。
         if !draftAttachments.isEmpty {

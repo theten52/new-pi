@@ -194,11 +194,12 @@ struct NewPiSessionPanel: View {
                     // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
                     NewPiComposerTextView(
                         text: $input,
-                        isDisabled: runtime.isStreaming,
-                        placeholder: "Message NewPi…",
+                        isDisabled: false,
+                        placeholder: runtime.isStreaming ? "Prepare your next message…" : "Message NewPi…",
                         onSubmit: sendComposerInput,
                         onImagesPicked: appendDrafts
                     )
+                    .help(runtime.isStreaming ? "可以先编辑下一条消息；当前任务结束后才能发送。" : "Return 发送，Shift+Return 换行")
                     .frame(height: NewPiComposerScrollView.fixedHeight)
                     // 高亮：与状态栏一致的淡 accent 填充 + 描边。
                     .background(
@@ -218,7 +219,6 @@ struct NewPiSessionPanel: View {
                     Image(systemName: "photo.on.rectangle.angled")
                 }
                 .buttonStyle(.borderless)
-                .disabled(runtime.isStreaming)
                 .help("添加图片（也可直接拖拽或 ⌘V 粘贴到输入框）")
                 .frame(minWidth: 32)
 

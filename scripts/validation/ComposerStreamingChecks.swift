@@ -7,6 +7,7 @@ final class ComposerProbeModel: ObservableObject {
     @Published var clear = 0
     @Published var replacement = ""
     @Published var disabled = false
+    @Published var running = false
     var draft = ""
     var submitted = ""
     var acceptsSend = true
@@ -19,6 +20,7 @@ struct ComposerProbeView: View {
         VStack {
             Text("Thinking update \(model.tick)")
             NewPiComposerTextView(text: $input, isDisabled: model.disabled, onSubmit: {
+                guard !model.running else { return }
                 model.submitted = input
                 if model.acceptsSend { input = "" }
             })
@@ -132,6 +134,24 @@ struct ComposerStreamingChecks {
                 model.tick += 1
                 try? await Task.sleep(for: .milliseconds(50))
                 precondition(model.draft == "rejected draft" && textView.string == model.draft)
+                // 正在运行只阻止发送，不禁用下一条草稿；Return 不得清空它。
+                model.running = true
+                model.acceptsSend = true
+                let lastSubmission = model.submitted
+                textView.insertText(" next", replacementRange: NSRange(location: NSNotFound, length: 0))
+                textView.keyDown(with: submit)
+                for _ in 0..<20 {
+                    model.tick += 1
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                precondition(textView.isEditable && model.submitted == lastSubmission)
+                precondition(textView.string == "rejected draft next" && model.draft == textView.string)
+                model.running = false
+                try? await Task.sleep(for: .milliseconds(30))
+                textView.keyDown(with: submit)
+                try? await Task.sleep(for: .milliseconds(50))
+                precondition(model.submitted == "rejected draft next" && textView.string.isEmpty)
+                print("PASS: drafting while running, rejected Return preserves draft, sending after completion")
                 print("PASS: repeated empty-draft composition, commit, submit, rejection preservation, disabled state, external clear/restore and fixed-height scrolling")
             }
             window.orderOut(nil)
