@@ -43,6 +43,11 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let detailTurnID: String?
     /// 用户消息附带的图片附件（BACKLOG-IMAGE-INPUT）；仅 user 条目非空。
     let attachments: [MessageAttachment]
+    /// 发言者名字（CHATROOM-FLAT-MD Phase 2）：仅聊天室角色发言的 assistant 条目非空，
+    /// JS 侧用它渲染气泡头部标签（替代 session 路径的 "NewPi"）。
+    let speaker: String?
+    /// 聊天室显式声明正文流式状态；nil 保持 Session 的既有末条消息判定。
+    let streamingOverride: Bool?
 
     init(
         id: UUID = UUID(),
@@ -52,7 +57,9 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         messageIndex: Int? = nil,
         sessionEntryID: String? = nil,
         detailTurnID: String? = nil,
-        attachments: [MessageAttachment] = []
+        attachments: [MessageAttachment] = [],
+        speaker: String? = nil,
+        streamingOverride: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -62,6 +69,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.sessionEntryID = sessionEntryID
         self.detailTurnID = detailTurnID
         self.attachments = attachments
+        self.speaker = speaker
+        self.streamingOverride = streamingOverride
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -87,6 +96,12 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     var isStreamingThinking: Bool {
         if case .thinking(true) = kind { return true }
         return false
+    }
+
+    func isStreaming(isRunning: Bool, bubbleComplete: Bool, lastItemID: UUID?) -> Bool {
+        if case .thinking(let streaming) = kind { return streaming }
+        if let streamingOverride { return isRunning && streamingOverride && isAssistantMarkdown }
+        return isRunning && !bubbleComplete && id == lastItemID && isAssistantMarkdown
     }
 
     var canFork: Bool {
@@ -172,6 +187,8 @@ struct TokenRateTracker {
 /// runtime 会被映射到 ViewModel 的 @Published 属性上。
 @MainActor
 final class SessionRuntime: ObservableObject {
+    var latencyTrace: RequestLatencyTrace?
+    var latencyFirstTextItemID: UUID?
     let session: AgentSession
     let fileURL: URL
     let sessionID: UUID
@@ -205,6 +222,13 @@ final class SessionRuntime: ObservableObject {
     var detailTurnID: String?
     var detailGroupMarkerID: UUID?
     var detailMarkerIDs: [String: UUID] = [:]
+    // —— 流式直连（STREAMING-LAYOUT-ISOLATION）——
+    /// 流式期间 transcript 变异落在影子数组（不触发 @Published，面板不 re-diff），
+    /// 由 ViewModel 经 docController 直达 WebView；边界事件时 commitLiveTranscript 发布。
+    var liveTranscript: [NewPiTranscriptItem]?
+    /// 面板挂载的 transcript 控制器（NewPiSessionPanel onAppear 注入；keep-alive 常驻有效）。
+    /// nil = 无直连通道（面板未挂载），流式 flush 退回 @Published 路径。
+    weak var docController: TranscriptDocumentController?
     /// live turn 的用户消息条目 id → 当时的 live turnID（"live-..."）。
     /// 从单槽改为映射表：每轮 send 都登记一条，历史轮次在后续 agentEnd 的 rebuildTranscript
     /// 里也能通过 preservedID 查回原来的 live turnID，保证 turnID 跨多轮稳定（不翻成
@@ -213,13 +237,13 @@ final class SessionRuntime: ObservableObject {
     var detailLiveTurnIDByUser: [UUID: String] = [:]
     var liveMessageCount = 0
     var eventTask: Task<Void, Never>?
+    /// 流式增量合并缓冲（STALL-FIX）：后台事件循环把 delta 直接追加进来（锁保护），
+    /// 不再每事件跳 MainActor；MainActor 侧的节流 flush 到点一次性 drain。
+    /// 根因背景：旧实现每事件一次 MainActor 跳，主线程被 CA 提交同步等待
+    /// （RenderBox wait_for_synchronize）占住时，消费速度 << 生产速度，事件积压数分钟。
+    let streamBuffer = StreamingDeltaBuffer()
     /// 最近一次成为活跃会话的时间，用于缓存淘汰（LRU）。
     var lastUsedAt = Date()
-    /// 流式文本增量合并缓冲：textDelta 先累积到这里，按节流间隔一次性合并进 transcript，
-    /// 避免每个 delta 都触发 O(n) 字符串拼接与全量 UI 重渲染（见流式渲染优化）。
-    var pendingStreamingDelta = ""
-    /// 流式思考增量缓冲：与 pendingStreamingDelta 同管线同节流，flush 时先入 thinking 条目。
-    var pendingThinkingDelta = ""
     var streamingFlushTask: Task<Void, Never>?
     /// 流式输出 token 速率追踪（BACKLOG-TOKEN-RATE）：累计 textDelta 估算的
     /// 输出 token 数 + 时间戳，滑动窗口计算 tokens/s，仅流式期间显示。
@@ -429,12 +453,19 @@ final class NewPiViewModel: ObservableObject {
     private var tokenRateRefreshTimer: Timer?
     @Published var providerConfig = ProviderConfigStore.bootstrapDefaultConfig()
     @Published var providerListItems: [NewPiProviderListItem] = []
+    /// 合并后的厂商模板列表（内置 + overlay 覆盖/新增）。
+    @Published var vendorTemplates: [VendorPreset] = VendorPresets.all
+    /// 厂商模板 overlay 存储（编辑内置 + 自定义新增 + 恢复默认）。
+    private let vendorTemplateStore = VendorTemplateStore()
     @Published var savedSessions: [SessionSummary] = []
     @Published var activeSessionID: UUID?
     @Published var activeProviderName = "Anthropic"
     @Published var activeProviderID: String?
     @Published var activeProviderModel = ""
     @Published var activeProviderReady = false
+    /// 状态栏临时思考档位（会话级覆盖；nil = 用当前 provider profile 的默认档位）。
+    /// 与 profile.thinkingLevel 不同：不持久化，换会话即复位（见 beginSession）。
+    @Published var thinkingLevelOverride: ThinkingLevel?
     @Published var branchPointCount = 0
     @Published var isForkedBranch = false
     /// 正在切换 session（后台构建中），UI 据此显示加载指示。
@@ -442,6 +473,7 @@ final class NewPiViewModel: ObservableObject {
     /// 会话切换序号：同项目内连续切换时，只有「最后发起的那次」才算数（GLM review 意见2 竞态防护）。
     /// 防止"冷 A 慢构建 → 热 B 先切 → A 就绪后覆盖 B"把用户拽回未选择的会话。复用分支同样取号。
     private var sessionSwitchGeneration = 0
+    private var providerStateGeneration = 0
 
     private var runtimes: [String: SessionRuntime] = [:]
     private var activeRuntime: SessionRuntime? {
@@ -517,22 +549,60 @@ final class NewPiViewModel: ObservableObject {
         return providerConfig.profiles.first(where: { $0.id == id })
     }
 
-    /// 当前活跃 provider 的 preset（供上下文窗口目录表兜底使用）。
-    private var activeProfilePreset: ProviderPreset? {
-        activeProfile?.preset
+    /// 当前生效的思考档位：状态栏临时覆盖优先，否则回落到活跃 provider 的默认档位。
+    var activeThinkingLevel: ThinkingLevel {
+        thinkingLevelOverride ?? activeProfile?.thinkingLevel ?? .off
+    }
+
+    /// 给 profile 应用会话级思考档位覆盖（不改写 profile 本身，不持久化）。
+    private func effectiveModelConfig(for profile: ProviderProfile) -> ModelConfig {
+        var config = profile.modelConfig
+        if let override = thinkingLevelOverride {
+            config.thinkingLevel = override
+        }
+        return config
+    }
+
+    /// 重建当前会话的 AgentLoopConfig（切模型 / 切思考档位共用）。
+    /// 返回 MCP 工具数量（供日志）。
+    @discardableResult
+    private func rebuildAgentConfig(profile: ProviderProfile, projectURL: URL) async throws -> Int {
+        let llm = try LLMProviderFactory.make(
+            profile: profile,
+            credentialResolver: providerCredentialResolver
+        )
+        let mcpTools = await loadMCPTools()
+        let mc = effectiveModelConfig(for: profile)
+        let newConfig = AgentLoopConfig(
+            model: mc,
+            llm: llm,
+            tools: AgentSessionFactory.codingTools(
+                workingDirectory: projectURL,
+                llm: llm,
+                model: mc,
+                additionalTools: mcpTools
+            ),
+            toolPolicy: .codingAgentDefault,
+            compaction: CompactionConfig.recommended(
+                contextWindow: profile.contextWindow(for: profile.modelID)
+            )
+        )
+        await session?.updateConfig(newConfig)
+        return mcpTools.count
     }
 
     /// 状态栏「上下文占用」文本：`上下文 9.2% / 1.0M`。
     ///
     /// - 分子：最近一轮请求的真实输入 token（未命中缓存 + 命中缓存 + 写缓存，
     ///   即 `UsageStats.totalInputTokens`），代表当前上下文实际占用的输入量。
-    /// - 分母：当前模型的上下文窗口大小（来自 `ContextWindowCatalog` 内置目录表）。
+    /// - 分母：当前模型的上下文窗口大小（`ProviderProfile.contextWindow(for:)`：
+    ///   modelDefinitions 精确值 → 静态目录表 → provider 兜底）。
     ///
     /// 无输入数据（尚未产生任何请求）或查不到窗口大小时返回 nil（不显示）。
     func contextUsageText(for usage: UsageStats) -> String? {
         let input = usage.totalInputTokens
-        guard input > 0, let preset = activeProfilePreset else { return nil }
-        let window = ContextWindowCatalog.windowTokens(for: activeProviderModel, preset: preset)
+        guard input > 0, let profile = activeProfile else { return nil }
+        let window = profile.contextWindow(for: activeProviderModel)
         guard window > 0 else { return nil }
 
         let percent = Double(input) / Double(window) * 100
@@ -552,10 +622,13 @@ final class NewPiViewModel: ObservableObject {
     }
 
     init() {
+        vendorTemplates = vendorTemplateStore.load()
         Task {
             await reloadProviders()
             await restoreLastProjectIfNeeded()
         }
+        // 启动时从今日 JSONL 尾部恢复最近指标（跨会话留存 → 面板重启后仍可见）。
+        Task { await LLMMetricsRecorder.shared.loadRecentFromDisk() }
     }
 
     func pickProject() {
@@ -628,6 +701,8 @@ final class NewPiViewModel: ObservableObject {
 
     /// 停止并清空所有后台的 AgentSession（在切换项目等场景下调用）。
     private func stopAllLiveSessions() async {
+        sessionSwitchGeneration += 1
+        isSwitchingSession = false
         for runtime in runtimes.values {
             runtime.eventTask?.cancel()
             await runtime.session.shutdown()
@@ -711,6 +786,13 @@ final class NewPiViewModel: ObservableObject {
             let hasKey = await providerCredentialResolver.hasAPIKey(for: profile)
             items.append(NewPiProviderListItem(profile: profile, hasAPIKey: hasKey))
         }
+        // 按厂商名排序（设计文档「排序：按厂商名排序」）；同名（多实例）时按 id 保序，
+        // 避免不稳定排序导致同名项每次刷新顺序跳动。
+        items.sort {
+            let nameOrder = $0.profile.name.localizedCaseInsensitiveCompare($1.profile.name)
+            if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+            return $0.profile.id < $1.profile.id
+        }
         providerListItems = items
 
         // 有活跃会话时显示该会话自己选择的 provider（会话内切换记进 header，逐会话记忆）；
@@ -743,6 +825,12 @@ final class NewPiViewModel: ObservableObject {
         // 目标与当前一致：无副作用，直接返回。
         if activeProviderID == profileID, activeProviderModel == trimmedModel { return }
 
+        // 换到另一家 provider 时清会话级思考覆盖（回到新 provider 的默认档位）；
+        // 同 provider 内切模型保留覆盖（用户显式选的档位不因换模型而丢）。
+        if profileID != activeProviderID {
+            thinkingLevelOverride = nil
+        }
+
         do {
             profile.modelID = trimmedModel
             profile.addModel(trimmedModel)
@@ -750,23 +838,7 @@ final class NewPiViewModel: ObservableObject {
             // 同步设为默认 provider（否则状态栏会回落显示旧默认）。
             try providerConfigStore.upsertProfile(profile, in: &providerConfig, setAsDefault: session == nil)
 
-            let llm = try LLMProviderFactory.make(
-                profile: profile,
-                credentialResolver: providerCredentialResolver
-            )
-            let mcpTools = await loadMCPTools()
-            let newConfig = AgentLoopConfig(
-                model: profile.modelConfig,
-                llm: llm,
-                tools: AgentSessionFactory.codingTools(
-                    workingDirectory: projectURL,
-                    llm: llm,
-                    model: profile.modelConfig,
-                    additionalTools: mcpTools
-                ),
-                toolPolicy: .codingAgentDefault
-            )
-            await session?.updateConfig(newConfig)
+            let toolCount = try await rebuildAgentConfig(profile: profile, projectURL: projectURL)
 
             NewPiLogger.info(
                 category: "app",
@@ -774,7 +846,7 @@ final class NewPiViewModel: ObservableObject {
                 details: """
                 provider=\(profile.name)
                 model=\(profile.modelID)
-                mcpTools=\(mcpTools.count)
+                mcpTools=\(toolCount)
                 """
             )
 
@@ -793,15 +865,29 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    /// 状态栏临时切换思考档位（BACKLOG：可调节思考）。
+    /// 会话级覆盖：不写回 profile；与 provider 默认档位一致时清空覆盖（回落默认）。
+    func setThinkingLevel(_ level: ThinkingLevel) async {
+        guard !isStreaming else { return }
+        guard let projectURL else { return }
+        guard let profile = activeProfile else { return }
+        // 与 profile 默认一致 → 清覆盖（否则保持覆盖，切会话时在 beginSession 复位）。
+        thinkingLevelOverride = (level == profile.thinkingLevel) ? nil : level
+        do {
+            try await rebuildAgentConfig(profile: profile, projectURL: projectURL)
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
     /// 状态栏模型菜单的分组数据源（按 provider 分组，组内为该 provider 的模型列表）。
     var providerModelGroups: [NewPiProviderModelGroup] {
         providerListItems.map { item in
-            let definition = ProviderPresetCatalog.definition(for: item.profile.preset)
-            return NewPiProviderModelGroup(
+            NewPiProviderModelGroup(
                 profileID: item.profile.id,
                 profileName: item.profile.name,
-                systemImage: definition.systemImage,
-                hasAPIKey: item.hasAPIKey || !definition.credentialRequired,
+                systemImage: item.profile.preset.systemImage,
+                hasAPIKey: item.hasAPIKey || !item.profile.preset.credentialRequired,
                 models: item.profile.models
             )
         }
@@ -860,6 +946,51 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    /// 模型发现：从 provider 端点拉取可用模型 ID 列表（设计文档「模型发现」）。
+    /// 只负责拉取，合并进 profile.models 由调用方（Edit sheet）完成。
+    func fetchModels(for profile: ProviderProfile) async -> Result<[String], Error> {
+        do {
+            let models = try await ProviderModelLister.listModels(
+                profile: profile,
+                credentialResolver: providerCredentialResolver
+            )
+            return .success(models)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// 模板编辑里的模型发现：模板无持久化凭据，用临时 API Key 拉取模型列表。
+    func fetchModelsForTemplate(_ template: VendorPreset, apiKey: String) async -> Result<[String], Error> {
+        do {
+            let profile = VendorPresets.makeProfile(from: template)
+            let models = try await ProviderModelLister.listModels(profile: profile, apiKey: apiKey)
+            return .success(models)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// 保存厂商模板列表（只把与内置不同的写入 overlay）。
+    func saveVendorTemplates(_ templates: [VendorPreset]) async {
+        do {
+            try vendorTemplateStore.save(templates)
+            vendorTemplates = vendorTemplateStore.load()
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
+    /// 恢复某个模板到内置默认（删除 overlay 条目）。
+    func resetVendorTemplate(id: String) async {
+        do {
+            try vendorTemplateStore.reset(id: id)
+            vendorTemplates = vendorTemplateStore.load()
+        } catch {
+            appendTranscript(kind: .error, body: error.localizedDescription)
+        }
+    }
+
     func resetSession() async {
         // 手动入口语义保留：reset 由用户显式触发，等价于手动 New Session。
         await startNewSession()
@@ -872,15 +1003,29 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func resumeSession(_ summary: SessionSummary) async {
-        guard summary.fileURL != currentSessionFileURL else { return }
-
+        guard let projectURL else { return }
+        sessionSwitchGeneration += 1
+        let generation = sessionSwitchGeneration
+        isSwitchingSession = true
+        defer {
+            if generation == sessionSwitchGeneration { isSwitchingSession = false }
+        }
+        let fileURL = summary.fileURL
+        // 点击当前会话也取号，取消之前仍在加载的其它会话；热命中不依赖磁盘。
+        // 但不重置当前会话的临时思考档位，也不重复激活已在前台的 runtime。
+        guard fileURL != currentSessionFileURL else { return }
+        if runtimes[fileURL.path] != nil {
+            await beginSession(restoredContext: nil, fileURL: fileURL, requestGeneration: generation)
+            return
+        }
         do {
-            let fileURL = summary.fileURL
             let context = try await Task.detached(priority: .userInitiated) {
                 try JSONLSessionStore().load(from: fileURL)
             }.value
-            await beginSession(restoredContext: context, fileURL: fileURL)
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
+            await beginSession(restoredContext: context, fileURL: fileURL, requestGeneration: generation)
         } catch {
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
@@ -928,6 +1073,8 @@ final class NewPiViewModel: ObservableObject {
     /// 结束当前活跃会话：停掉事件循环、移除 runtime、清空活跃状态。
     /// 之后用户需手动点击 New Session 或从历史列表恢复会话。
     private func closeActiveSession() async {
+        sessionSwitchGeneration += 1
+        isSwitchingSession = false
         guard let runtime = activeRuntime else { return }
         runtime.eventTask?.cancel()
         runtimes.removeValue(forKey: runtime.fileURL.path)
@@ -1064,42 +1211,43 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
+    private func beginSession(restoredContext: SessionContext?, fileURL: URL?, requestGeneration: Int? = nil) async {
         guard let projectURL else { return }
+        let generation: Int
+        if let requestGeneration {
+            guard requestGeneration == sessionSwitchGeneration else { return }
+            generation = requestGeneration
+        } else {
+            sessionSwitchGeneration += 1
+            generation = sessionSwitchGeneration
+        }
         isSwitchingSession = true
-        defer { isSwitchingSession = false }
-
-        // 切换序号（GLM review 意见2）：每次发起取号，冷恢复 await 后校验，防同项目连点竞态。
-        let generation = sessionSwitchGeneration + 1
-        sessionSwitchGeneration = generation
+        // 会话级思考档位覆盖只在单次会话期间有效：切换会话即回到各 provider 的默认档位。
+        thinkingLevelOverride = nil
+        defer {
+            if generation == sessionSwitchGeneration { isSwitchingSession = false }
+        }
 
         let profile: ProviderProfile
         do {
+            // 先读取缓存 runtime 自己的 header，而不是先解析无关的默认 provider。
+            if let fileURL, let existing = runtimes[fileURL.path] {
+                let header = await existing.session.attachedSessionHeader
+                guard generation == sessionSwitchGeneration, self.projectURL == projectURL,
+                      runtimes[fileURL.path] === existing else { return }
+                let sessionProfile = try resolveProfile(for: header)
+                existing.lastUsedAt = Date()
+                activeRuntime = existing
+                activeSessionID = existing.sessionID
+                rememberActiveSession(fileURL: fileURL)
+                await setActiveProviderState(sessionProfile)
+                NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
+                return
+            }
             profile = try resolveProfile(for: restoredContext?.header)
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)
             activeProviderReady = false
-            return
-        }
-
-        // 复用已有的 runtime：不重建 agent / 不读文件 / 不加载 MCP，直接轻量切换并反映当前状态。
-        if let fileURL, let existing = runtimes[fileURL.path] {
-            NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
-            if let header = await existing.session.attachedSessionHeader {
-                activeSessionID = header.id
-                // 显示该会话自己选择的 provider（而不是默认 provider）：
-                // 会话内的 provider 切换记进了 header，切回时要原样反映。
-                let sessionProfile = (try? resolveProfile(for: header)) ?? profile
-                existing.lastUsedAt = Date()
-                activeRuntime = existing
-                rememberActiveSession(fileURL: fileURL)
-                await setActiveProviderState(sessionProfile)
-                return
-            }
-            existing.lastUsedAt = Date()
-            activeRuntime = existing
-            rememberActiveSession(fileURL: fileURL)
-            await setActiveProviderState(profile)
             return
         }
 
@@ -1110,6 +1258,7 @@ final class NewPiViewModel: ObservableObject {
         // 后台线程，主线程只做最终状态切换，避免切换卡顿、对话加载慢。
         do {
             let mcpTools = await loadMCPTools()
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             let resolver = providerCredentialResolver
 
             let payload = try await Task.detached(priority: .userInitiated) { () throws -> BuiltSessionPayload in
@@ -1123,10 +1272,15 @@ final class NewPiViewModel: ObservableObject {
                         llm: llm,
                         model: profile.modelConfig,
                         restoredMessages: restoredMessages,
-                        additionalTools: mcpTools
+                        additionalTools: mcpTools,
+                        contextWindow: profile.contextWindow(for: profile.modelID)
                     )
                     let h = restoredHeader ?? SessionHeader(workingDirectory: projectURL)
-                    await built.attachPersistence(fileURL: fileURL, header: h)
+                    if let restoredContext {
+                        await built.attachPersistence(fileURL: fileURL, context: restoredContext)
+                    } else {
+                        await built.attachPersistence(fileURL: fileURL, header: h)
+                    }
                     session = built
                     header = h
                     sessionFileURL = fileURL
@@ -1140,9 +1294,10 @@ final class NewPiViewModel: ObservableObject {
                         workingDirectory: projectURL,
                         llm: llm,
                         model: profile.modelConfig,
-                        additionalTools: mcpTools
+                        additionalTools: mcpTools,
+                        contextWindow: profile.contextWindow(for: profile.modelID)
                     )
-                    await built.attachPersistence(fileURL: created.fileURL, header: created.context.header)
+                    await built.attachPersistence(fileURL: created.fileURL, context: created.context)
                     session = built
                     header = created.context.header
                     sessionFileURL = created.fileURL
@@ -1167,13 +1322,13 @@ final class NewPiViewModel: ObservableObject {
 
             // 竞态防护：构建期间（MCP 启动可能耗时数秒）用户可能已切换项目，
             // 此时旧项目的 runtime 不得注册为活跃会话，直接丢弃。
-            guard self.projectURL == projectURL else {
+            guard self.projectURL == projectURL, generation == self.sessionSwitchGeneration else {
                 NewPiLogger.info(
                     category: "app",
-                    message: "Discarding session built for previous project",
+                    message: "Discarding superseded session build",
                     details: "sessionFile=\(payload.fileURL.path)"
                 )
-                await payload.session.shutdown()
+                // 尚未启动事件循环或 prompt；直接释放，不能让旧上下文在 shutdown 时回写文件。
                 return
             }
 
@@ -1229,6 +1384,7 @@ final class NewPiViewModel: ObservableObject {
                 """
             )
         } catch {
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             NewPiLogger.error(
                 category: "app",
                 message: "Failed to begin session",
@@ -1241,13 +1397,22 @@ final class NewPiViewModel: ObservableObject {
 
     /// 把当前 provider 状态同步到 @Published（供两个分支复用）。
     private func setActiveProviderState(_ profile: ProviderProfile) async {
+        providerStateGeneration += 1
+        let request = providerStateGeneration
+        let project = projectURL
+        let runtime = activeRuntime
         activeProviderID = profile.id
         activeProviderName = profile.name
         activeProviderModel = profile.modelID
-        activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+        activeProviderReady = false
+        let ready = await providerCredentialResolver.hasAPIKey(for: profile)
+        guard request == providerStateGeneration,
+              project == projectURL, runtime === activeRuntime else { return }
+        activeProviderReady = ready
     }
 
-    func send(_ text: String) {
+    @discardableResult
+    func send(_ text: String) -> Bool {
         send(text, draftAttachments: [])
     }
 
@@ -1255,7 +1420,11 @@ final class NewPiViewModel: ObservableObject {
     ///
     /// 发送前做能力拦截：当前模型不支持图片时给出明确提示且不发送；
     /// 附件先落盘到会话附件目录（`SessionAttachments`），再组装成 `UserMessage`。
-    func send(_ text: String, draftAttachments: [DraftImageAttachment]) {
+    @discardableResult
+    func send(_ text: String, draftAttachments: [DraftImageAttachment]) -> Bool {
+        let latency = RequestLatencyTrace()
+        var accepted = false
+        defer { if !accepted { latency.mark(.sendRejected) } }
         guard let runtime = activeRuntime else {
             appendTranscript(
                 kind: .system,
@@ -1263,7 +1432,12 @@ final class NewPiViewModel: ObservableObject {
                     ? "Open a project first."
                     : "Start a new session first (⇧⌘N)."
             )
-            return
+            return false
+        }
+        // 草稿可在运行期间编辑，但任何发送入口都不能取消/覆盖当前 Agent 任务。
+        guard !runtime.isStreaming else {
+            NewPiLogger.info(category: "app", message: "Send rejected while agent is running")
+            return false
         }
 
         // 能力拦截：有图片但当前模型不支持 → 提示且不发送。
@@ -1274,23 +1448,28 @@ final class NewPiViewModel: ObservableObject {
                     kind: .error,
                     body: "当前模型 \(modelName) 不支持图片输入。请在设置中为该模型开启「支持图片识别」，或切换到支持图片的模型。"
                 )
-                return
+                return false
             }
         }
 
         // 附件落盘：解码/缩放/压缩已在采集层完成，这里做体积校验 + 写入 + 组装路径引用。
         var attachments: [MessageAttachment] = []
         if !draftAttachments.isEmpty {
+            for draft in draftAttachments {
+                if let tooLarge = ImageAttachmentProcessor.validate(draft) {
+                    appendTranscript(kind: .error, body: tooLarge)
+                    return false
+                }
+            }
+            var writtenFiles: [URL] = []
             do {
                 let dir = try SessionAttachments.directory(for: runtime.sessionID)
                 for draft in draftAttachments {
-                    if let tooLarge = ImageAttachmentProcessor.validate(draft) {
-                        appendTranscript(kind: .error, body: tooLarge)
-                        return
-                    }
                     let ext = Self.fileExtension(for: draft.mediaType)
                     let fileName = "\(draft.id.uuidString).\(ext)"
-                    try draft.data.write(to: dir.appendingPathComponent(fileName))
+                    let fileURL = dir.appendingPathComponent(fileName)
+                    try draft.data.write(to: fileURL)
+                    writtenFiles.append(fileURL)
                     let relativePath = "\(runtime.sessionID.uuidString)/\(fileName)"
                     attachments.append(
                         MessageAttachment(
@@ -1302,8 +1481,11 @@ final class NewPiViewModel: ObservableObject {
                     )
                 }
             } catch {
+                for fileURL in writtenFiles {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
                 appendTranscript(kind: .error, body: "无法保存图片附件：\(error.localizedDescription)")
-                return
+                return false
             }
         }
 
@@ -1325,14 +1507,22 @@ final class NewPiViewModel: ObservableObject {
         runtime.detailLiveTurnIDByUser[userItemID] = liveTurnID
         runtime.isStreaming = true
         runtime.agentActivity = .thinking
+        runtime.latencyTrace = latency
+        runtime.latencyFirstTextItemID = nil
+        runtime.docController?.beginLatencyTrace(latency, firstTextItemID: nil)
         reflectActive()
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
         let message = attachments.isEmpty
             ? AgentMessage.user(text)
             : AgentMessage.user(text, attachments: attachments)
         Task {
-            await runtime.session.prompt(message)
+            await RequestLatencyContext.$current.withValue(latency) {
+                await runtime.session.prompt(message)
+            }
         }
+        accepted = true
+        latency.mark(.sendAccepted)
+        return true
     }
 
     /// MIME 类型 → 文件扩展名。
@@ -1383,6 +1573,7 @@ final class NewPiViewModel: ObservableObject {
         NewPiLogger.info(category: "app", message: "User aborted agent run")
         guard let runtime = activeRuntime else { return }
         flushStreamingDelta(on: runtime)
+        commitLiveTranscript(on: runtime)
         runtime.pendingToolApproval = nil
         runtime.agentActivity = .idle
         reflectActive()
@@ -1396,35 +1587,90 @@ final class NewPiViewModel: ObservableObject {
     /// 为某个 runtime 建立常驻事件循环：持续读取该 AgentSession 的事件，更新它自己
     /// 的转录与状态。**不会**因 UI 切到其它 session 而取消，从而保证后台 session 的
     /// 输出一直累积在自己名下。
+    ///
+    /// STALL-FIX：消费循环跑在后台线程（Task.detached），不再整环挂 MainActor。
+    /// 旧实现每个事件一次 MainActor hop；流式 100+ delta/s 时，主线程一旦被渲染提交
+    /// 的同步表面分配等待（RenderBox wait_for_synchronize，实测单次可达数秒）占住，
+    /// 消费速度 << 生产速度，AsyncStream 无界积压，流结束后还要排空数分钟（卡顿根因）。
+    /// 现在：textDelta/thinkingDelta 在后台实时追加进 streamBuffer（锁保护合并），
+    /// 只在脏标记 false→true 时 poke 一次 MainActor 调度节流 flush；边界事件才逐条
+    /// hop（handle 入口先 drain 缓冲，内容顺序不变）。主线程卡顿只延迟上屏，不再积压。
     private func startRuntimeEventLoop(_ runtime: SessionRuntime) {
         runtime.eventTask?.cancel()
         let session = runtime.session
-        runtime.eventTask = Task { @MainActor in
+        runtime.eventTask = Task.detached { [weak self] in
             let stream = await session.events()
-            // 诊断：记录 agent 起点与上一事件的处理间隔，定位「LLM 已完、UI 未更新」的延迟。
+            // 诊断：记录 agent 起点（接收侧），agentEnd 到达时的时长即真实流式时长。
             var runStartedAt: Date?
-            var lastEventHandledAt = Date()
+            // STALL-VERIFY：消费端（后台）textDelta 序号，与 AgentSession bcast 序号对齐，
+            // 两端时间差 = 生产→后台消费的投递延迟（已不含 MainActor 变量）。
+            var probeConsumedTextCount = 0
+            var latency: RequestLatencyTrace?
+            var observedFirstText = false
             for await event in stream {
-                let now = Date()
-                let gap = now.timeIntervalSince(lastEventHandledAt)
-                if gap > 0.5 {
-                    NewPiLogger.info(
-                        category: "app",
-                        message: "UI event loop stall",
-                        details: "gap=\(String(format: "%.2f", gap))s nextEvent=\(event.diagnosticName)"
-                    )
+                if Task.isCancelled { return }
+                switch event {
+                case let .textDelta(delta):
+                    if !delta.isEmpty && !observedFirstText {
+                        observedFirstText = true
+                        latency?.mark(.firstConsumerText)
+                    }
+                    probeConsumedTextCount += 1
+                    if probeConsumedTextCount % 100 == 0 {
+                        NewPiLogger.info(
+                            category: "app",
+                            message: "STALL-VERIFY consumed",
+                            details: "text#\(probeConsumedTextCount)"
+                        )
+                    }
+                    // 后台合并 + 按需 poke；agentActivity/streamingBubbleComplete 等
+                    // 状态迁移由 flush（MainActor）按节流节奏统一执行。
+                    if runtime.streamBuffer.appendText(delta) {
+                        self?.pokeStreamingFlushFromBackground(on: runtime)
+                    }
+                case let .thinkingDelta(delta):
+                    if runtime.streamBuffer.appendThinking(delta) {
+                        self?.pokeStreamingFlushFromBackground(on: runtime)
+                    }
+                default:
+                    if case .agentStart = event {
+                        runStartedAt = Date()
+                        latency = await runtime.latencyTrace
+                        observedFirstText = false
+                    }
+                    if case .agentEnd = event, let runStartedAt {
+                        latency?.mark(.agentEnded)
+                        NewPiLogger.info(
+                            category: "app",
+                            message: "UI: run wall time",
+                            details: "elapsed=\(String(format: "%.2f", Date().timeIntervalSince(runStartedAt)))s（接收侧口径=真实流式时长）"
+                        )
+                    }
+                    // 边界事件逐条 hop MainActor：hop 滞后即主线程不可用时长（卡顿探针）。
+                    let enqueuedAt = Date()
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        let hopLag = Date().timeIntervalSince(enqueuedAt)
+                        if hopLag > 0.5 {
+                            NewPiLogger.info(
+                                category: "app",
+                                message: "UI event loop stall",
+                                details: "hopLag=\(String(format: "%.2f", hopLag))s event=\(event.diagnosticName)（边界事件等 MainActor 调度的时长）"
+                            )
+                        }
+                        handle(event, on: runtime)
+                    }
                 }
-                if case .agentStart = event { runStartedAt = now }
-                if case .agentEnd = event, let runStartedAt {
-                    NewPiLogger.info(
-                        category: "app",
-                        message: "UI: run wall time",
-                        details: "elapsed=\(String(format: "%.2f", now.timeIntervalSince(runStartedAt)))s"
-                    )
-                }
-                handle(event, on: runtime)
-                lastEventHandledAt = Date()
             }
+        }
+    }
+
+    /// 后台消费循环的 flush 调度入口（STALL-FIX）：仅脏标记 false→true 时被调用，
+    /// 跳一次 MainActor 走既有单飞节流；其余 delta 零 hop。
+    private nonisolated func pokeStreamingFlushFromBackground(on runtime: SessionRuntime) {
+        Task { @MainActor [weak self, weak runtime] in
+            guard let self, let runtime else { return }
+            self.scheduleStreamingFlush(on: runtime)
         }
     }
 
@@ -1532,24 +1778,15 @@ final class NewPiViewModel: ObservableObject {
             // messageEnd 默认不触发镜像刷新；最终答复落定（状态栏翻 ready）时除外。
             hasVisibleStateChange = runtime.finalAnswerComplete
         case let .textDelta(delta):
-            runtime.agentActivity = .writing
-            // 新一轮正文开始（多轮 run 的后续 turn）：气泡切回流式渲染。
-            runtime.streamingBubbleComplete = false
-            runtime.finalAnswerComplete = false
-            runtime.tokenRateTracker.record(delta: delta)
+            // STALL-FIX：事件循环已在后台拦截 delta 直写 streamBuffer，正常不会走到这里；
+            // 保留兼容其它入口。状态迁移（agentActivity/.writing 等）由 flush 统一执行。
             enqueueStreamingDelta(delta, on: runtime)
-            if runtime === activeRuntime, agentActivity != .writing {
-                agentActivity = .writing
-            }
             hasVisibleStateChange = false
         case let .thinkingDelta(delta):
             // 思考过程入转录：缓冲后按与正文相同的节流节奏合并进 thinking 条目。
+            // STALL-FIX：同 textDelta，正常被后台拦截；且移除了逐 delta 的 DEBUG 日志
+            //（旧日志每思考 delta 产生一次 MainActor 日志 hop，百次/秒，本身就是卡顿源）。
             enqueueThinkingDelta(delta, on: runtime)
-            NewPiLogger.debug(
-                category: "app",
-                message: "UI: reasoning delta",
-                details: "length=\(delta.count)"
-            )
             hasVisibleStateChange = false
         case let .toolApprovalRequired(request):
             runtime.pendingToolApproval = request
@@ -1611,6 +1848,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.agentActivity = .thinking
         case .agentEnd:
             runtime.isStreaming = false
+            runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
             freezeStreamingThinking(on: runtime)
@@ -1626,8 +1864,10 @@ final class NewPiViewModel: ObservableObject {
                 await refreshSessionList()
             }
         case let .error(error):
+            runtime.latencyTrace?.mark(.failed)
             appendTranscript(kind: .error, body: error.localizedDescription, on: runtime)
             runtime.isStreaming = false
+            runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
             if runtime === activeRuntime {
@@ -1683,6 +1923,8 @@ final class NewPiViewModel: ObservableObject {
         on runtime: SessionRuntime,
         preservedPrefixCount: Int = 0
     ) {
+        // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：rebuild 前先并影子，防丢流式尾部。
+        commitLiveTranscript(on: runtime)
         // 方案 A（compaction 后）保留前缀时，index 空间会重叠：被压缩旧历史的 messageIndex
         // 是压缩前原始 position（0..N-1），而重建的 summary+尾巴在 messages 里从 0 重新排。
         // 若用整个 transcript 构建 existingByMessageIndex，重建 summary（index=0）会误命中
@@ -2042,6 +2284,8 @@ final class NewPiViewModel: ObservableObject {
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
     @discardableResult
     private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], on runtime: SessionRuntime) -> UUID {
+        // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：追加前先并影子。
+        commitLiveTranscript(on: runtime)
         let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments)
         runtime.transcript.append(item)
         if runtime === activeRuntime {
@@ -2059,20 +2303,28 @@ final class NewPiViewModel: ObservableObject {
         // 避免硬档位切换造成的「顺畅→突然卡一下→涌一大段」观感。
         // 实测（sample）：主线程 ~44% 时间阻塞在每次渲染提交的 CA 表面分配同步上，
         // 单次提交成本 0.5~1s；积压越深就要把提交降得越稀，否则 backlog 雪崩。
-        let backlog = runtime.pendingStreamingDelta.count
-        return UInt64(min(40 + backlog / 150, 600))
+        // 注：wip 曾把下限提到 200ms（BACKLOG-STALL 缓解）；STALL-FIX 后事件消费已
+        // 不依赖主线程可用性，40ms 下限恢复——积压只来自渲染慢，不再雪崩。
+        let backlog = runtime.streamBuffer.pendingCount
+        // 实验旋钮（PIN-FREEZE 排查）：NEWPI_FLUSH_MS 覆盖节流下限，验证
+        // 「可见冻结 = 每帧新表面分配 × WindowServer 确认」是否与提交频率成正比。
+        let base = ProcessInfo.processInfo.environment["NEWPI_FLUSH_MS"].flatMap(Int.init) ?? 40
+        return UInt64(min(base + backlog / 150, 600))
     }
 
     /// 缓冲一个流式文本增量，并按节流间隔调度一次合并刷新；若已有刷新任务在排队则只追加。
-    private func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
-        runtime.pendingStreamingDelta += delta
-        scheduleStreamingFlush(on: runtime)
+    /// STALL-FIX：任意线程可调（后台事件循环直接用）；仅脏标记 false→true 才调度 flush。
+    private nonisolated func enqueueStreamingDelta(_ delta: String, on runtime: SessionRuntime) {
+        if runtime.streamBuffer.appendText(delta) {
+            pokeStreamingFlushFromBackground(on: runtime)
+        }
     }
 
     /// 缓冲一个流式思考增量（与正文共用同一刷新任务与节流节奏）。
-    private func enqueueThinkingDelta(_ delta: String, on runtime: SessionRuntime) {
-        runtime.pendingThinkingDelta += delta
-        scheduleStreamingFlush(on: runtime)
+    private nonisolated func enqueueThinkingDelta(_ delta: String, on runtime: SessionRuntime) {
+        if runtime.streamBuffer.appendThinking(delta) {
+            pokeStreamingFlushFromBackground(on: runtime)
+        }
     }
 
     private func scheduleStreamingFlush(on runtime: SessionRuntime) {
@@ -2091,31 +2343,145 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 立即把未合并的流式增量写入 transcript（在状态边界 / abort 前调用，防止文本丢失与乱序）。
+    ///
+    /// STREAMING-LAYOUT-ISOLATION：有直连通道（面板已挂载）时，变异写入影子数组并经
+    /// controller 直达 WebView，不触发 runtime.transcript 的 @Published——面板不再每 flush
+    /// re-diff，WKWebView 从 SwiftUI 布局传播中隔离。边界事件（handle 状态分支 / abort）
+    /// 经 commitLiveTranscript 发布一次。无通道时退回 @Published 路径，行为与旧版一致。
+    ///
+    /// STALL-FIX：delta 由后台事件循环实时合并进 streamBuffer，这里整体 drain——
+    /// 主线程被渲染提交阻塞期间事件零积压（后台照收），只延迟上屏。
     private func flushStreamingDelta(on runtime: SessionRuntime) {
         runtime.streamingFlushTask?.cancel()
         runtime.streamingFlushTask = nil
+        let liveDriven = runtime.docController != nil
+        var items = runtime.liveTranscript ?? runtime.transcript
+        var mutated = false
+        let drained = runtime.streamBuffer.drain()
         // 思考增量先于正文 flush：时序上 thinkingDelta 总是先于同轮 textDelta 到达。
-        if !runtime.pendingThinkingDelta.isEmpty {
-            let delta = runtime.pendingThinkingDelta
-            runtime.pendingThinkingDelta = ""
-            appendOrUpdateThinking(delta, on: runtime)
+        if !drained.thinking.isEmpty {
+            appendOrUpdateThinking(drained.thinking, into: &items, on: runtime)
+            mutated = true
         }
-        guard !runtime.pendingStreamingDelta.isEmpty else { return }
-        let delta = runtime.pendingStreamingDelta
-        runtime.pendingStreamingDelta = ""
-        // 诊断：flush 本身（字符串拼接 + transcript 更新 + SwiftUI 提交）若过慢会卡事件循环。
+        guard !drained.text.isEmpty else {
+            // 仅思考增量被冲刷时才落地；两者皆空（纯状态边界重入）不发布、不投递。
+            if mutated { storeFlushTarget(items, live: liveDriven, on: runtime) }
+            return
+        }
+        // 原 handle(.textDelta) 里的逐事件状态迁移，STALL-FIX 后按 flush 节奏统一执行
+        // @Published 不会自动去重，纯正文刷新不能让整个面板再次失效。
+        if runtime.agentActivity != .writing { runtime.agentActivity = .writing }
+        if runtime.streamingBubbleComplete { runtime.streamingBubbleComplete = false }
+        if runtime.finalAnswerComplete { runtime.finalAnswerComplete = false }
+        runtime.tokenRateTracker.record(delta: drained.text)
+        if runtime === activeRuntime, agentActivity != .writing {
+            agentActivity = .writing
+        }
+        // 诊断：flush 本身（字符串拼接 + 影子更新 + 直连投递）若过慢会卡事件循环。
         let start = Date()
-        appendOrUpdateAssistant(delta, on: runtime)
+        appendOrUpdateAssistant(drained.text, into: &items, on: runtime)
         let elapsed = Date().timeIntervalSince(start)
+        if runtime.latencyTrace?.mark(.firstUIFlush) == true {
+            runtime.latencyFirstTextItemID = items.last(where: { $0.kind == .assistant })?.id
+            if let latency = runtime.latencyTrace {
+                if let controller = runtime.docController {
+                    controller.beginLatencyTrace(latency, firstTextItemID: runtime.latencyFirstTextItemID)
+                } else {
+                    latency.mark(.presentationUnavailable)
+                }
+            }
+        }
+        storeFlushTarget(items, live: liveDriven, on: runtime)
+        // PROBE（BACKLOG-STALL 定位）：flush 派发时刻。与「PROBE dom applied」
+        // （JS 执行完成时刻）、stall gap 三者对齐即可定位阻塞段。
+        NewPiLogger.info(
+            category: "app",
+            message: "PROBE stream flush",
+            details: "chars=\(drained.text.count) mergeMs=\(String(format: "%.0f", elapsed * 1000)) live=\(liveDriven)"
+        )
+        // UI 侧指标：每次 flush 的耗时，供「API 监控」区分模型慢 vs UI 渲染慢。
+        Task {
+            await LLMMetricsRecorder.shared.record(UIFlushMetric(
+                duration: elapsed,
+                deltaLength: drained.text.count
+            ))
+        }
         if elapsed > 0.1 {
-            NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(delta.count)")
+            NewPiLogger.info(category: "app", message: "Slow streaming flush", details: "elapsed=\(String(format: "%.2f", elapsed))s deltaLen=\(drained.text.count)")
         }
     }
 
-    private func appendOrUpdateThinking(_ delta: String, on runtime: SessionRuntime) {
-        if let last = runtime.transcript.last, case .thinking(true) = last.kind {
-            let index = runtime.transcript.count - 1
-            runtime.transcript[index] = NewPiTranscriptItem(
+    /// flush 结果落地：直连模式存影子 + 投递 WebView；否则发布 @Published（旧路径）。
+    private func storeFlushTarget(_ items: [NewPiTranscriptItem], live: Bool, on runtime: SessionRuntime) {
+        guard live else {
+            runtime.liveTranscript = nil
+            runtime.transcript = items
+            return
+        }
+        runtime.liveTranscript = items
+        runtime.docController?.applyLive(
+            items: items,
+            isStreaming: true,
+            streamingBubbleComplete: runtime.streamingBubbleComplete,
+            tintHues: Self.transcriptTintHues(for: items)
+        )
+    }
+
+    /// 边界提交：影子内容并入 @Published（面板 re-diff 一次），解除 WebView 直连独占。
+    /// 边界路径的 transcript 变异（freeze/marker/append/rebuild/abort）前都会调用。
+    private func commitLiveTranscript(on runtime: SessionRuntime) {
+        guard let live = runtime.liveTranscript else { return }
+        runtime.docController?.endLiveApply()
+        runtime.liveTranscript = nil
+        runtime.transcript = live
+    }
+
+    /// 轮对话色调（面板渲染与流式直连共用）：只给用户气泡与助手正文卡片传色相。
+    static func transcriptTintHues(for transcript: [NewPiTranscriptItem]) -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        var currentAnchor: UUID?
+        for item in transcript {
+            if item.kind == .user {
+                currentAnchor = item.id
+            }
+            guard let anchor = currentAnchor else { continue }
+            if item.kind == .user || item.isAssistantMarkdown {
+                result[item.id] = Color.bubbleTintHueDegrees(for: anchor)
+            }
+        }
+        return result
+    }
+
+    private func appendOrUpdateAssistant(_ delta: String, into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        // 正文开始 = 思考阶段结束。
+        freezeStreamingThinking(into: &items)
+        if let last = items.last, last.kind == .assistant {
+            let index = items.count - 1
+            items[index] = NewPiTranscriptItem(
+                id: last.id,
+                kind: .assistant,
+                body: last.body + delta,
+                messageIndex: last.messageIndex,
+                sessionEntryID: last.sessionEntryID,
+                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
+            )
+        } else {
+            ensureDetailGroupMarker(into: &items, on: runtime)
+            items.append(NewPiTranscriptItem(
+                kind: .assistant,
+                body: delta,
+                detailTurnID: runtime.detailTurnID
+            ))
+        }
+        // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
+        // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着
+        // 重评估。viewModel.transcript 在 agentEnd 的 rebuildTranscript 时统一同步。
+    }
+
+    private func appendOrUpdateThinking(_ delta: String, into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        if let last = items.last, case .thinking(true) = last.kind {
+            let index = items.count - 1
+            items[index] = NewPiTranscriptItem(
                 id: last.id,
                 kind: .thinking(isStreaming: true),
                 body: last.body + delta,
@@ -2124,8 +2490,8 @@ final class NewPiViewModel: ObservableObject {
                 detailTurnID: last.detailTurnID ?? runtime.detailTurnID
             )
         } else {
-            ensureDetailGroupMarker(on: runtime)
-            runtime.transcript.append(NewPiTranscriptItem(
+            ensureDetailGroupMarker(into: &items, on: runtime)
+            items.append(NewPiTranscriptItem(
                 kind: .thinking(isStreaming: true),
                 body: delta,
                 detailTurnID: runtime.detailTurnID
@@ -2134,10 +2500,18 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 思考阶段结束（正文开始 / 工具开始 / 消息或 run 结束）：把尾部流式 thinking 条目冻结为完成态。
+    /// 边界路径（handle 状态分支）：先并影子再操作真实 transcript。
     private func freezeStreamingThinking(on runtime: SessionRuntime) {
-        guard let last = runtime.transcript.last, case .thinking(true) = last.kind else { return }
-        let index = runtime.transcript.count - 1
-        runtime.transcript[index] = NewPiTranscriptItem(
+        commitLiveTranscript(on: runtime)
+        var items = runtime.transcript
+        freezeStreamingThinking(into: &items)
+        runtime.transcript = items
+    }
+
+    private func freezeStreamingThinking(into items: inout [NewPiTranscriptItem]) {
+        guard let last = items.last, case .thinking(true) = last.kind else { return }
+        let index = items.count - 1
+        items[index] = NewPiTranscriptItem(
             id: last.id,
             kind: .thinking(isStreaming: false),
             body: last.body,
@@ -2150,7 +2524,9 @@ final class NewPiViewModel: ObservableObject {
     /// marker 懒创建（BACKLOG-DETAIL-GROUP）：当前 turn 尚未创建 disclosure 行时，
     /// 在组内第一条条目之前插入 marker 条目（collapsed=false，流式期间展开），
     /// 并缓存其 id 到 detailMarkerIDs 跨 rebuild 复用。
+    /// 边界路径（handle 状态分支）：先并影子再操作真实 transcript。
     private func ensureDetailGroupMarker(on runtime: SessionRuntime) {
+        commitLiveTranscript(on: runtime)
         guard let turnID = runtime.detailTurnID, runtime.detailGroupMarkerID == nil else { return }
         let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
         runtime.detailMarkerIDs[turnID] = markerID
@@ -2164,6 +2540,19 @@ final class NewPiViewModel: ObservableObject {
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
+    }
+
+    private func ensureDetailGroupMarker(into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
+        guard let turnID = runtime.detailTurnID, runtime.detailGroupMarkerID == nil else { return }
+        let markerID = runtime.detailMarkerIDs[turnID] ?? UUID()
+        runtime.detailMarkerIDs[turnID] = markerID
+        runtime.detailGroupMarkerID = markerID
+        items.append(NewPiTranscriptItem(
+            id: markerID,
+            kind: .detailGroup(collapsed: false),
+            body: "",
+            detailTurnID: turnID
+        ))
     }
 
     /// 最终答复落定（BACKLOG-DETAIL-GROUP，决策 1+2）：把 turn 内最后一个 assistant 条目
@@ -2213,29 +2602,4 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func appendOrUpdateAssistant(_ delta: String, on runtime: SessionRuntime) {
-        // 正文开始 = 思考阶段结束。
-        freezeStreamingThinking(on: runtime)
-        if let last = runtime.transcript.last, last.kind == .assistant {
-            let index = runtime.transcript.count - 1
-            runtime.transcript[index] = NewPiTranscriptItem(
-                id: last.id,
-                kind: .assistant,
-                body: last.body + delta,
-                messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID,
-                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
-            )
-        } else {
-            ensureDetailGroupMarker(on: runtime)
-            runtime.transcript.append(NewPiTranscriptItem(
-                kind: .assistant,
-                body: delta,
-                detailTurnID: runtime.detailTurnID
-            ))
-        }
-        // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
-        // 镜像只会让 NewPiRootView（NavigationSplitView + 侧边栏 List）每次 flush 都跟着
-        // 重评估。viewModel.transcript 在 agentEnd 的 rebuildTranscript 时统一同步。
-    }
 }

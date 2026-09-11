@@ -95,9 +95,10 @@ public enum ToolApprovalSummary {
 /// 危险等级为 high 的调用不会被写入任何永久记录（只放行本次）。
 public actor ToolApprovalTracker {
     private var sessionRecords: [String: ApprovalRecord] = [:]
-    private let persistentStore: PersistentApprovalStore
+    private let persistentStore: PersistentApprovalStore?
 
-    public init(persistentStore: PersistentApprovalStore = PersistentApprovalStore()) {
+    /// nil 表示仅内存授权：不读取全局 approvals.json，也不接受永久授权。
+    public init(persistentStore: PersistentApprovalStore? = PersistentApprovalStore()) {
         self.persistentStore = persistentStore
     }
 
@@ -121,7 +122,7 @@ public actor ToolApprovalTracker {
            record.matches(toolName: toolName, fingerprint: fingerprint) {
             return .sessionRecord
         }
-        if persistentStore.isForeverApproved(toolName: toolName, fingerprint: fingerprint) {
+        if persistentStore?.isForeverApproved(toolName: toolName, fingerprint: fingerprint) == true {
             return .foreverRecord
         }
         return nil
@@ -140,6 +141,7 @@ public actor ToolApprovalTracker {
     ) {
         guard scope != .once else { return }
         guard dangerLevel != .high else { return }
+        guard scope != .forever || persistentStore != nil else { return }
 
         // 整类工具授权：fingerprint 置 nil，ApprovalRecord.matches 对任意指纹生效。
         let record = ApprovalRecord(
@@ -159,7 +161,7 @@ public actor ToolApprovalTracker {
             )
         case .forever:
             sessionRecords[toolName] = record
-            persistentStore.saveForever(record)
+            persistentStore?.saveForever(record)
             NewPiLogger.info(
                 category: "tool-approval",
                 message: "Tool approved forever",

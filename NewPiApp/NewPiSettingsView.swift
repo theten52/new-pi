@@ -2,16 +2,154 @@ import AppKit
 import NewPiCore
 import SwiftUI
 
+enum NewPiSettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case providers
+    case toolsAndSafety
+    case diagnostics
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .providers: "Providers"
+        case .toolsAndSafety: "Tools & Safety"
+        case .diagnostics: "Diagnostics"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: "gearshape"
+        case .providers: "server.rack"
+        case .toolsAndSafety: "wrench.and.screwdriver"
+        case .diagnostics: "waveform.path.ecg"
+        }
+    }
+}
+
 struct NewPiSettingsView: View {
     @ObservedObject var viewModel: NewPiViewModel
     @StateObject private var mcpBridge = MCPPluginManagerBridge()
     @StateObject private var approvalBridge = ApprovalPolicySettingsBridge()
+    @State private var selectedTab: NewPiSettingsTab? = .general
+    @State private var navigationHistory: [NewPiSettingsTab] = [.general]
+    @State private var historyIndex = 0
+    @State private var isHistoryNavigation = false
     @State private var showingAddSheet = false
     @State private var editingProfile: ProviderProfile?
     @State private var showLogs = false
+    @State private var showingTemplateManager = false
+
+    @StateObject private var appearanceManager = AppearanceModeManager.shared
+
+    private var activeTab: NewPiSettingsTab {
+        selectedTab ?? .general
+    }
 
     var body: some View {
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(selection: $selectedTab) {
+                ForEach(NewPiSettingsTab.allCases) { tab in
+                    Label(tab.title, systemImage: tab.systemImage)
+                        .tag(tab)
+                }
+
+                Text(Self.versionText)
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 8)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 6, trailing: 0))
+            }
+            .listStyle(.sidebar)
+            .newPiSoftScrollEdgeEffect()
+            .navigationTitle("Settings")
+            .frame(width: 210)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 210, max: 230)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            settingsDetail
+                .navigationTitle(activeTab.title)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .navigationTitle("Settings")
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 800, minHeight: 540)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: goBack) {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(!canGoBack)
+                .help("Back")
+
+                Button(action: goForward) {
+                    Image(systemName: "chevron.right")
+                }
+                .disabled(!canGoForward)
+                .help("Forward")
+            }
+        }
+        .onChange(of: selectedTab) { _, _ in
+            recordNavigation()
+        }
+        .sheet(isPresented: $showingAddSheet) {
+            NewPiAddProviderSheet(
+                vendorTemplates: viewModel.vendorTemplates,
+                onVendorSelect: { preset in
+                    showingAddSheet = false
+                    editingProfile = VendorPresets.makeProfile(from: preset)
+                },
+                onCustomSelect: {
+                    showingAddSheet = false
+                    let template = viewModel.vendorTemplates.first { $0.id == VendorPresets.openaiCompatible.id }
+                        ?? VendorPresets.openaiCompatible
+                    editingProfile = VendorPresets.makeProfile(from: template)
+                }
+            )
+        }
+        .sheet(isPresented: $showingTemplateManager) {
+            NewPiVendorTemplateManagerView(viewModel: viewModel)
+        }
+        .sheet(item: $editingProfile) { profile in
+            NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
+        }
+        .sheet(isPresented: $showLogs) {
+            NewPiLogsView(store: NewPiLogStore.shared)
+        }
+    }
+
+    @ViewBuilder
+    private var settingsDetail: some View {
+        switch activeTab {
+        case .general:
+            generalSettings
+        case .providers:
+            providerSettings
+        case .toolsAndSafety:
+            toolsAndSafetySettings
+        case .diagnostics:
+            diagnosticsSettings
+        }
+    }
+
+    private var generalSettings: some View {
         Form {
+            Section("外观") {
+                Picker("外观模式", selection: $appearanceManager.mode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Label(mode.displayName, systemImage: mode.icon).tag(mode)
+                    }
+                }
+                Text("选择「跟随系统」时，App 随 macOS 系统的浅色/深色模式自动切换；「浅色/深色」则手动固定。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Default Provider") {
                 Picker("Default for new sessions", selection: defaultProfileBinding) {
                     ForEach(viewModel.providerConfig.profiles) { profile in
@@ -21,28 +159,6 @@ struct NewPiSettingsView: View {
                 Text("只影响之后新建的会话；已有会话保持各自选择的模型（会话内可在状态栏的模型菜单中切换，选择会随会话记住）。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            Section("Providers") {
-                if viewModel.providerListItems.isEmpty {
-                    Text("No providers configured.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(viewModel.providerListItems) { item in
-                        NewPiProviderRow(
-                            item: item,
-                            onEdit: { editingProfile = item.profile },
-                            onDelete: {
-                                Task { await viewModel.deleteProfile(id: item.profile.id) }
-                            },
-                            canDelete: viewModel.providerListItems.count > 1
-                        )
-                    }
-                }
-
-                Button("Add Provider…") {
-                    showingAddSheet = true
-                }
             }
 
             Section("Credentials") {
@@ -57,7 +173,7 @@ struct NewPiSettingsView: View {
                 }
             }
 
-            Section("Paths") {
+            Section("Configuration Files") {
                 LabeledContent("Providers") {
                     Text("~/.new-pi/agent/providers.json")
                         .font(.caption.monospaced())
@@ -67,8 +183,54 @@ struct NewPiSettingsView: View {
                         .font(.caption.monospaced())
                 }
             }
+        }
+        .newPiSettingsFormStyle()
+    }
 
+    private var providerSettings: some View {
+        Form {
+            Section("Providers") {
+                if viewModel.providerListItems.isEmpty {
+                    ContentUnavailableView(
+                        "No providers configured",
+                        systemImage: "server.rack",
+                        description: Text("Add a provider to start a session.")
+                    )
+                } else {
+                    ForEach(viewModel.providerListItems) { item in
+                        NewPiProviderRow(
+                            item: item,
+                            onEdit: { editingProfile = item.profile },
+                            onDelete: {
+                                Task { await viewModel.deleteProfile(id: item.profile.id) }
+                            },
+                            canDelete: viewModel.providerListItems.count > 1
+                        )
+                    }
+                }
+            }
+
+            Section {
+                HStack(spacing: 8) {
+                    Button("Add Provider…") {
+                        showingAddSheet = true
+                    }
+                    Button("Manage Templates…") {
+                        showingTemplateManager = true
+                    }
+                }
+            }
+        }
+        .newPiSettingsFormStyle()
+    }
+
+    private var toolsAndSafetySettings: some View {
+        Form {
             Section("危险评估") {
+                Toggle("项目根内文件操作免审批", isOn: $approvalBridge.projectScopeAutoApprove)
+                Text("项目/聊天室根路径下的文件修改与删除（write/edit 及目标全在根内的 rm、mv 等命令）不再弹审批；sudo、强制推送等高危操作仍每次确认。项目根选在个人主目录或系统目录时自动失效。对新会话生效。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("LLM 补充评估（消耗 token）", isOn: $approvalBridge.llmSupplementEnabled)
                 Text("LLM 评估失败时降级为工具基线等级，绝不降为低风险。")
                     .font(.caption)
@@ -79,38 +241,66 @@ struct NewPiSettingsView: View {
             }
 
             NewPiMCPSettingsView(bridge: mcpBridge)
+        }
+        .newPiSettingsFormStyle()
+    }
 
-            Section("Debug") {
-                Button("View Logs") {
-                    showLogs = true
+    private var diagnosticsSettings: some View {
+        Form {
+            Section("Diagnostics") {
+                LabeledContent("Application logs") {
+                    Button("View Logs") {
+                        showLogs = true
+                    }
+                }
+                LabeledContent("API performance") {
+                    Button("Open API Monitor") {
+                        NotificationCenter.default.post(name: .newPiShowMetrics, object: nil)
+                    }
                 }
             }
+
+            Section {
+                Text("Diagnostics are intended for troubleshooting. Runtime stall probes are included only in Debug builds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .formStyle(.grouped)
-        .padding()
-        .frame(minWidth: 520, minHeight: 420)
-        .navigationTitle("Settings")
-        .sheet(isPresented: $showingAddSheet) {
-            NewPiAddProviderSheet(
-                onVendorSelect: { preset in
-                    showingAddSheet = false
-                    let profile = VendorPresets.makeProfile(from: preset)
-                    editingProfile = profile
-                },
-                onCustomSelect: {
-                    showingAddSheet = false
-                    // 使用默认的 OpenAI Compatible 配置
-                    let template = ProviderPresetCatalog.openaiCompatible
-                    editingProfile = ProviderProfile.makeDefault(from: template)
-                }
-            )
+        .newPiSettingsFormStyle()
+    }
+
+    private var canGoBack: Bool {
+        historyIndex > 0
+    }
+
+    private var canGoForward: Bool {
+        historyIndex < navigationHistory.count - 1
+    }
+
+    private func goBack() {
+        guard canGoBack else { return }
+        isHistoryNavigation = true
+        historyIndex -= 1
+        selectedTab = navigationHistory[historyIndex]
+        DispatchQueue.main.async { isHistoryNavigation = false }
+    }
+
+    private func goForward() {
+        guard canGoForward else { return }
+        isHistoryNavigation = true
+        historyIndex += 1
+        selectedTab = navigationHistory[historyIndex]
+        DispatchQueue.main.async { isHistoryNavigation = false }
+    }
+
+    private func recordNavigation() {
+        guard !isHistoryNavigation, let selectedTab else { return }
+        guard navigationHistory.last != selectedTab else { return }
+        if historyIndex < navigationHistory.count - 1 {
+            navigationHistory = Array(navigationHistory.prefix(historyIndex + 1))
         }
-        .sheet(item: $editingProfile) { profile in
-            NewPiEditProviderSheet(viewModel: viewModel, profile: profile)
-        }
-        .sheet(isPresented: $showLogs) {
-            NewPiLogsView(store: NewPiLogStore.shared)
-        }
+        navigationHistory.append(selectedTab)
+        historyIndex = navigationHistory.count - 1
     }
 
     private var defaultProfileBinding: Binding<String> {
@@ -130,7 +320,32 @@ struct NewPiSettingsView: View {
             set: { viewModel.setUseKeychainForCredentials($0) }
         )
     }
+
+    private static let versionText: String = {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = info?["CFBundleVersion"] as? String ?? "0"
+        return "Version \(version) (\(build))"
+    }()
 }
+
+private extension View {
+    func newPiSettingsFormStyle() -> some View {
+        formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.top, 8, for: .scrollContent)
+    }
+
+    @ViewBuilder
+    func newPiSoftScrollEdgeEffect() -> some View {
+        if #available(macOS 26.0, *) {
+            scrollEdgeEffectStyle(.soft, for: .all)
+        } else {
+            self
+        }
+    }
+}
+
 
 struct NewPiProviderRow: View {
     let item: NewPiProviderListItem
@@ -145,7 +360,7 @@ struct NewPiProviderRow: View {
                 Text(item.profile.name)
                     .font(.headline)
                 HStack(spacing: 8) {
-                    Text(ProviderPresetCatalog.definition(for: item.profile.preset).displayName)
+                    Text(item.profile.preset.displayName)
                         .font(.caption)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -192,8 +407,7 @@ struct NewPiProviderRow: View {
 
     @ViewBuilder
     private var credentialStatus: some View {
-        let definition = ProviderPresetCatalog.definition(for: item.profile.preset)
-        if definition.credentialRequired {
+        if item.profile.preset.credentialRequired {
             if item.hasAPIKey {
                 Label("Key saved", systemImage: "checkmark.seal.fill")
                     .labelStyle(.iconOnly)
@@ -216,6 +430,8 @@ struct NewPiProviderRow: View {
 
 struct NewPiAddProviderSheet: View {
     @Environment(\.dismiss) private var dismiss
+    /// 可用的厂商模板列表（内置 + overlay 覆盖/新增）。
+    let vendorTemplates: [VendorPreset]
     /// 选择知名厂商预设
     let onVendorSelect: (VendorPreset) -> Void
     /// 选择自定义端点（使用默认配置）
@@ -230,7 +446,7 @@ struct NewPiAddProviderSheet: View {
                     // 知名厂商列表
                     Section {
                         LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(VendorPresets.all) { preset in
+                            ForEach(vendorTemplates) { preset in
                                 Button {
                                     onVendorSelect(preset)
                                     dismiss()
@@ -309,14 +525,12 @@ struct NewPiEditProviderSheet: View {
     @State private var errorMessage: String?
     @State private var testMessage: String?
     @State private var isTestingConnection = false
+    @State private var isRefreshingModels = false
+    @State private var refreshMessage: String?
 
     init(viewModel: NewPiViewModel, profile: ProviderProfile) {
         self.viewModel = viewModel
         _profile = State(initialValue: profile)
-    }
-
-    private var definition: ProviderPresetDefinition {
-        ProviderPresetCatalog.definition(for: profile.preset)
     }
 
     var body: some View {
@@ -325,11 +539,11 @@ struct NewPiEditProviderSheet: View {
                 Section("Profile") {
                     TextField("Name", text: $profile.name)
                     LabeledContent("Preset") {
-                        Text(definition.displayName)
+                        Text(profile.preset.displayName)
                     }
                 }
 
-                if definition.credentialRequired {
+                if profile.preset.credentialRequired {
                     Section("API Key") {
                         SecureField("API Key", text: $apiKeyDraft)
                             .textFieldStyle(.roundedBorder)
@@ -427,16 +641,37 @@ struct NewPiEditProviderSheet: View {
                         Button("Add", action: addDraftedModel)
                             .disabled(newModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    let unusedPresets = definition.defaultModels.filter { !profile.models.contains($0) }
-                    if !unusedPresets.isEmpty {
-                        Menu("从内置模型添加…") {
-                            ForEach(unusedPresets, id: \.self) { model in
+                    let unusedDefined = profile.modelDefinitions.keys.filter { !profile.models.contains($0) }.sorted()
+                    if !unusedDefined.isEmpty {
+                        Menu("从模型定义添加…") {
+                            ForEach(unusedDefined, id: \.self) { model in
                                 Button(model) {
                                     profile.addModel(model)
                                 }
                             }
                         }
                         .menuStyle(.borderlessButton)
+                    }
+
+                    // 模型发现：从 provider 端点拉取可用模型并合并进列表（设计文档「模型发现」）。
+                    HStack {
+                        Button {
+                            Task { await refreshModels() }
+                        } label: {
+                            if isRefreshingModels {
+                                ProgressView().controlSize(.small)
+                                Text("刷新中…")
+                            } else {
+                                Label("刷新模型列表", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .disabled(isRefreshingModels)
+                        Spacer()
+                    }
+                    if let refreshMessage {
+                        Text(refreshMessage)
+                            .font(.caption)
+                            .foregroundStyle(refreshMessage.hasPrefix("✓") ? .green : .red)
                     }
                 }
 
@@ -454,9 +689,24 @@ struct NewPiEditProviderSheet: View {
                     }
                 }
 
-                if !definition.optionFields.isEmpty {
+                // 思考档位（Provider 级默认）：off=关闭思考（快）；low/medium/high=按档位思考。
+                // 会话中可在状态栏模型菜单临时覆盖。对不支持思考控制的模型（如 Ollama）无效。
+                if profile.preset != .ollama {
+                    Section("思考级别") {
+                        Picker("思考档位", selection: $profile.thinkingLevel) {
+                            ForEach(ThinkingLevel.allCases) { level in
+                                Text(level.displayName).tag(level)
+                            }
+                        }
+                        Text("off=关闭思考（快）；极低~高=按档位思考（慢但更准）。支持模型见各厂商预设；当前会话可在状态栏模型菜单临时切换。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !profile.preset.optionFields.isEmpty {
                     Section("Options") {
-                        ForEach(definition.optionFields, id: \.key) { field in
+                        ForEach(profile.preset.optionFields, id: \.key) { field in
                             TextField(
                                 field.label,
                                 text: optionBinding(for: field.key),
@@ -553,7 +803,7 @@ struct NewPiEditProviderSheet: View {
         if key == .baseURL, profile.supportsAPIModeSelection {
             return ResponsesEndpoint.defaultBaseURLPlaceholder(for: profile.apiMode)
         }
-        return definition.optionFields.first(where: { $0.key == key })?.placeholder ?? ""
+        return profile.preset.optionFields.first(where: { $0.key == key })?.placeholder ?? ""
     }
 
     private func normalizeBaseURLForAPIMode(_ mode: ProviderAPIMode) {
@@ -588,6 +838,29 @@ struct NewPiEditProviderSheet: View {
     private func findModelDefinition(modelID: String) -> ModelDefinition? {
         return profile.modelDefinition(for: modelID)
     }
+
+    /// 模型发现：从 provider 端点拉取可用模型，合并进当前编辑中的 profile.models。
+    private func refreshModels() async {
+        isRefreshingModels = true
+        defer { isRefreshingModels = false }
+        let result = await viewModel.fetchModels(for: profile)
+        switch result {
+        case .success(let models):
+            var added = 0
+            for model in models {
+                let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty, !profile.models.contains(trimmed) {
+                    profile.addModel(trimmed)
+                    added += 1
+                }
+            }
+            refreshMessage = added > 0
+                ? "✓ 发现 \(models.count) 个模型，新增 \(added) 个"
+                : "✓ 已是最新（\(profile.models.count) 个模型）"
+        case .failure(let error):
+            refreshMessage = "✗ \(error.localizedDescription)"
+        }
+    }
     
     private func save() {
         do {
@@ -620,9 +893,18 @@ private func formatPricing(_ pricing: ModelPricing) -> String {
         return "免费"
     }
     let symbol = pricing.currency == .cny ? "¥" : "$"
-    let inputStr = String(format: "%.1f", pricing.input)
-    let outputStr = String(format: "%.1f", pricing.output)
-    return "输入 \(symbol)\(inputStr)/M · 输出 \(symbol)\(outputStr)/M"
+    let fmt: (Double) -> String = { String(format: "%.1f", $0) }
+    var parts = [
+        "输入 \(symbol)\(fmt(pricing.input))/M",
+        "输出 \(symbol)\(fmt(pricing.output))/M",
+    ]
+    if let cacheRead = pricing.cacheRead, cacheRead > 0 {
+        parts.append("缓存读 \(symbol)\(fmt(cacheRead))/M")
+    }
+    if let cacheWrite = pricing.cacheWrite, cacheWrite > 0 {
+        parts.append("缓存写 \(symbol)\(fmt(cacheWrite))/M")
+    }
+    return parts.joined(separator: " · ")
 }
 
 

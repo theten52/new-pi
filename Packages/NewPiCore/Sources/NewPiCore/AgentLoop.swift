@@ -28,6 +28,7 @@ public struct AgentLoop: Sendable {
                         """
                     )
                     continuation.yield(.agentStart)
+                    RequestLatencyContext.current?.mark(.agentStarted)
 
                     try appendMessage(prompt, to: &context, continuation: continuation)
                     // 增量持久化：用户消息一到就落盘，避免生成途中切换 session 时
@@ -56,19 +57,38 @@ public struct AgentLoop: Sendable {
                         )
                         continuation.yield(.turnStart)
 
-                        try await compactionService.compactIfNeeded(
-                            context: &context,
-                            config: config,
-                            continuation: continuation
-                        )
+                        RequestLatencyContext.current?.mark(.preparationStarted)
+                        // 压缩可能自己调用模型；不能让它抢占“本轮答复首字”的计时点。
+                        try await RequestLatencyContext.$current.withValue(nil) {
+                            try await compactionService.compactIfNeeded(
+                                context: &context,
+                                config: config,
+                                continuation: continuation
+                            )
+                        }
 
                         AgentMessageHistoryRepair.repairOrphanedToolCalls(in: &context.messages)
+                        RequestLatencyContext.current?.mark(.preparationFinished)
 
                         let assistant = try await streamAssistant(
                             context: context,
                             config: config,
                             continuation: continuation
                         )
+                        if assistant.stopReason == .length {
+                            // 截断可见性：此前 max_tokens 截断（StopReason.length）静默发生，
+                            // 表现为「任务没做完」却无任何线索
+                            NewPiLogger.error(
+                                category: "agent-loop",
+                                message: "Assistant output truncated at max_tokens",
+                                details: """
+                                本回合输出达到模型 max_tokens 上限被截断，内容可能不完整。
+                                textLength=\(assistant.text.count)
+                                toolCalls=\(assistant.toolCalls.count)
+                                建议：增大 provider 的 maxOutputTokens，或把任务拆分为多步。
+                                """
+                            )
+                        }
                         try appendMessage(.assistant(assistant), to: &context, continuation: continuation)
                         // 每轮完成即落盘（增量持久化），保证任何时刻切走都有已提交内容。
                         continuation.yield(.contextSnapshot(context))
@@ -254,6 +274,7 @@ public struct AgentLoop: Sendable {
             toolApprovalTracker: config.toolApprovalTracker,
             dangerEvaluator: config.dangerEvaluator,
             dangerCache: config.dangerCache,
+            projectScope: config.projectScope,
             auditLogger: config.auditLogger
         )
 
@@ -339,7 +360,28 @@ public struct AgentLoop: Sendable {
                 alreadyApproved = false
             }
 
-            if requiresApproval && !alreadyApproved {
+            // 项目根内文件操作免审批（PROJECT-SCOPE-AUTO-APPROVE）：
+            // 高危评估结果永不降级（level == .high 不咨询本策略）；
+            // MCP / subagent 在策略内部直接 prompt，不会误放行。
+            var projectScopeAllowed = false
+            if requiresApproval, !alreadyApproved, assessment.level != .high,
+               let projectScope = config.projectScope {
+                if case let .allow(reason) = projectScope.authorize(
+                    toolName: call.name,
+                    arguments: call.arguments
+                ) {
+                    projectScopeAllowed = true
+                    authorization = .projectScoped
+                    NewPiLogger.info(
+                        category: "tool-approval",
+                        message: "Project-scoped call auto-approved",
+                        details: "tool=\(call.name) reason=\(reason) root=\(projectScope.root.path)"
+                    )
+                }
+            }
+            let skipApproval = alreadyApproved || projectScopeAllowed
+
+            if requiresApproval && !skipApproval {
                 authorization = .prompted
                 let request = ToolApprovalRequest(
                     id: call.id,

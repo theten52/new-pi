@@ -92,12 +92,10 @@ public enum ProviderConnectionTester {
         request.httpMethod = "POST"
         request.timeoutInterval = 20
 
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
         ResponsesRequestPolicy.applyCommonHeaders(
             request: &request,
             profile: profile,
-            apiKey: apiKey,
-            definition: definition
+            apiKey: apiKey
         )
 
         let body: [String: Any] = [
@@ -123,9 +121,8 @@ public enum ProviderConnectionTester {
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        if definition.credentialRequired, !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if profile.preset.credentialRequired, !apiKey.isEmpty {
+            request.setValue(profile.apiKeyHeaderValue(apiKey), forHTTPHeaderField: profile.apiKeyHeader)
         }
         if let organization = profile.option(.organization) {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")

@@ -94,3 +94,93 @@ rm -rf build/derived && ./scripts/package.sh
 ```bash
 hdiutil create -volname NewPi -srcfolder dist/NewPi.app -ov -format UDZO dist/NewPi.dmg
 ```
+
+## 聊天室 App 层守卫验证
+
+macOS + Swift 6 环境运行 `scripts/validation/check-chatroom-controller.sh`。
+脚本编译真实聊天室控制器，检查运行/取消收尾/待审批的删除保护，以及失效目录的发言拦截和恢复。
+转录适配器使用空测试替身；不会调用模型、执行工具或修改已有聊天数据。
+可用 `NEWPI_VALIDATION_SCRATCH` 指定 SwiftPM 临时构建目录。
+
+## 聊天室输出渲染验证
+
+- `scripts/validation/check-chatroom-rendering.sh`：编译真实条目模型、共享流式判定和聊天室适配器，覆盖插话、Thinking、分段、完成态、中断标记及 Session 兼容。
+- `scripts/validation/check-transcript-dom.sh`：使用独立 WKWebView 加载真实 JS/CSS，验证非末尾消息继续流式、DOM 身份、卡片手动展开、正文定型；需要 macOS 图形登录会话，不发送模型请求。
+- Swift Package 的 `ChatRoomRenderingTests.swift` 覆盖 120ms 缓冲、事件/审批顺序、取消/失败保留及磁盘重载顺序。
+
+### Markdown 收尾语义与原生呈现回归（2026-09-12）
+
+`./scripts/validation/check-transcript-dom.sh` 新增 19 个真实 WKWebView 语义用例，覆盖松散/嵌套列表、
+引用、表格、前向/后向及列表内 reference、typographer、长/未闭合/嵌套围栏、缩进代码和换行。
+字符级增量与同前缀一次性流式结果对照，另检查同源最后流式快照与最终态；四个列表/引用几何样例
+检查高度、滚动、末行位置、32px 尾距与上翻保锚。19 个用例已全部通过，四例 `heightDelta=0`、
+`scrollDelta=0`；既有 100 块 199 次插入与 200 行单围栏 0 次子树重建保持。
+
+原生 200 行三轮呈现对照（仓库根目录运行；基线只替换临时资源中的 renderer）：
+
+- 固定基线：`NEWPI_PRESENTATION_REPLAY=1 NEWPI_RENDERER_REVISION=5b6f302 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 ./scripts/validation/check-transcript-cold-load.sh`
+- 修复版：`NEWPI_PRESENTATION_REPLAY=1 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 ./scripts/validation/check-transcript-cold-load.sh`
+- 冷恢复：`NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 ./scripts/validation/check-transcript-cold-load.sh`
+
+基线实跑时使用 `NEWPI_RENDERER_REVISION=HEAD`，当时为 `5b6f302`；回溯命令固定提交，避免 HEAD 漂移。
+`NEWPI_PRESENTATION_REPLAY=1` 选择真实 SwiftUI/Coordinator/WKWebView 的可见合成呈现探针（`-Onone`），
+含状态栏、rail、礼花及正文/工具交替与折叠；不是持久 HTML replay，也不是完整 App 构建或全核心测试。
+上述对照已运行，仅支持该场景无明显性能退化，不宣称加速。500 条历史首载/切回、聊天室 A/B/A 的
+`heightReads=0`、`anchorErrorPX=0`，进程恢复等回归通过；首载无恢复锚点时偏差字段记 0，不能当作恢复精度证据。
+完整数据、解析成本与原始用户场景待验收边界见 [修复记录](../docs/dev-notes/2026-09-12-markdown-final-reflow.md)。
+
+## 聊天室性能基线
+
+`bash scripts/validation/check-chatroom-performance.sh` 使用真实控制器、适配器和签名函数，输出短对话、长对话、多工具历史的 CSV。
+每个场景先预热，再合成 100 次正文更新；统计 Store/详情通知数，以及适配和签名比较的 P50/P95。
+Swift 探针以 `-O` 编译，链接 Debug Core；不是整个 Release App 的帧率测试。
+只读现有存储、不保存合成聊天室，不访问模型。
+
+对比通知优化前后（不切分支、不修改工作区）：
+
+```bash
+NEWPI_CONTROLLER_REVISION=e7b1daf bash scripts/validation/check-chatroom-performance.sh
+NEWPI_EXPECT_FILTERED_NOTIFICATIONS=1 bash scripts/validation/check-chatroom-performance.sh
+```
+
+`NEWPI_CONTROLLER_REVISION` 仅替换该基准中的控制器源码，要求与当前数据类型兼容；并非任意历史版本的完整 App 对比。
+
+`NEWPI_TRANSCRIPT_PERFORMANCE=1 bash scripts/validation/check-transcript-dom.sh` 在独立 WKWebView 中测量真实 JS/CSS 的首次载入和 30 次增量 apply。
+该计时包含同步 JSON 序列化、DOM 修改及被触发的同步布局，不含 Swift→JS 跨进程排队、异步绘制、GPU 提交和屏幕呈现。
+三个 DOM 场景与原生基准的体量相近，但不保证条目组成逐项相同（原生适配器还会插入阶段行）。
+
+## 历史冷加载与锚点恢复
+
+`bash scripts/validation/check-transcript-cold-load.sh` 编译真实 Coordinator、HTML 工厂、聊天室适配器和 WKWebView，使用临时生成的 500 条带代码块历史。
+对比前后的命令：
+
+```bash
+NEWPI_RENDERER_REVISION=0c5d8fc bash scripts/validation/check-transcript-cold-load.sh
+NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-load.sh
+```
+
+`NEWPI_RENDERER_REVISION` 仅在临时 App 的资源目录替换指定版本的 `markdown-renderer.js`，不修改工作区。
+测量 JSONL 读取、消息适配、外壳加载、原生 diff/编码/投递、JS apply 及首次投递后两个 RAF 的时间。
+检查多次待加载快照只投递一次、消息 ID 不重复、正文和代码非空、切回后的锚点偏差、重复快照不重复投递。
+覆盖 Session 形态首次加载、聊天室 A/B/A 冷恢复及跨类型切回；不包括 SessionManager 解码、完整 SwiftUI 导航或 Session 保活命中。
+探针使用真实生产源码，只有诊断 logger/metrics 替换为空实现，滚动 sessionID 为 nil，不写用户滚动位置。
+文件读取紧接着 fixture 写入，可能命中 OS 页缓存；不能作为真实磁盘冷读或整个 App 的首屏性能结论。
+
+## 共用审批 UI 验证
+
+`bash scripts/validation/check-approval-ui.sh` 编译真实 `NewPiApprovalContent`，通过独立 Accessibility 进程操作按钮/菜单并验证回调范围：
+
+- 聊天室普通风险有“本聊天室内允许”，没有永久授权选项。
+- 高风险无记忆授权菜单，只允许一次。
+- Session 保留“一直允许”选项。
+
+需要 macOS 图形登录和辅助功能权限。使用 `NEWPI_UI_DARK=1` 验证深色模式；可设置 `NEWPI_UI_SNAPSHOTS=/private/tmp/newpi-approval-ui` 保存原生窗口截图。
+探针仅验证 UI 回调，不执行命令、不写授权；临时进程退出后清理。Core 的 `ChatRoomAuthorizationTests` 覆盖真正的授权记忆、隔离、撤销、取消、兼容工具与多角色引擎链路。
+
+## 输出刷新期间输入草稿保护
+
+`NEWPI_EXPECT_DRAFT_FIX=1 bash scripts/validation/check-composer-streaming.sh` 用真实 SwiftUI `@State`、共用输入框和 AppKit NSTextInputClient 组词 API 模拟持续输出时的输入。
+覆盖普通文本/选区、未提交的中文拼音组词、空草稿多次组词、确认后发送、外部清空/恢复、同一事件循环内输入后立即发送及固定四行内部滚动。
+不调用模型、不改系统输入法或剪贴板。
+
+`NEWPI_COMPOSER_REVISION=dee1ff8 bash scripts/validation/check-composer-streaming.sh` 可复现旧代码的 `composition-preserved=false`；只在临时编译目录提取旧组件，不切换当前分支。

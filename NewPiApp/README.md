@@ -34,20 +34,18 @@ Xcode 顶部工具栏：
 App 启动后：
 
 1. 菜单 **NewPi → Settings…**（或 **⌘,**）
-2. 粘贴 **Anthropic API Key** → **Save API Key**
+2. 在 **Providers** 中创建或选择 profile，配置端点、模型及对应 API key。
+3. 按需开启图片能力、选择默认 provider；本地模型是否需要 key 取决于服务配置。
 
-或在终端设置环境变量后从 Xcode 启动：
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-（Xcode 默认不会继承 shell 环境；推荐用 Settings 存 Keychain。）
+也可在 Xcode Scheme 的 **Run → Arguments → Environment Variables** 中设置
+provider 对应的环境变量（例如 `ANTHROPIC_API_KEY`）。Xcode 默认不会继承终端中临时设置的变量。
+环境变量优先于已保存凭据；默认凭据存储为 UserDefaults，Keychain 是可选的额外存储，不应视为默认安全存储。
 
 ## 5. 开始对话
 
 1. 左侧 **Open Project…** 选择代码目录
-2. 右侧输入消息 → **Send**
+2. 选择已有 Session，或点击 **New Session** 手动创建会话
+3. 右侧输入消息 → **Send**；有副作用的工具调用按当前策略请求审批
 
 ---
 
@@ -70,6 +68,10 @@ CLI：
 ```bash
 cd Packages/NewPiCore && swift run new-pi
 ```
+
+无参数时显示 provider 配置状态；会话管理使用 `sessions list/show/export`。
+CLI 当前不提供交互式 Agent 对话。App/WebKit 校验入口见 [校验脚本说明](../scripts/README.md)，
+核心包测试不能替代渲染与 UI 验证。
 
 ## 要求
 

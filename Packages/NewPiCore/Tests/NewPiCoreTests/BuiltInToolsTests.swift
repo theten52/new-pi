@@ -64,7 +64,7 @@ struct BuiltInToolsTests {
 
         let tool = EditTool(snapshotStore: .forProject(project))
         let context = ToolContext(workingDirectory: project)
-        _ = try await tool.execute(
+        let result = try await tool.execute(
             id: "1",
             arguments: .object([
                 "path": .string("sample.swift"),
@@ -81,6 +81,9 @@ struct BuiltInToolsTests {
         let snapshots = project.appendingPathComponent(".new-pi/snapshots")
         let files = try FileManager.default.contentsOfDirectory(atPath: snapshots.path)
         #expect(!files.isEmpty)
+        let snapshotPath = try #require(result.content.components(separatedBy: ". Snapshot: ").last)
+        #expect(snapshotPath.hasPrefix(snapshots.standardizedFileURL.resolvingSymlinksInPath().path))
+        #expect(try String(contentsOfFile: snapshotPath, encoding: .utf8) == "let value = 1")
     }
 
     @Test("bash runs a command in project cwd")

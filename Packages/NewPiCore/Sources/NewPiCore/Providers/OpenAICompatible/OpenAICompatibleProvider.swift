@@ -2,8 +2,7 @@ import Foundation
 
 public enum OpenAICompatibleEndpoint {
     public static func resolveURL(for profile: ProviderProfile) throws -> URL {
-        let definition = ProviderPresetCatalog.definition(for: profile.preset)
-        let raw = profile.option(.baseURL) ?? definition.defaultBaseURL ?? ""
+        let raw = profile.option(.baseURL) ?? profile.preset.defaultBaseURL ?? ""
 
         switch profile.preset {
         case .ollama:
@@ -21,7 +20,7 @@ public enum OpenAICompatibleEndpoint {
                 return url
             }
             let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let fallback = definition.defaultBaseURL ?? "https://api.openai.com/v1/chat/completions"
+            let fallback = profile.preset.defaultBaseURL ?? "https://api.openai.com/v1/chat/completions"
             let composed = trimmed.isEmpty ? fallback : "\(trimmed)/v1/chat/completions"
             guard let url = URL(string: composed) else {
                 throw ProviderConfigError.invalidURL(composed)
@@ -281,6 +280,9 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
     ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                // do / catch 共享的指标计时器与状态码（catch 分支也要上报）。
+                var perf = LLMRequestTiming()
+                var httpStatus: Int?
                 do {
                     let endpoint = try OpenAICompatibleEndpoint.resolveURL(for: profile)
                     let apiKey = try await apiKeyProvider()
@@ -289,9 +291,8 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-                    let definition = ProviderPresetCatalog.definition(for: profile.preset)
-                    if definition.credentialRequired, !apiKey.isEmpty {
-                        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    if profile.preset.credentialRequired, !apiKey.isEmpty {
+                        request.setValue(profile.apiKeyHeaderValue(apiKey), forHTTPHeaderField: profile.apiKeyHeader)
                     }
 
                     if let organization = profile.option(.organization) {
@@ -319,11 +320,10 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         body["tools"] = OpenAIMessageEncoder.encodeTools(tools)
                     }
 
-                    OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
+                    OpenAICompatibleRequestPolicy.applyThinkingPolicy(
                         body: &body,
                         model: model,
-                        profile: profile,
-                        hasTools: !tools.isEmpty
+                        profile: profile
                     )
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -338,13 +338,26 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         secrets: redactionSecrets
                     )
 
+                    perf.markRequestSent()
                     let (bytes, response) = try await session.bytes(for: request)
+                    perf.markResponse()
+                    httpStatus = (response as? HTTPURLResponse)?.statusCode
                     if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
                         var errorData = Data()
                         for try await byte in bytes {
                             errorData.append(byte)
                         }
                         let message = String(data: errorData, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                        perf.markEnd()
+                        await LLMMetricsRecorder.shared.record(metric(
+                            timing: perf,
+                            statusCode: http.statusCode,
+                            usage: UsageStats(),
+                            errorType: "http_error",
+                            errorMessage: String(message.prefix(500)),
+                            model: model,
+                            hasTools: !tools.isEmpty
+                        ))
                         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
                         NewPiLogger.logLLMResponse(
                             category: "openai-compatible",
@@ -379,6 +392,11 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         for block in sseParser.feed(byte) {
                             let parsed = parser.parse(events: decoder.decodeLines(block))
                             for event in parsed {
+                                switch event {
+                                case .textDelta: perf.markText()
+                                case .thinkingDelta: perf.markThinking()
+                                default: break
+                                }
                                 if case let .completed(_, usage) = event {
                                     lastUsage = usage
                                     didComplete = true
@@ -392,6 +410,11 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     for block in sseParser.finish() {
                         let parsed = parser.parse(events: decoder.decodeLines(block))
                         for event in parsed {
+                            switch event {
+                            case .textDelta: perf.markText()
+                            case .thinkingDelta: perf.markThinking()
+                            default: break
+                            }
                             if case let .completed(_, usage) = event {
                                 lastUsage = usage
                             }
@@ -399,9 +422,24 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                         }
                     }
                     for event in parser.finish() {
+                        switch event {
+                        case .textDelta: perf.markText()
+                        case .thinkingDelta: perf.markThinking()
+                        default: break
+                        }
                         continuation.yield(event)
                     }
 
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: lastUsage,
+                        errorType: nil,
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.logLLMStreamFinished(
                         category: "openai-compatible",
                         model: model.modelID,
@@ -409,8 +447,28 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     )
                     continuation.finish()
                 } catch is CancellationError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "cancelled",
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     continuation.finish(throwing: AgentError.aborted)
                 } catch let error as AgentError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "llm_error",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "openai-compatible",
                         message: "LLM request failed",
@@ -418,6 +476,16 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
                     )
                     continuation.finish(throwing: error)
                 } catch {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "network",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "openai-compatible",
                         message: "LLM request failed",
@@ -429,6 +497,54 @@ public struct OpenAICompatibleProvider: LLMProvider, Sendable {
 
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// 构造一次请求的指标（供流式循环各出口上报）。
+    private func metric(
+        timing: LLMRequestTiming,
+        statusCode: Int?,
+        usage: UsageStats,
+        errorType: String?,
+        errorMessage: String?,
+        model: ModelConfig,
+        hasTools: Bool
+    ) -> LLMRequestMetric {
+        let cost = LLMRequestMetric.estimatedCost(
+            inputTokens: usage.inputTokens,
+            cachedTokens: usage.cacheReadTokens,
+            cacheCreation: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            pricing: profile.modelDefinition(for: model.modelID)?.pricing
+        )
+        return LLMRequestMetric(
+            runID: timing.runID,
+            startedAt: timing.startedAt,
+            providerName: profile.name,
+            preset: profile.preset.rawValue,
+            vendor: LLMMetricVendor.name(for: profile.preset.rawValue, baseURL: profile.option(.baseURL), model: model.modelID),
+            model: model.modelID,
+            mode: profile.apiMode == .responses ? "responses" : "chat",
+            thinkingLevel: model.thinkingLevel == .off ? nil : model.thinkingLevel.rawValue,
+            hasTools: hasTools,
+            responseAt: timing.responseAt,
+            firstThinkingAt: timing.firstThinkingAt,
+            lastThinkingAt: timing.lastThinkingAt,
+            firstTextAt: timing.firstTextAt,
+            lastTextAt: timing.lastTextAt,
+            endedAt: timing.endedAt,
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cacheReadTokens,
+            cacheCreationTokens: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            contextWindow: profile.contextWindow(for: model.modelID),
+            textDeltaCount: timing.textDeltaCount,
+            thinkingDeltaCount: timing.thinkingDeltaCount,
+            statusCode: statusCode,
+            errorType: errorType,
+            errorMessage: errorMessage,
+            costAmount: cost?.amount,
+            costCurrency: cost?.currency
+        )
     }
 }
 
@@ -452,16 +568,69 @@ enum OpenAICompatibleRequestPolicy {
         return max(model.maxTokens, deepSeekMinimumMaxTokens)
     }
 
-    /// DeepSeek V4 thinking tokens share the completion budget with content/tool calls.
-    /// Disable thinking for tool-using coding-agent requests so output budget remains usable.
-    static func applyDeepSeekThinkingPolicy(
+    /// OpenAI 兼容 chat 路径的思考控制（兼容/特化各家语言，均经实测）：
+    /// - GLM（bigmodel.cn）：`reasoning_effort` low/medium/high 真分档；`thinking disabled` 可关
+    /// - MiMo（xiaomimimo.com）：`thinking disabled` 可关；`reasoning_effort` 被接受
+    /// - DeepSeek（deepseek.com）：chat 兼容端点同支持 `reasoning_effort` 分档 + `thinking disabled`
+    ///   （V4/legacy 都接受，实测 effort high 会显著增加思考量并占满 completion 预算）
+    /// - unknown：保守不发，避免个别服务端对未知字段报错
+    ///
+    /// ThinkingLevel=off → 关闭思考；low/medium/high → reasoning_effort 档位。
+    /// 不做「带工具就禁用」的一刀切（旧 DeepSeek hack 已移除），思考档位完全由用户配置决定。
+    ///
+    /// 注：DeepSeek 走 Responses API 时由 `ResponsesRequestPolicy.reasoningEffort` 处理
+    /// （`reasoning.effort`），本 policy 只覆盖 OpenAI 兼容 chat 端点。
+    static func applyThinkingPolicy(
         body: inout [String: Any],
         model: ModelConfig,
-        profile: ProviderProfile,
-        hasTools: Bool
+        profile: ProviderProfile
     ) {
-        guard isDeepSeekModel(model.modelID, profile: profile), hasTools else { return }
-        body["thinking"] = ["type": "disabled"]
+        switch detectVendor(model.modelID, profile: profile) {
+        case .glm, .mimo, .deepseek:
+            if model.thinkingLevel == .off {
+                body["thinking"] = ["type": "disabled"]
+            } else if let effort = model.thinkingLevel.reasoningEffort {
+                body["reasoning_effort"] = effort
+            }
+        case .unknown:
+            break
+        }
+    }
+
+    /// OpenAI 兼容 chat 厂商嗅探：baseURL 优先，modelID 兜底。
+    static func detectVendor(_ modelID: String, profile: ProviderProfile) -> OpenAICompatibleVendor {
+        let model = modelID.lowercased()
+        let base = profile.option(.baseURL)?.lowercased() ?? ""
+        if base.contains("bigmodel.cn") || base.contains("z.ai") {
+            return .glm
+        }
+        if base.contains("xiaomimimo.com") || model.contains("mimo") {
+            return .mimo
+        }
+        if base.contains("deepseek.com") || model.contains("deepseek") {
+            return .deepseek
+        }
+        return .unknown
+    }
+}
+
+/// OpenAI 兼容 chat 厂商分类（思考参数语言不同，需要特化）。
+public enum OpenAICompatibleVendor: Sendable {
+    case deepseek
+    case glm
+    case mimo
+    case unknown
+}
+
+extension ThinkingLevel {
+    /// OpenAI 兼容 `reasoning_effort` 档位（minimal 并入 low）。off 无档位（走关闭）。
+    var reasoningEffort: String? {
+        switch self {
+        case .off: nil
+        case .minimal, .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        }
     }
 }
 

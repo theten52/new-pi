@@ -64,7 +64,34 @@ actor StreamGate {
 @Suite("AgentSessionShutdown")
 struct AgentSessionShutdownTests {
 
-    @Test("shutdown during a streaming run stops it and persists the partial assistant text")
+    @Test("attaching decoded context retains branches and leaf without reading a file")
+    func attachDecodedContext() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("session.jsonl")
+        var restored = SessionContext(header: SessionHeader(workingDirectory: directory))
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let root = SessionManager.appendMessage(.user(UserMessage(content: "root", timestamp: timestamp)), to: &restored, parentID: nil)
+        _ = SessionManager.appendMessage(.user(UserMessage(content: "other branch", timestamp: timestamp)), to: &restored, parentID: root.id)
+        let leaf = SessionManager.appendMessage(.user(UserMessage(content: "active branch", timestamp: timestamp)), to: &restored, parentID: root.id)
+        let session = AgentSession(
+            context: AgentContext(systemPrompt: "test", messages: SessionManager.messages(from: restored), workingDirectory: directory),
+            config: AgentLoopConfig(model: AgentLoopTestSupport.defaultModel, llm: MockLLMProviderBox(scripts: []))
+        )
+        await session.attachPersistence(fileURL: file, context: restored)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(await session.branchEntryIDs() == [root.id, leaf.id])
+        #expect(await session.attachedSessionHeader?.id == restored.header.id)
+        await session.setSessionLabel("restored")
+        let saved = try JSONLSessionStore().load(from: file)
+        #expect(saved.entries.map(\.id) == restored.entries.map(\.id))
+        #expect(saved.leafID == leaf.id)
+        #expect(saved.header.label == "restored")
+        #expect(SessionManager.messages(from: saved) == SessionManager.messages(from: restored))
+    }
+
+    @Test("shutdown during a streaming run stops it and persists the partial assistant text", .timeLimit(.minutes(1)))
     func shutdownPersistsPartialOutput() async throws {
         let gate = StreamGate()
         let llm = GatedLLMProvider(gate: gate)
@@ -84,10 +111,22 @@ struct AgentSessionShutdownTests {
         let context = AgentContext(systemPrompt: "test", workingDirectory: workingDirectory)
         let session = AgentSession(context: context, config: config)
         await session.attachPersistence(fileURL: fileURL, header: created.header)
+        let events = await session.events()
 
-        // 启动一个流式 run，等待它进入"已生成部分文本"阶段。
-        await session.prompt(.user("say hi"))
+        // provider yield 只代表入队；先等 Session 实际消费/广播，不能靠任务调度运气断言持久化正文。
+        let latency = RequestLatencyTrace()
+        await RequestLatencyContext.$current.withValue(latency) {
+            await session.prompt(.user("say hi"))
+        }
         await gate.wait()
+        var received = ""
+        for await event in events {
+            if case let .textDelta(delta) = event { received += delta }
+            if received == "Hello there" { break }
+        }
+        #expect(latency.hasReached(.promptReceived))
+        #expect(latency.hasReached(.agentStarted))
+        #expect(latency.hasReached(.preparationFinished))
 
         // 模拟用户在生成途中切换 session：shutdown 应取消 run 并把已生成的部分落盘。
         await session.shutdown()

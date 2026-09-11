@@ -14,6 +14,8 @@
 		AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000150000000000000001 /* NewPiUserMessageRail.swift */; };
 		AA0000020000000000000001 /* NewPiViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000020000000000000001 /* NewPiViewModel.swift */; };
 		AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000030000000000000001 /* NewPiSettingsView.swift */; };
+		AA00002B0000000000000001 /* NewPiSettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00002B0000000000000001 /* NewPiSettingsWindowController.swift */; };
+		AA00002A0000000000000001 /* NewPiVendorTemplateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00002A0000000000000001 /* NewPiVendorTemplateView.swift */; };
 		AA0000160000000000000001 /* ApprovalPolicySettingsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */; };
 		AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */; };
 		AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000060000000000000001 /* NewPiMarkdownText.swift */; };
@@ -31,16 +33,26 @@
 		AA00000C0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB00000C0000000000000001 /* Assets.xcassets */; };
 		AA00000D0000000000000001 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = BB00000D0000000000000001 /* AppIcon.icns */; };
 		AA0000040000000000000001 /* NewPiCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC0000010000000000000001 /* NewPiCore */; };
+		AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000260000000000000001 /* NewPiChatRoomStore.swift */; };
+		AA0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */; };
+		AA0000290000000000000001 /* NewPiMetricsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000290000000000000001 /* NewPiMetricsView.swift */; };
+		AA0000280000000000000001 /* NewPiConfettiBurst.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000280000000000000001 /* NewPiConfettiBurst.swift */; };
+		AA00002C0000000000000001 /* NewPiAppearanceMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00002C0000000000000001 /* NewPiAppearanceMode.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
+		BB0000260000000000000001 /* NewPiChatRoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomStore.swift; sourceTree = "<group>"; };
+		BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomTranscriptAdapter.swift; sourceTree = "<group>"; };
+		BB0000290000000000000001 /* NewPiMetricsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMetricsView.swift; sourceTree = "<group>"; };
 		BB0000110000000000000001 /* NewPiLastProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiLastProjectStore.swift; sourceTree = "<group>"; };
 		BB0000100000000000000001 /* NewPiChatScrollHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatScrollHelper.swift; sourceTree = "<group>"; };
 		BB0000140000000000000001 /* NewPiChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatView.swift; sourceTree = "<group>"; };
 		BB0000150000000000000001 /* NewPiUserMessageRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiUserMessageRail.swift; sourceTree = "<group>"; };
 		BB0000020000000000000001 /* NewPiViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiViewModel.swift; sourceTree = "<group>"; };
 		BB0000030000000000000001 /* NewPiSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSettingsView.swift; sourceTree = "<group>"; };
+		BB00002B0000000000000001 /* NewPiSettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiSettingsWindowController.swift; sourceTree = "<group>"; };
+		BB00002A0000000000000001 /* NewPiVendorTemplateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiVendorTemplateView.swift; sourceTree = "<group>"; };
 		BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalPolicySettingsBridge.swift; sourceTree = "<group>"; };
 		BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiToolApprovalSheet.swift; sourceTree = "<group>"; };
 		BB0000060000000000000001 /* NewPiMarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiMarkdownText.swift; sourceTree = "<group>"; };
@@ -60,6 +72,8 @@
 		BB00000E0000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB00000F0000000000000001 /* AppIcon.iconset */ = {isa = PBXFileReference; lastKnownFileType = folder.iconset; path = AppIcon.iconset; sourceTree = "<group>"; };
 		BB0000040000000000000001 /* NewPi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewPi.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000280000000000000001 /* NewPiConfettiBurst.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiConfettiBurst.swift; sourceTree = "<group>"; };
+		BB00002C0000000000000001 /* NewPiAppearanceMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiAppearanceMode.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -92,6 +106,8 @@
 				BB0000110000000000000001 /* NewPiLastProjectStore.swift */,
 				BB0000020000000000000001 /* NewPiViewModel.swift */,
 				BB0000030000000000000001 /* NewPiSettingsView.swift */,
+				BB00002B0000000000000001 /* NewPiSettingsWindowController.swift */,
+				BB00002A0000000000000001 /* NewPiVendorTemplateView.swift */,
 				BB0000160000000000000001 /* ApprovalPolicySettingsBridge.swift */,
 				BB0000050000000000000001 /* NewPiToolApprovalSheet.swift */,
 				BB0000060000000000000001 /* NewPiMarkdownText.swift */,
@@ -105,6 +121,11 @@
 				BB0000230000000000000001 /* ImageAttachmentProcessor.swift */,
 				BB0000240000000000000001 /* AttachmentSchemeHandler.swift */,
 				BB0000250000000000000001 /* AttachmentPreviewWindow.swift */,
+				BB0000260000000000000001 /* NewPiChatRoomStore.swift */,
+				BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */,
+				BB0000290000000000000001 /* NewPiMetricsView.swift */,
+				BB0000280000000000000001 /* NewPiConfettiBurst.swift */,
+				BB00002C0000000000000001 /* NewPiAppearanceMode.swift */,
 				BB00000B0000000000000001 /* MarkdownRenderer */,
 				BB00000C0000000000000001 /* Assets.xcassets */,
 				BB00000D0000000000000001 /* AppIcon.icns */,
@@ -206,6 +227,8 @@
 				AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */,
 				AA0000020000000000000001 /* NewPiViewModel.swift in Sources */,
 				AA0000030000000000000001 /* NewPiSettingsView.swift in Sources */,
+				AA00002B0000000000000001 /* NewPiSettingsWindowController.swift in Sources */,
+				AA00002A0000000000000001 /* NewPiVendorTemplateView.swift in Sources */,
 				AA0000160000000000000001 /* ApprovalPolicySettingsBridge.swift in Sources */,
 				AA0000050000000000000001 /* NewPiToolApprovalSheet.swift in Sources */,
 				AA0000060000000000000001 /* NewPiMarkdownText.swift in Sources */,
@@ -219,6 +242,11 @@
 				AA0000230000000000000001 /* ImageAttachmentProcessor.swift in Sources */,
 				AA0000240000000000000001 /* AttachmentSchemeHandler.swift in Sources */,
 				AA0000250000000000000001 /* AttachmentPreviewWindow.swift in Sources */,
+				AA0000260000000000000001 /* NewPiChatRoomStore.swift in Sources */,
+				AA0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift in Sources */,
+				AA0000290000000000000001 /* NewPiMetricsView.swift in Sources */,
+				AA0000280000000000000001 /* NewPiConfettiBurst.swift in Sources */,
+				AA00002C0000000000000001 /* NewPiAppearanceMode.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

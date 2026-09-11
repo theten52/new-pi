@@ -105,9 +105,33 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
         return modelDefinitions[normalized]
     }
     
-    /// 获取模型的 Context Window 大小。
+    /// 获取模型的 Context Window 大小：优先 modelDefinitions 中的精确值，
+    /// 否则回落静态目录表（ContextWindowCatalog），再回落 provider 兜底。
+    /// 避免两套数据（preset 预设 vs 目录表）不一致。
     public func contextWindow(for modelID: String) -> Int {
-        modelDefinition(for: modelID)?.contextWindow ?? 128000
+        let normalized = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let def = modelDefinitions[normalized], def.contextWindow > 0 {
+            return def.contextWindow
+        }
+        return ContextWindowCatalog.windowTokens(for: normalized, preset: preset)
+    }
+
+    /// 认证 header 名称（厂商预设可覆盖）。
+    /// 从 options["apiKeyHeader"] 读取；缺省时 Anthropic 协议用 `x-api-key`，其余默认 `Authorization`。
+    /// 如小米 MiMo 用 `api-key`、Anthropic 兼容用 `x-api-key`。
+    public var apiKeyHeader: String {
+        if let configured = options["apiKeyHeader"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty {
+            return configured
+        }
+        return preset == .anthropic ? "x-api-key" : "Authorization"
+    }
+
+    /// 认证 header 值：Authorization 头需带 `Bearer ` 前缀，其余头（api-key / x-api-key）直接放 key。
+    /// header 名比较大小写不敏感（HTTP header 名本身大小写不敏感）。
+    public func apiKeyHeaderValue(_ apiKey: String) -> String {
+        apiKeyHeader.caseInsensitiveCompare("Authorization") == .orderedSame
+            ? "Bearer \(apiKey)" : apiKey
     }
 
     /// 切换某模型的图片能力标注（与 `supportsImages` 同一 normalize 口径）。
@@ -189,14 +213,13 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
             throw ProviderConfigError.emptyModelID
         }
 
-        let definition = ProviderPresetCatalog.definition(for: preset)
-        for field in definition.optionFields where field.required {
+        for field in preset.optionFields where field.required {
             guard option(field.key) != nil else {
                 throw ProviderConfigError.missingRequiredOption(field.key)
             }
         }
 
-        for field in definition.optionFields {
+        for field in preset.optionFields {
             guard let value = option(field.key) else { continue }
             if field.key == .baseURL {
                 try ProviderURLValidator.validate(value, preset: preset)
@@ -219,29 +242,6 @@ public struct ProviderProfile: Sendable, Codable, Equatable, Identifiable {
     public func validate() throws {
         var copy = self
         try copy.validateAndSync()
-    }
-
-    public static func makeDefault(from template: ProviderPresetDefinition, name: String? = nil) -> ProviderProfile {
-        var options: [String: String] = [:]
-        for (key, value) in template.quickSetupDefaults {
-            options[key.rawValue] = value
-        }
-        if options[ProviderOptionKey.baseURL.rawValue] == nil,
-           let defaultBaseURL = template.defaultBaseURL {
-            options[ProviderOptionKey.baseURL.rawValue] = defaultBaseURL
-        }
-
-        return ProviderProfile(
-            id: template.preset == .anthropic ? "anthropic-default" : UUID().uuidString,
-            name: name ?? template.displayName,
-            preset: template.preset,
-            modelID: template.defaultModels.first ?? "default",
-            // 内置模型清单直接预置进 profile，用户可在此基础上增删。
-            models: template.defaultModels,
-            imageCapableModels: template.imageCapableModels,
-            maxTokens: template.defaultBaseURL?.contains("deepseek.com") == true ? 16_384 : 8_192,
-            options: options
-        )
     }
 }
 

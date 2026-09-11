@@ -18,9 +18,11 @@
 
 ---
 
-## 2. 现状与痛点
+## 2. 历史现状与痛点（改造前）
 
-当前 `NewPiToolApprovalSheet` 只有 **Deny / Allow** 两个按钮；`AgentSession.respondToToolApproval` 审批通过后会把整个工具名（`write`/`edit`/`bash`/`subagent`/MCP）标记为本 Session 永久允许（`ToolApprovalTracker`，`Set<String>`，内存态）。
+> 本节保留改造动机，不代表当前状态；三档粒度与整类工具授权的现状见 §5–§8。
+
+改造前 `NewPiToolApprovalSheet` 只有 **Deny / Allow** 两个按钮；`AgentSession.respondToToolApproval` 审批通过后会把整个工具名（`write`/`edit`/`bash`/`subagent`/MCP）标记为本 Session 永久允许（`ToolApprovalTracker`，`Set<String>`，内存态）。
 
 问题：
 - 无一次/本对话/一直的粒度区分。
@@ -62,7 +64,7 @@ public enum ToolDangerLevel: Int, Sendable, Equatable, Comparable, Codable {
 
 | 层 | 作用 | 判定 | 是否调 LLM |
 |---|---|---|---|
-| ① 本地高危规则 | `rm -rf`（危险目标）、`sudo`、`git push --force`、`curl|sh`、磁盘/设备操作 | 命中 → 规则等级（确定） | 否 |
+| ① 本地高危规则 | `rm -rf`（危险目标）、`sudo`、`git push --force`、`curl\|sh`、磁盘/设备操作 | 命中 → 规则等级（确定） | 否 |
 | ①.5 只读 bash 识别 | 整段命令均由已知只读命令组成（ls/find/cat/grep/git status…），无写入重定向、无命令替换、find 无 -exec/-delete、git 为只读子命令 | → **LOW** | 否 |
 | ② 工具类型基线 | `read`=low，`write`/`edit`/`bash`/`subagent`=medium，MCP=medium | 返回基线等级 | 否 |
 | ③ LLM 补充（可选） | 对 ①② 未覆盖/需语义判断的命令做补充评估 | 返回等级+原因 | 是（可配置开关） |
@@ -91,7 +93,7 @@ struct ToolApprovalFingerprint {
 }
 ```
 
-> 注：指纹不再用于授权记录匹配——session/forever 授权按整类工具记忆（见 §5）。
+> 注：新生成的 session/forever 授权按整类工具记忆；指纹仍用于风险缓存及旧记录兼容匹配（见 §5）。
 
 ### 4.4 参数别名共用解析
 
@@ -103,7 +105,7 @@ bash 执行端接受 `cmd`/`script` 别名，read/write/edit 接受 `file_path`/
 
 ## 5. 审批跟踪器（支持持久化 + 三档粒度）
 
-重写 `ToolApprovalTracker`：
+以下为设计示意，非当前完整签名；实际字段与方法见 [ToolPolicy.swift](../Packages/NewPiCore/Sources/NewPiCore/Tools/ToolPolicy.swift) 和 [ApprovalTypes.swift](../Packages/NewPiCore/Sources/NewPiCore/Tools/ApprovalTypes.swift)。当前风险评估/缓存由调用方处理，tracker 接收工具名、指纹与危险等级：
 
 ```swift
 public struct ApprovalRecord: Sendable, Equatable, Codable {
@@ -124,7 +126,7 @@ public actor ToolApprovalTracker {
 
 **授权粒度**：`session`/`forever` 记录按**整类工具**记忆（`parametersFingerprint = nil`）
 ——用户选择「本对话一直允许 bash」后，本对话内 bash 的非高危调用不再弹窗。
-早期版本按精确参数指纹记忆，每条新命令都重新弹窗，等同失效，已废弃。
+早期版本按精确参数指纹记忆，每条新命令都重新弹窗，等同失效，已不再这样生成新记录；旧的非空指纹记录仍可由 `ApprovalRecord.matches` 精确匹配。
 
 **授权判定流程**（`isAuthorized`）：
 
@@ -145,19 +147,17 @@ public actor ToolApprovalTracker {
 
 - 存储位置：`~/.new-pi/agent/approvals.json`（与 `providers.json`/`mcp.json` 一致）。
 - 仅持久化 `scope = .forever` 的记录。
-- 结构：
+- 当前结构为顶层 `[ApprovalRecord]` 数组，不是早期设计的 `{ "approvals": [...] }` 包装对象；以 [PersistentApprovalStore.swift](../Packages/NewPiCore/Sources/NewPiCore/Tools/PersistentApprovalStore.swift) 的编码/解码为准。
+- 新生成的 `session`/`forever` 记录均为 `parametersFingerprint = nil`；JSON 编码时省略该可选字段。永久记录示例：
 
 ```json
-{
-  "approvals": [
-    {
-      "toolName": "bash",
-      "parametersFingerprint": "<sha256>",
-      "scope": "forever",
-      "createdAt": "2026-08-26T00:00:00Z"
-    }
-  ]
-}
+[
+  {
+    "toolName": "bash",
+    "scope": "forever",
+    "createdAt": "2026-08-26T00:00:00Z"
+  }
+]
 ```
 
 ```swift
@@ -204,6 +204,8 @@ public func respondToToolApproval(
 - 若 `danger.level == .high`，即使 scope 为 `.session`/`.forever`，**也不写入 tracker/持久化**（只放行本次），保证下次调用仍提示。
 
 ### 7.3 AgentLoop 授权逻辑
+
+> 下图为基础流程简图。当前 [AgentLoop.swift](../Packages/NewPiCore/Sources/NewPiCore/AgentLoop.swift) 还会在未命中授权且非 high 时咨询 [ProjectScopePolicy](../Packages/NewPiCore/Sources/NewPiCore/Tools/ProjectScopePolicy.swift)：启用时，项目根内 `write`/`edit` 及静态分析获准的 bash 文件操作可免审，过宽根或无法证明范围则回到正常审批。`codingAgentDefault` 将写入类工具列为需审只是基线，不等于每次写文件都弹窗；风险评估实际对所有调用执行，高危不能被授权记忆或项目范围规则跳过。
 
 ```
 toolPolicy.requiresApproval(tool)?
@@ -263,7 +265,9 @@ toolPolicy.requiresApproval(tool)?
 
 ---
 
-## 10. 实施计划
+## 10. 原实施计划（历史记录）
+
+以下保留当时的任务拆分与建议文件名，不作为新的待实施清单；实际类型位置以上文源码链接为准。
 
 | 步骤 | 内容 | 文件 |
 |---|---|---|
@@ -310,7 +314,7 @@ toolPolicy.requiresApproval(tool)?
 | `dangerLevel` / `dangerReason` / `matchedRules` | 危险评估结果 |
 | `policyRequiresApproval` | 工具策略是否要求审批 |
 | `approvalPrompted` | 实际是否弹窗 |
-| `authorization` | `not-required` / `low-risk` / `session` / `forever` / `prompted` |
+| `authorization` | `not-required` / `low-risk` / `project-scoped` / `session` / `forever` / `prompted` |
 | `decisionApproved` / `decisionScope` | 弹窗时用户的决定（未弹窗为 null） |
 
 - 写日志失败不阻塞工具执行；审计在审批决议后、工具执行前落盘（拒绝也记录）。

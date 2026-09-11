@@ -56,7 +56,7 @@ struct ProviderConfigStoreTests {
         )
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         config.profiles.append(deepSeek)
         try store.save(config)
 
@@ -74,7 +74,7 @@ struct ProviderConfigStoreTests {
         let store = ProviderConfigStore(configURL: configURL, credentialResolver: resolver)
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         config.profiles.append(deepSeek)
         try store.save(config)
 
@@ -108,7 +108,7 @@ struct ProviderConfigStoreTests {
         )
 
         var config = ProviderConfigStore.bootstrapDefaultConfig()
-        let deepSeek = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let deepSeek = VendorPresets.makeProfile(from: VendorPresets.deepseek)
         try store.upsertProfile(deepSeek, in: &config)
         #expect(config.defaultProfileID == deepSeek.id)
     }
@@ -253,27 +253,67 @@ struct OpenAICompatibleRequestPolicyTests {
         #expect(OpenAICompatibleRequestPolicy.effectiveMaxTokens(model: model, profile: profile) == 16_384)
     }
 
-    @Test("disables DeepSeek thinking when tools are present")
-    func disableThinkingForTools() {
-        var body: [String: Any] = ["model": "deepseek-v4-flash"]
-        let profile = ProviderProfile(
-            name: "DeepSeek",
-            preset: .openaiCompatible,
-            modelID: "deepseek-v4-flash",
-            options: ["baseURL": "https://api.deepseek.com/v1/chat/completions"]
-        )
-        OpenAICompatibleRequestPolicy.applyDeepSeekThinkingPolicy(
-            body: &body,
-            model: profile.modelConfig,
-            profile: profile,
-            hasTools: true
-        )
-        #expect((body["thinking"] as? [String: String])?["type"] == "disabled")
+    @Test("thinking policy: off disables, high/low map to reasoning_effort by vendor")
+    func thinkingPolicyByVendor() {
+        func makeBody(model: String, url: String, level: ThinkingLevel) -> [String: Any] {
+            var b: [String: Any] = ["model": model]
+            let profile = ProviderProfile(
+                name: "t",
+                preset: .openaiCompatible,
+                modelID: model,
+                thinkingLevel: level,
+                options: ["baseURL": url]
+            )
+            OpenAICompatibleRequestPolicy.applyThinkingPolicy(body: &b, model: profile.modelConfig, profile: profile)
+            return b
+        }
+
+        // DeepSeek chat + off → 关闭思考；+ high → reasoning_effort（chat 端点同样可调）
+        let ds = makeBody(model: "deepseek-v4-pro", url: "https://api.deepseek.com/v1/chat/completions", level: .off)
+        #expect((ds["thinking"] as? [String: String])?["type"] == "disabled")
+        let dsHigh = makeBody(model: "deepseek-v4-pro", url: "https://api.deepseek.com/v1/chat/completions", level: .high)
+        #expect(dsHigh["reasoning_effort"] as? String == "high")
+
+        // GLM + off → 关闭；minimal/low/medium/high → reasoning_effort
+        let glmOff = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .off)
+        #expect((glmOff["thinking"] as? [String: String])?["type"] == "disabled")
+        let glmMin = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .minimal)
+        #expect(glmMin["reasoning_effort"] as? String == "low")
+        let glmLow = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .low)
+        #expect(glmLow["reasoning_effort"] as? String == "low")
+        let glmMed = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .medium)
+        #expect(glmMed["reasoning_effort"] as? String == "medium")
+        let glmHigh = makeBody(model: "glm-5.3", url: "https://open.bigmodel.cn/api/paas/v4/chat/completions", level: .high)
+        #expect(glmHigh["reasoning_effort"] as? String == "high")
+
+        // MiMo + low → reasoning_effort low
+        let mimo = makeBody(model: "mimo-v2.5-pro", url: "https://api.xiaomimimo.com/v1/chat/completions", level: .low)
+        #expect(mimo["reasoning_effort"] as? String == "low")
+
+        // unknown 厂商 + off → 保守不发，避免个别服务端 400
+        let unknown = makeBody(model: "some-model", url: "https://api.example.com/v1/chat/completions", level: .off)
+        #expect(unknown["thinking"] == nil)
+        #expect(unknown["reasoning_effort"] == nil)
+
+        // Responses API 路径（DeepSeek V4）：off→none，minimal/low→low，medium→medium，high→high
+        func effort(_ level: ThinkingLevel) -> String {
+            ResponsesRequestPolicy.reasoningEffort(model: ModelConfig(
+                provider: "openaiCompatible",
+                modelID: "deepseek-v4-pro",
+                thinkingLevel: level,
+                maxTokens: 8192
+            ))
+        }
+        #expect(effort(.off) == "none")
+        #expect(effort(.minimal) == "low")
+        #expect(effort(.low) == "low")
+        #expect(effort(.medium) == "medium")
+        #expect(effort(.high) == "high")
     }
 
-    @Test("DeepSeek quick setup defaults to higher max tokens")
+    @Test("DeepSeek Responses preset defaults to higher max tokens")
     func deepSeekProfileDefaults() {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.deepSeekQuickSetup, name: "DeepSeek")
+        let profile = VendorPresets.makeProfile(from: VendorPresets.deepseekResponses)
         #expect(profile.maxTokens == 16_384)
     }
 }
@@ -282,7 +322,7 @@ struct OpenAICompatibleRequestPolicyTests {
 struct LLMProviderFactoryProfileTests {
     @Test("anthropic preset builds AnthropicProvider")
     func anthropicFactory() throws {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.anthropic)
         let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
             ProviderCredentialResolver.keychainAccount(for: profile.id): "sk-test",
         ]))
@@ -292,7 +332,7 @@ struct LLMProviderFactoryProfileTests {
 
     @Test("openai preset builds OpenAICompatibleProvider")
     func openaiFactory() throws {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.openai)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.openai)
         let resolver = ProviderCredentialResolver(store: InMemoryCredentialStore(secrets: [
             ProviderCredentialResolver.keychainAccount(for: profile.id): "sk-test",
         ]))
@@ -393,11 +433,11 @@ struct ProviderProfileMultiModelTests {
         #expect(profile.models == ["qwen2.5-coder"])
     }
 
-    @Test("makeDefault seeds preset default models")
+    @Test("makeProfile seeds vendor default models")
     func makeDefaultSeedsPresetModels() {
-        let profile = ProviderProfile.makeDefault(from: ProviderPresetCatalog.anthropic)
-        #expect(profile.models == ProviderPresetCatalog.anthropic.defaultModels)
-        #expect(profile.modelID == ProviderPresetCatalog.anthropic.defaultModels.first)
+        let profile = VendorPresets.makeProfile(from: VendorPresets.anthropic)
+        #expect(profile.models == VendorPresets.anthropic.defaultModels.map(\.id))
+        #expect(profile.modelID == VendorPresets.anthropic.defaultModels.first?.id)
     }
 
     @Test("validate rejects empty model list")
@@ -409,14 +449,14 @@ struct ProviderProfileMultiModelTests {
         }
     }
 
-    @Test("well-known presets ship built-in default models")
+    @Test("well-known vendor presets ship built-in default models")
     func presetsHaveDefaultModels() {
-        for preset in ProviderPreset.allCases {
-            let definition = ProviderPresetCatalog.definition(for: preset)
-            #expect(!definition.defaultModels.isEmpty, "preset \(preset.rawValue) missing default models")
+        for vendor in VendorPresets.all {
+            if vendor.id == VendorPresets.openaiCompatible.id { continue }  // 自定义端点允许空模型
+            #expect(!vendor.defaultModels.isEmpty, "vendor \(vendor.id) missing default models")
         }
-        #expect(ProviderPresetCatalog.anthropic.defaultModels.count >= 3)
-        #expect(ProviderPresetCatalog.openai.defaultModels.count >= 3)
-        #expect(ProviderPresetCatalog.openRouter.defaultModels.count >= 3)
+        #expect(VendorPresets.anthropic.defaultModels.count >= 3)
+        #expect(VendorPresets.openai.defaultModels.count >= 3)
+        #expect(VendorPresets.openRouter.defaultModels.count >= 3)
     }
 }

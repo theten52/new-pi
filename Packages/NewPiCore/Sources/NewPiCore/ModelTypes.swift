@@ -20,12 +20,25 @@ public enum JSONValue: Sendable, Equatable, Codable {
     }
 }
 
-public enum ThinkingLevel: String, Sendable, Codable, CaseIterable {
+public enum ThinkingLevel: String, Sendable, Codable, CaseIterable, Identifiable {
     case off
     case minimal
     case low
     case medium
     case high
+
+    public var id: String { rawValue }
+
+    /// 用户可见名称（思考档位）。
+    public var displayName: String {
+        switch self {
+        case .off: "关闭"
+        case .minimal: "极低"
+        case .low: "低"
+        case .medium: "中"
+        case .high: "高"
+        }
+    }
 }
 
 public struct ModelConfig: Sendable, Codable, Equatable {

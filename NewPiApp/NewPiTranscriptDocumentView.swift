@@ -15,6 +15,13 @@ final class TranscriptDocumentController: ObservableObject {
     fileprivate weak var coordinator: NewPiTranscriptDocumentView.Coordinator?
     /// 滚动锚点持久化所属会话（由视图挂载时注入）。
     var sessionID: UUID?
+    fileprivate var latencyTrace: RequestLatencyTrace?
+    fileprivate var latencyFirstTextItemID: UUID?
+
+    func beginLatencyTrace(_ trace: RequestLatencyTrace, firstTextItemID: UUID?) {
+        latencyTrace = trace
+        latencyFirstTextItemID = firstTextItemID
+    }
 
     func jumpTo(_ id: UUID) {
         coordinator?.jumpTo(id)
@@ -24,8 +31,35 @@ final class TranscriptDocumentController: ObservableObject {
         coordinator?.scrollToBottom()
     }
 
+    func setVisible(_ visible: Bool) {
+        coordinator?.setVisible(visible)
+    }
+
+    // MARK: - 流式直连（STREAMING-LAYOUT-ISOLATION）
+
+    /// 流式 flush 绕过 SwiftUI 直达 WebView：面板不再因 @Published 每 flush re-diff，
+    /// WKWebView 从布局传播中隔离。由 ViewModel 在流式 flush 时调用。
+    func applyLive(
+        items: [NewPiTranscriptItem],
+        isStreaming: Bool,
+        streamingBubbleComplete: Bool,
+        tintHues: [UUID: Int]
+    ) {
+        coordinator?.applyLive(
+            transcript: items,
+            isStreaming: isStreaming,
+            streamingBubbleComplete: streamingBubbleComplete,
+            tintHues: tintHues
+        )
+    }
+
+    /// 边界提交后解除直连独占：SwiftUI 恢复为唯一驱动（下次 updateNSView 的 diff 为空操作）。
+    func endLiveApply() {
+        coordinator?.endLiveApply()
+    }
+
     fileprivate func updateScrollState(nearBottom: Bool, anchorID: String?, anchorDelta: CGFloat, scrollTop: CGFloat) {
-        isNearBottom = nearBottom
+        if isNearBottom != nearBottom { isNearBottom = nearBottom }
         // 滚动锚点即改即存（内存表；磁盘写由 store 自带 2s 防抖），
         // 切换会话/冷启动恢复时的数据源。
         if let sessionID {
@@ -39,16 +73,23 @@ final class TranscriptDocumentController: ObservableObject {
     }
 
     fileprivate func updateMarkerPositions(_ positions: [UUID: Double]) {
-        markerPositions = positions
+        if markerPositions != positions { markerPositions = positions }
     }
 }
 
 /// 单文档 transcript 视图：整条会话渲染进一个 WKWebView。
 /// SwiftUI 侧只做 transcript diff → ops → JS；高度表/窗口化/预热在此路径下全部不参与。
+/// 泛化形态（CHATROOM-FLAT-MD Phase 0）：不再绑 SessionRuntime，吃显式参数，
+/// session 与聊天室（消息适配为 transcript items 后）共用同一条渲染管线。
 struct NewPiTranscriptDocumentView: NSViewRepresentable {
-    @ObservedObject var runtime: SessionRuntime
+    let transcript: [NewPiTranscriptItem]
+    let isStreaming: Bool
+    let streamingBubbleComplete: Bool
+    /// 滚动锚点持久化 key（session 用 sessionID，聊天室用 chatroom UUID；nil = 不持久化）。
+    let storeKey: UUID?
     let controller: TranscriptDocumentController
-    /// 轮对话色调：itemID → 色相度数（面板层按最近 user 锚点算好传入）。
+    var isVisible = true
+    /// 轮对话/角色色调：itemID → 色相度数（面板层算好传入）。
     var tintHues: [UUID: Int] = [:]
     /// 冷启动/切回时要恢复的滚动锚点（nil = 落底）。仅首个内容批次应用一次。
     var restoreEntry: ScrollPositionStore.Entry?
@@ -69,6 +110,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
         configuration.userContentController.add(context.coordinator, name: "attachmentTap")
+        configuration.userContentController.add(context.coordinator, name: "uiTiming")
         // 附件图片受控读取通道（BACKLOG-IMAGE-INPUT）：pi-att:// 仅经 SessionAttachments.resolve
         // 放行附件根目录内路径，WebView 不获得任意本地文件读取能力。
         configuration.setURLSchemeHandler(AttachmentSchemeHandler(), forURLScheme: AttachmentSchemeHandler.scheme)
@@ -78,20 +120,22 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         // 顺序敏感：attach 会把 coordinator.sessionID 注入 controller（滚动锚点持久化依赖），
         // 必须先赋值再 attach，否则 controller.sessionID 永远为 nil、位置不落盘（冷启动无法恢复）。
-        context.coordinator.sessionID = runtime.sessionID
+        context.coordinator.sessionID = storeKey
         context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.onFork = onFork
         context.coordinator.attach(webView)
+        context.coordinator.setVisible(isVisible)
         context.coordinator.loadShell()
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onFork = onFork
+        context.coordinator.setVisible(isVisible)
         context.coordinator.apply(
-            transcript: runtime.transcript,
-            isStreaming: runtime.isStreaming,
-            streamingBubbleComplete: runtime.streamingBubbleComplete,
+            transcript: transcript,
+            isStreaming: isStreaming,
+            streamingBubbleComplete: streamingBubbleComplete,
             tintHues: tintHues
         )
     }
@@ -103,18 +147,29 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "attachmentTap")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "uiTiming")
         webView.navigationDelegate = nil
+        coordinator.detach()
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        private var frameProbeTrace: RequestLatencyTrace?
+        private var frameProbeTimeout: Task<Void, Never>?
         private weak var webView: WKWebView?
         private weak var controller: TranscriptDocumentController?
         private var isPageLoaded = false
-        /// 页面未就绪时暂存最近一次 transcript，didFinish 后一次性应用。
+        /// 加载、隐藏或等待 JS 时只保留最新快照；不排队积累过时的流式帧。
         private var pendingSnapshot: TranscriptSnapshot?
+        private var latestSnapshot: TranscriptSnapshot?
+        private var pendingScrollIntent: [String: Any]?
+        private var isVisible = true
+        private var isSending = false
+        private var pageGeneration = 0
+        private var needsReset = false
+        private var lastScrollAnchor: ScrollPositionStore.Entry?
         /// 上一次已应用的条目签名（id → 签名）与顺序，用于增量 diff。
-        private var lastSignatures: [UUID: String] = [:]
+        private var lastSignatures: [UUID: Signature] = [:]
         private var lastOrder: [UUID] = []
         /// 会话标识（供控制器持久化滚动锚点）。
         var sessionID: UUID?
@@ -123,6 +178,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         /// 分叉意图回传（由视图在 make/update 时注入）。
         var onFork: ((Int) -> Void)?
         private var didApplyRestore = false
+        /// PIN-PROBE：最近一次上报的 JS 滚动意图（变化才记日志）。
+        private var lastReportedIntent: String?
+        /// PIN-PROBE2：最近一次记日志的 scrollTop / docHeight（≥400px 变化才记）。
+        private var lastReportedScrollTop: Double = -1
+        private var lastReportedDocHeight: Double = -1
         /// 上一次下发的全局 fork 锁状态（会话是否正在流式），变化时才发 forkLock op。
         private var lastForkLocked: Bool?
 
@@ -138,7 +198,12 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
         func loadShell() {
             guard let webView,
-                  let scriptURL = NewPiMarkdownWebDocument.rendererScriptURL() else { return }
+                  let scriptURL = NewPiMarkdownWebDocument.rendererScriptURL() else {
+                NewPiLogger.error(category: "app", message: "Transcript renderer resources unavailable")
+                return
+            }
+            pageGeneration += 1
+            isSending = false
             isPageLoaded = false
             webView.loadHTMLString(
                 NewPiMarkdownWebDocument.transcriptDocumentHTML(rendererScriptURL: scriptURL),
@@ -149,11 +214,28 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         // MARK: - 意图（原生 → JS）
 
         func jumpTo(_ id: UUID) {
-            send(ops: [["op": "jumpTo", "id": id.uuidString]])
+            pendingScrollIntent = ["op": "jumpTo", "id": id.uuidString]
+            flushPending()
         }
 
         func scrollToBottom() {
-            send(ops: [["op": "scrollToBottom"]])
+            pendingScrollIntent = ["op": "scrollToBottom"]
+            flushPending()
+        }
+
+        func setVisible(_ visible: Bool) {
+            guard isVisible != visible else { return }
+            isVisible = visible
+            if visible { flushPending() }
+        }
+
+        func detach() {
+            cancelFrameProbe()
+            pageGeneration += 1
+            isPageLoaded = false
+            isSending = false
+            if controller?.coordinator === self { controller?.coordinator = nil }
+            webView = nil
         }
 
         // MARK: - transcript 应用（diff → ops）
@@ -165,7 +247,47 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             let tintHues: [UUID: Int]
         }
 
+        /// SwiftUI 路径（updateNSView 驱动）。直连独占期间忽略：内容已由 applyLive
+        /// 投递，此路径只剩其它 @Published 变化触发的重复调用，避免陈旧快照回写。
         func apply(
+            transcript: [NewPiTranscriptItem],
+            isStreaming: Bool,
+            streamingBubbleComplete: Bool,
+            tintHues: [UUID: Int]
+        ) {
+            guard !liveDriven else { return }
+            applyInternal(
+                transcript: transcript,
+                isStreaming: isStreaming,
+                streamingBubbleComplete: streamingBubbleComplete,
+                tintHues: tintHues
+            )
+        }
+
+        /// 流式直连入口（STREAMING-LAYOUT-ISOLATION）：ViewModel 绕过 SwiftUI 直达 WebView。
+        func applyLive(
+            transcript: [NewPiTranscriptItem],
+            isStreaming: Bool,
+            streamingBubbleComplete: Bool,
+            tintHues: [UUID: Int]
+        ) {
+            liveDriven = true
+            applyInternal(
+                transcript: transcript,
+                isStreaming: isStreaming,
+                streamingBubbleComplete: streamingBubbleComplete,
+                tintHues: tintHues
+            )
+        }
+
+        /// 边界提交后解除直连独占：SwiftUI 恢复为唯一驱动。
+        func endLiveApply() {
+            liveDriven = false
+        }
+
+        private var liveDriven = false
+
+        private func applyInternal(
             transcript: [NewPiTranscriptItem],
             isStreaming: Bool,
             streamingBubbleComplete: Bool,
@@ -177,17 +299,31 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 streamingBubbleComplete: streamingBubbleComplete,
                 tintHues: tintHues
             )
-            guard isPageLoaded else {
-                pendingSnapshot = snapshot
-                return
+            latestSnapshot = snapshot
+            pendingSnapshot = snapshot
+            flushPending()
+        }
+
+        private func flushPending() {
+            guard isPageLoaded, isVisible, !isSending else { return }
+            if let snapshot = pendingSnapshot {
+                pendingSnapshot = nil
+                applyLoaded(snapshot)
+            } else if let intent = pendingScrollIntent {
+                pendingScrollIntent = nil
+                send(ops: [intent])
             }
-            applyLoaded(snapshot)
         }
 
         private func applyLoaded(_ snapshot: TranscriptSnapshot) {
+            let diffStart = Date()
             var ops: [[String: Any]] = []
+            if needsReset {
+                ops.append(["op": "reset"])
+                needsReset = false
+            }
             var newOrder: [UUID] = []
-            var newSignatures: [UUID: String] = [:]
+            var newSignatures: [UUID: Signature] = [:]
 
             let lastItemID = snapshot.items.last?.id
             for item in snapshot.items {
@@ -205,8 +341,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 ops.append(["op": "remove", "id": oldID.uuidString])
             }
 
-            // 顺序变化（fork 重建）时整体重排
-            if newOrder != lastOrder, !lastOrder.isEmpty {
+            // 删除保留旧节点的相对顺序，新增节点自然追加；只有这两者不能形成目标顺序才重排。
+            let naturalOrder = lastOrder.filter { currentIDs.contains($0) }
+                + newOrder.filter { lastSignatures[$0] == nil }
+            if newOrder != naturalOrder {
                 ops.append(["op": "order", "ids": newOrder.map { $0.uuidString }])
             }
 
@@ -220,10 +358,19 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 ops.append(["op": "forkLock", "locked": snapshot.isStreaming])
             }
 
-            guard !ops.isEmpty else { return }
+            // UI 侧指标：diff 计算耗时（每次 flush 都会触发；transcript 越大越贵）。
+            let diffDuration = Date().timeIntervalSince(diffStart)
+            let diffOpsCount = ops.count
+            Task { [diffDuration, diffOpsCount] in
+                await LLMMetricsRecorder.shared.record(UITranscriptDiffMetric(
+                    duration: diffDuration,
+                    opsCount: diffOpsCount
+                ))
+            }
+
             // 首个内容批次末尾附带滚动位置恢复（同批同步执行：upsert 完即锚定，
             // 无「高度未回」中间态）；无保存位置则落底。
-            if !didApplyRestore {
+            if !didApplyRestore, !snapshot.items.isEmpty {
                 didApplyRestore = true
                 if let entry = pendingRestoreEntry {
                     var restore: [String: Any] = ["op": "restoreAnchor", "delta": entry.delta, "offset": entry.offset]
@@ -234,54 +381,42 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 }
                 pendingRestoreEntry = nil
             }
+            if let intent = pendingScrollIntent {
+                pendingScrollIntent = nil
+                ops.append(intent)
+            }
+            guard !ops.isEmpty else { return }
             send(ops: ops)
         }
 
-        /// 与遗留面板一致的活跃流式条目判定：最后一条 assistant/summary 且正文未落定。
+        /// 聊天室使用显式条目状态，Session 保持末条 assistant/summary 的既有判定。
         private func isStreamingItem(
             _ item: NewPiTranscriptItem,
             snapshot: TranscriptSnapshot,
             lastItemID: UUID?
         ) -> Bool {
-            if case .thinking(let streaming) = item.kind {
-                return streaming
-            }
-            return snapshot.isStreaming
-                && !snapshot.streamingBubbleComplete
-                && item.id == lastItemID
-                && item.isAssistantMarkdown
+            item.isStreaming(isRunning: snapshot.isStreaming,
+                bubbleComplete: snapshot.streamingBubbleComplete, lastItemID: lastItemID)
         }
 
-        private static func signature(of item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> String {
-            var kindTag: String
-            var extra = ""
-            switch item.kind {
-            case .user:
-                kindTag = "user"
-                // 附件路径入签名：附件集合变化（理论上 user 条目一次带全，防御性保留）须触发再 upsert。
-                extra = item.attachments.map(\.path).joined(separator: ",")
-            case .assistant: kindTag = "assistant"
-            case .summary: kindTag = "summary"
-            case .system: kindTag = "system"
-            case .error: kindTag = "error"
-            case .thinking(let s): kindTag = "thinking"; extra = s ? "1" : "0"
-            case .tool(let name, let state):
-                switch state {
-                case .running: kindTag = "tool"; extra = "run|" + name
-                case .completed(let isError): kindTag = "tool"; extra = (isError ? "err|" : "ok|") + name
-                }
-                extra += "|" + (item.toolCommand ?? "")
-            case .detailGroup(let collapsed): kindTag = "detailGroup"; extra = collapsed ? "1" : "0"
-            }
-            // detailTurnID 纳入签名：分组归属变化（最终答复移出组 / 条目入组）必须触发再 upsert，
-            // 否则 lastSignatures 判等为相等会跳过更新（BACKLOG-DETAIL-GROUP，文档 D 强调的 diff 感知）。
-            // fork 元数据也纳入签名：messageIndex 在 agentEnd 才补（messageEnd 时仍为 nil），
-            // 若不参与签名，补上 index 后 body/streaming/tint/detailTurnID 全不变会被判等跳过，
-            // 导致 assistant 答复的 Fork 按钮永远缺失（FORK-BUTTON-META-DIFF）。
-            let forkMeta = item.canFork && item.messageIndex != nil
-                ? item.messageIndex.map(String.init) ?? "-"
-                : "-"
-            return "\(kindTag)|\(extra)|\(streaming ? 1 : 0)|\(tint ?? -1)|\(item.detailTurnID ?? "-")|\(forkMeta)|\(item.body)"
+        /// 保留字符串的值共享，不再每批把全部历史正文拼接成新的签名字符串。
+        struct Signature: Equatable {
+            let kind: NewPiTranscriptItemKind
+            let streaming: Bool
+            let tint: Int?
+            let detailTurnID: String?
+            let forkIndex: Int?
+            let speaker: String?
+            let command: String?
+            let attachments: [MessageAttachment]
+            let body: String
+        }
+
+        private static func signature(of item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> Signature {
+            Signature(kind: item.kind, streaming: streaming, tint: tint,
+                detailTurnID: item.detailTurnID, forkIndex: item.canFork ? item.messageIndex : nil,
+                speaker: item.speaker, command: item.toolCommand,
+                attachments: item.attachments, body: item.body)
         }
 
         private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> [String: Any] {
@@ -294,6 +429,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let tint { op["tint"] = tint }
             if let command = item.toolCommand { op["command"] = command }
             if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
+            // 发言者名字（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言专用，session 路径不下发。
+            if let speaker = item.speaker { op["speaker"] = speaker }
             // 可 fork 条目的分叉能力元数据（JS 侧据此显示 Fork 按钮）。
             if item.canFork, let messageIndex = item.messageIndex {
                 op["canFork"] = true
@@ -334,45 +471,106 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         // MARK: - JS 通道
 
         private func send(ops: [[String: Any]]) {
-            guard let webView, isPageLoaded,
-                  let data = try? JSONSerialization.data(withJSONObject: ops),
-                  let json = String(data: data, encoding: .utf8) else { return }
+            guard let webView, isPageLoaded else { return }
             // 双重编码：ops 内含模型输出的任意字符，防止 </script> 类内容破坏 JS 字符串边界。
             // apply 接收 JSON 字符串并自行 JSON.parse——不要在外层再 parse 一次。
-            guard let literalData = try? JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed]),
-                  var literal = String(data: literalData, encoding: .utf8) else { return }
+            let literalData: Data
+            do {
+                let data = try JSONSerialization.data(withJSONObject: ops)
+                let json = String(decoding: data, as: UTF8.self)
+                literalData = try JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed])
+            } catch {
+                NewPiLogger.error(category: "app", message: "Transcript ops encoding failed", details: "\(error)")
+                invalidateAppliedState()
+                return
+            }
+            var literal = String(decoding: literalData, as: UTF8.self)
             literal = literal.replacingOccurrences(of: "</", with: "<\\/")
-            webView.evaluateJavaScript("window.transcriptDoc && window.transcriptDoc.apply(\(literal));") { _, error in
-                if let error {
-                    // 完整打印 NSError（含 WKJavaScriptException* userInfo），localizedDescription 会丢行号。
-                    NewPiLogger.error(category: "app", message: "Transcript doc apply failed", details: "\(error)")
+            isSending = true
+            let generation = pageGeneration
+            var script = "window.transcriptDoc.apply(\(literal));"
+            var probe: RequestLatencyTrace?
+            if let trace = controller?.latencyTrace,
+               let itemID = controller?.latencyFirstTextItemID,
+               ops.contains(where: {
+                   $0["op"] as? String == "upsert" && $0["id"] as? String == itemID.uuidString
+                       && ($0["body"] as? String)?.isEmpty == false
+               }), trace.mark(.firstJSDispatch) {
+                probe = trace
+                cancelFrameProbe()
+                frameProbeTrace = trace
+                // 两次 RAF 仅是浏览器帧机会，不代表 CA/WindowServer 已把像素送到显示器。
+                // 参数是原生生成 UUID；模型正文仍只通过上面的 JSON 编码进入文档。
+                script += """
+                requestAnimationFrame(function() { requestAnimationFrame(function() {
+                  window.webkit.messageHandlers.uiTiming.postMessage({
+                    firstTextFrameRunID: '\(trace.id.uuidString)', documentVisible: !document.hidden
+                  });
+                }); }); void 0;
+                """
+                frameProbeTimeout = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    guard let self, self.frameProbeTrace?.id == trace.id else { return }
+                    trace.mark(.frameNotObserved)
                 }
             }
+            let dispatchedProbe = probe
+            webView.evaluateJavaScript(script) { [weak self] _, error in
+                guard let self, self.pageGeneration == generation else { return }
+                self.isSending = false
+                if let error {
+                    dispatchedProbe?.mark(.presentationUnavailable)
+                    if dispatchedProbe != nil { self.cancelFrameProbe() }
+                    // 完整打印 NSError（含 WKJavaScriptException* userInfo），localizedDescription 会丢行号。
+                    NewPiLogger.error(category: "app", message: "Transcript doc apply failed", details: "\(error)")
+                    self.invalidateAppliedState()
+                    return
+                }
+                dispatchedProbe?.mark(.firstDOMAcknowledged)
+                self.flushPending()
+            }
+            // PAINT-GATE（STREAMING-LAYOUT-ISOLATION 的回归修复）：布局隔离移除了
+            // 每 flush 的 @Published → 窗口不再有原生失效 → display cycle 不跑 →
+            // WKWebView 的远程图层事务无人合成、画面冻结（滚动能救活同因）。
+            // 派发 ops 后主动弄脏视图，把合成调度回来。代价为标记脏，实际绘制在下一 vsync。
+            webView.setNeedsDisplay(.infinite)
+        }
+
+        private func cancelFrameProbe() {
+            frameProbeTimeout?.cancel()
+            frameProbeTimeout = nil
+            frameProbeTrace?.mark(.presentationUnavailable)
+            frameProbeTrace = nil
+        }
+
+        private func invalidateAppliedState() {
+            needsReset = true
+            lastSignatures = [:]
+            lastOrder = []
+            lastForkLocked = nil
+            pendingSnapshot = latestSnapshot
         }
 
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isPageLoaded = true
-            if let pending = pendingSnapshot {
-                pendingSnapshot = nil
-                applyLoaded(pending)
-            }
+            flushPending()
         }
 
         // 单点故障对策（BACKLOG-SINGLE-DOC 风险表）：内容进程终止 = 整条 transcript 白屏。
         // 重建外壳 + 全量重放（签名表已重置，所有条目重新 upsert）。
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            cancelFrameProbe()
             NewPiLogger.error(category: "app", message: "Transcript document process terminated, rebuilding")
-            lastSignatures = [:]
-            lastOrder = []
-            // JS 侧 forkLocked 随页面重建归零，这里也必须重置，否则流式锁态丢失（FORK-LOCK-GLOBAL）。
-            lastForkLocked = nil
+            invalidateAppliedState()
             // 重建后按当前会话的保存位置再恢复一次（白屏重建前刚存下的位置）。
-            if let sessionID {
+            if let anchor = lastScrollAnchor {
+                pendingRestoreEntry = anchor
+            } else if let sessionID {
                 pendingRestoreEntry = ScrollPositionStore.shared.entry(for: sessionID)
-                didApplyRestore = false
             }
+            didApplyRestore = false
             loadShell()
         }
 
@@ -418,6 +616,31 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 let anchorID = body["anchorID"] as? String
                 let anchorDelta = (body["anchorDelta"] as? NSNumber)?.doubleValue ?? 0
                 let scrollTop = (body["scrollTop"] as? NSNumber)?.doubleValue ?? 0
+                lastScrollAnchor = ScrollPositionStore.Entry(rowID: anchorID, delta: anchorDelta, offset: scrollTop)
+                let docHeight = (body["docHeight"] as? NSNumber)?.doubleValue ?? 0
+                // PIN-PROBE：JS 滚动意图变化观测（钉底回归定位），转迁时记一条。
+                let intent = body["intent"] as? String ?? "?"
+                // PIN-PROBE2：scrollTop/docHeight 每变 ≥400px 记一条——区分
+                // 「文档没长高」（布局/容器）与「长高了但 scrollY 没跟」（scrollTo 失效）
+                // 与「都正常但画面旧」（paint/合成层滞后）。
+                if abs(scrollTop - lastReportedScrollTop) >= 400 || abs(docHeight - lastReportedDocHeight) >= 400 {
+                    lastReportedScrollTop = scrollTop
+                    lastReportedDocHeight = docHeight
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "PROBE scroll pos",
+                        details: "panel=\(sessionID?.uuidString.prefix(8) ?? "?") scrollTop=\(Int(scrollTop)) docHeight=\(Int(docHeight)) intent=\(intent) nearBottom=\(nearBottom)"
+                    )
+                }
+                if intent != lastReportedIntent {
+                    let prev = lastReportedIntent
+                    lastReportedIntent = intent
+                    NewPiLogger.info(
+                        category: "app",
+                        message: "PROBE scroll intent",
+                        details: "panel=\(sessionID?.uuidString.prefix(8) ?? "?") \(prev ?? "nil") -> \(intent) nearBottom=\(nearBottom) scrollTop=\(Int(scrollTop))"
+                    )
+                }
                 controller?.updateScrollState(
                     nearBottom: nearBottom,
                     anchorID: anchorID,
@@ -443,6 +666,37 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                     }
                 }
                 controller?.updateMarkerPositions(positions)
+            case "uiTiming":
+                // JS applyOps 耗时（DOM 应用 + 批量提交）回传 → 上报 UI 指标。
+                guard let body = message.body as? [String: Any] else { return }
+                if let runID = body["firstTextFrameRunID"] as? String {
+                    guard let trace = frameProbeTrace, trace.id.uuidString == runID else { return }
+                    if body["documentVisible"] as? Bool == true,
+                       webView?.window?.occlusionState.contains(.visible) == true {
+                        trace.mark(.firstFrameCallback)
+                    } else {
+                        trace.mark(.presentationUnavailable)
+                    }
+                    frameProbeTimeout?.cancel()
+                    frameProbeTimeout = nil
+                    frameProbeTrace = nil
+                    return
+                }
+                let duration = (body["durationMs"] as? NSNumber)?.doubleValue ?? 0
+                let opsCount = (body["opsCount"] as? NSNumber)?.intValue ?? 0
+                // PROBE（BACKLOG-STALL 定位）：JS 执行完成时刻。与「PROBE stream flush」
+                // 的差值 = JS 队列等待 + 执行；此后到下一事件消费的间隔 = PAINT/表面分配阻塞。
+                NewPiLogger.info(
+                    category: "app",
+                    message: "PROBE dom applied",
+                    details: "ms=\(String(format: "%.0f", duration)) ops=\(opsCount)"
+                )
+                Task {
+                    await LLMMetricsRecorder.shared.record(UIDomApplyMetric(
+                        duration: duration / 1000,
+                        opsCount: opsCount
+                    ))
+                }
             default:
                 break
             }

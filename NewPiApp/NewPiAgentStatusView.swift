@@ -68,10 +68,11 @@ struct NewPiAgentStatusIcon: View {
                 }
                 .frame(width: size.frame, height: size.frame)
 
+            // 持续 symbolEffect 会触发 RenderBox 表面同步等待，阻塞正文流式消费。
+            // 图标保持静态，活跃反馈由文字呼吸承担；减动效策略仍由标签处理。
             Image(systemName: presentation.systemImage)
                 .font(.system(size: size.symbolSize, weight: .semibold))
                 .foregroundStyle(foregroundColor)
-                .symbolEffect(.pulse, isActive: presentation.isActive)
         }
         .accessibilityHidden(true)
     }
@@ -116,12 +117,16 @@ struct NewPiProviderModelGroup: Identifiable, Equatable {
 
 /// 模型选择菜单（BACKLOG-STATUSBAR-MODEL-PICKER）：按 provider 分组列出可选模型，
 /// 当前使用中的模型打勾。点击即切换当前会话的模型（无会话时切换默认 provider 的模型）。
+/// 菜单底部附「思考级别」档位（会话级临时覆盖，见 ViewModel.setThinkingLevel）。
 struct NewPiModelPickerMenu: View {
     let groups: [NewPiProviderModelGroup]
     let activeProfileID: String?
     let activeModelID: String
+    /// 当前生效的思考档位（覆盖 ?? provider 默认）。
+    var thinkingLevel: ThinkingLevel = .off
     var isDisabled: Bool = false
     let onSelect: (_ profileID: String, _ modelID: String) -> Void
+    var onThinkingSelect: ((ThinkingLevel) -> Void)? = nil
 
     var body: some View {
         Menu {
@@ -146,6 +151,23 @@ struct NewPiModelPickerMenu: View {
                     }
                 }
             }
+            if let onThinkingSelect {
+                Section {
+                    ForEach(ThinkingLevel.allCases) { level in
+                        Button {
+                            onThinkingSelect(level)
+                        } label: {
+                            if level == thinkingLevel {
+                                Label(level.displayName, systemImage: "checkmark")
+                            } else {
+                                Label(level.displayName, systemImage: level == .off ? "brain.slash" : "brain")
+                            }
+                        }
+                    }
+                } header: {
+                    Text("思考级别（当前：\(thinkingLevel.displayName)）")
+                }
+            }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "cpu")
@@ -153,6 +175,12 @@ struct NewPiModelPickerMenu: View {
                 Text(activeModelID.isEmpty ? "选择模型" : activeModelID)
                     .font(.caption.monospaced())
                     .lineLimit(1)
+                // 思考开启时给个小图标，让当前档位一眼可见（off 不显示）。
+                if thinkingLevel != .off {
+                    Image(systemName: "brain")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8, weight: .semibold))
             }
@@ -162,7 +190,7 @@ struct NewPiModelPickerMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(isDisabled || groups.isEmpty)
-        .help("切换当前会话使用的模型")
+        .help("切换当前会话使用的模型与思考档位（当前思考：\(thinkingLevel.displayName)）")
     }
 }
 
@@ -244,6 +272,7 @@ struct NewPiAgentStatusBar: View {
 struct NewPiStatusBreathingLabel: View {
     let text: String
     let isActive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// 呼吸相位：开关翻转驱动透明度在亮/暗间往复，形成连续呼吸。
     @State private var breathing = false
@@ -256,16 +285,23 @@ struct NewPiStatusBreathingLabel: View {
             .font(.subheadline)
             .lineLimit(1)
             .foregroundStyle(textColor)
-            .opacity(isActive ? (breathing ? 1.0 : 0.55) : 1.0)
-            .animation(isActive ? .easeInOut(duration: 1.1) : nil, value: breathing)
+            .opacity(shouldAnimate ? (breathing ? 1.0 : 0.55) : 1.0)
+            .animation(shouldAnimate ? .easeInOut(duration: 1.1) : nil, value: breathing)
             .onReceive(timer) { _ in
-                guard isActive else { return }
+                guard shouldAnimate else {
+                    breathing = false
+                    return
+                }
                 breathing.toggle()
             }
     }
 
     private var textColor: Color {
         isActive ? Color.green : Color.secondary
+    }
+
+    private var shouldAnimate: Bool {
+        isActive && !reduceMotion
     }
 }
 

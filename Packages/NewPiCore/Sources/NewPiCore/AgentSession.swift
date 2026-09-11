@@ -8,6 +8,8 @@ public actor AgentSession {
     private let approvalGate = ToolApprovalGate()
     private let approvalTracker = ToolApprovalTracker()
     private var runTask: Task<Void, Never>?
+    /// PROBE（BACKLOG-STALL）：本 run 已 broadcast 的 textDelta 计数（见 broadcast 前探针）。
+    private var probeTextCount = 0
     private var eventContinuations: [UUID: AsyncStream<AgentEvent>.Continuation] = [:]
     private var steeringQueue: [AgentMessage] = []
     private var persistenceFileURL: URL?
@@ -32,6 +34,11 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        // 项目根内文件操作免审批：根取本会话 workingDirectory，开关走持久化策略。
+        configured.projectScope = config.projectScope ?? ProjectScopePolicy(
+            root: context.workingDirectory,
+            isEnabled: approvalPolicy.projectScopeAutoApprove
+        )
         configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
     }
@@ -51,6 +58,7 @@ public actor AgentSession {
     }
 
     public func prompt(_ message: AgentMessage) {
+        RequestLatencyContext.current?.mark(.promptReceived)
         runTask?.cancel()
         let promptSummary: String = switch message {
         case let .user(user):
@@ -106,6 +114,23 @@ public actor AgentSession {
                             details: "elapsed=\(String(format: "%.2f", persistElapsed))s messages=\(snapshot.messages.count)"
                         )
                     }
+                }
+                // PROBE（BACKLOG-STALL / STALL-VERIFY 定位）：事件到达 broadcast 的时刻。
+                // textDelta 每 100 个一条（与 UI 消费端 consumed 探针 cadence 对齐，
+                // 同序号两端时间差 = 投递/调度延迟）；边界事件全记。
+                switch event {
+                case .agentStart:
+                    probeTextCount = 0
+                    NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "agentStart")
+                case .textDelta:
+                    probeTextCount += 1
+                    if probeTextCount % 100 == 0 {
+                        NewPiLogger.info(category: "agent-session", message: "STALL-VERIFY bcast", details: "text#\(probeTextCount)")
+                    }
+                case .messageStart, .messageEnd, .agentEnd, .error:
+                    NewPiLogger.info(category: "agent-session", message: "PROBE broadcast", details: "\(event.diagnosticName)")
+                default:
+                    break
                 }
                 // 诊断：事件从 loop 到 broadcast 的处理耗时（>0.2s 记日志）。
                 let broadcastStart = Date()
@@ -202,6 +227,11 @@ public actor AgentSession {
             llmAssessor: config.dangerEvaluator?.llmAssessor
         )
         configured.dangerCache = config.dangerCache ?? DangerAssessmentCache()
+        // 与 init 同源：根取会话 workingDirectory，开关走持久化策略。
+        configured.projectScope = config.projectScope ?? ProjectScopePolicy(
+            root: context.workingDirectory,
+            isEnabled: ApprovalPolicyStore().load().projectScopeAutoApprove
+        )
         configured.auditLogger = config.auditLogger ?? ToolApprovalAuditLogger()
         self.config = configured
         NewPiLogger.info(
@@ -224,6 +254,14 @@ public actor AgentSession {
             persistenceContext = SessionContext(header: header)
             persistenceLeafID = nil
         }
+    }
+
+    /// 冷恢复已解码的上下文直接复用，保留分支 leaf/条目身份，避免再次读取整个 JSONL。
+    public func attachPersistence(fileURL: URL, context: SessionContext) {
+        persistenceFileURL = fileURL
+        persistenceHeader = context.header
+        persistenceContext = context
+        persistenceLeafID = context.leafID
     }
 
     public var attachedSessionHeader: SessionHeader? {
@@ -357,7 +395,8 @@ public enum AgentSessionFactory {
         model: ModelConfig,
         toolPolicy: ToolPolicyRules = .codingAgentDefault,
         restoredMessages: [AgentMessage] = [],
-        additionalTools: [any AgentTool] = []
+        additionalTools: [any AgentTool] = [],
+        contextWindow: Int? = nil
     ) -> AgentSession {
         let tools = codingTools(
             workingDirectory: workingDirectory,
@@ -371,6 +410,8 @@ public enum AgentSessionFactory {
             llm: llm,
             tools: tools,
             toolPolicy: toolPolicy,
+            // 调用方提供模型窗口时按窗口推导压缩预算，否则用通用默认值
+            compaction: contextWindow.map { CompactionConfig.recommended(contextWindow: $0) } ?? CompactionConfig(),
             dangerEvaluator: DangerEvaluator(
                 policy: approvalPolicy,
                 llmSupplementEnabled: approvalPolicy.llmSupplementEnabled

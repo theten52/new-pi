@@ -1,5 +1,13 @@
 # NewPi 需求交接：Agent 处理详情折叠（处理详情组）
 
+> **当前状态（2026-09-12 源码核对）：已实施，本文作为需求与原始设计存档。**
+> `NewPiViewModel.swift` 已有 `.detailGroup` / `detailTurnID`、marker 创建与最终答复收尾；
+> `NewPiTranscriptDocumentView.swift` 已下发分组字段；`transcript-document.js/css`
+> 已有 `renderDetailGroup`、`manualOverride` 与折叠样式。不要将下面「新增 / 改动」重新列为待办。
+> 下文保留原始规则、示例和路径，不保证与后续实现细节逐字一致；手动覆盖属页面生命周期状态，
+> 热保活切换不等于冷重建，不能将「不持久化」理解为每次切走都会重置。
+> 验证清单供回归参考，本次仅核对源码，未运行构建、测试或逐项 UI 验收。
+
 > 参考行为（截图产品）：agent 的中间过程（思考 / 工具调用 / 中间回复）聚合为一条可折叠的
 > 「处理详情」disclosure 行，最终答复单独展示在组外。
 
@@ -23,7 +31,7 @@
    `docs/dev-notes/2026-08-30-transcript-scroll-jump.md`、
    `docs/dev-notes/2026-08-29-render-replay-windowing-scroll-restore.md`）。
 
-## 二、架构背景（必读）
+## 二、架构背景（原始设计快照）
 
 项目是 macOS 编码 agent（SwiftUI + AppKit + WKWebView），核心渲染架构是**单文档 transcript**：
 
@@ -50,7 +58,7 @@
 - App 构建：`./scripts/package.sh Debug`（必须在仓库根目录跑）
 - 提交信息风格：中文 conventional commit（如 `feat: xxx` / `fix: xxx`）。
 
-## 三、实现方案
+## 三、实现方案（已实施的原始设计，保留作对照）
 
 ### A. 数据模型（`NewPiApp/NewPiViewModel.swift`）
 
@@ -154,9 +162,9 @@
 `NewPiApp/NewPiSpikeTranscriptView.swift` 复用同一渲染管线的话，确认其模拟数据不含 detailGroup
 kind 即可；若 spike 的 JS 分发走同一 `upsert`，新增分支不能影响既有 kind。
 
-## 四、验证清单
+## 四、验证清单（历史验收要求，非本次测试报告）
 
-1. `cd Packages/NewPiCore && swift test`（core 未动，应无回归；当前 174 个测试全过）。
+1. `cd Packages/NewPiCore && swift test`（原记录为「174 个测试全过」；属于当时结果，非当前测试数量或本次验证结论）。
 2. `./scripts/package.sh Debug` 构建成功。
 3. 手动验证：
    - 新提问：流式期间详情组展开，thinking/工具卡实时可见；
@@ -170,7 +178,10 @@ kind 即可；若 spike 的 JS 分发走同一 `upsert`，新增分支不能影�
 4. 提交：中文 conventional commit，如
    `feat: agent 处理详情按 turn 折叠——流式自动展开、答复落定自动收起、手动覆盖优先`。
 
-## 五、已知不做的事
+## 五、已知不做的事（原阶段范围，非当前能力清单）
+
+> 以下保留当时的排除项；后续渲染器已增加 thinking 卡自身的预览/展开交互，
+> 不应再把最后一项当作当前限制。手动组状态仍不落盘，热页面保活期间则可保留。
 
 - 统计计数（N 条消息 · M 次工具调用）——需求方明确暂缓。
 - 手动状态持久化 / 跨会话保留——不做。

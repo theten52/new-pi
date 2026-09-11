@@ -38,10 +38,10 @@ struct NewPiSessionPanel: View {
     @ObservedObject var viewModel: NewPiViewModel
 
     @State private var input = ""
-    /// composer 输入框的实测内容高度（由 NewPiComposerTextView 回报，固定 4 行）。
-    @State private var composerInputHeight: CGFloat = NewPiComposerScrollView.fallbackHeight
     /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
     @State private var draftAttachments: [DraftImageAttachment] = []
+    /// 回答完成礼花触发序号：每次最终答复真正落定后自增一。
+    @State private var confettiTrigger = 0
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
 
@@ -67,9 +67,13 @@ struct NewPiSessionPanel: View {
                     }
                 } else {
                     NewPiTranscriptDocumentView(
-                        runtime: runtime,
+                        transcript: runtime.transcript,
+                        isStreaming: runtime.isStreaming,
+                        streamingBubbleComplete: runtime.streamingBubbleComplete,
+                        storeKey: runtime.sessionID,
                         controller: docController,
-                        tintHues: turnTintHues(for: runtime.transcript),
+                        isVisible: viewModel.isActiveRuntime(runtime),
+                        tintHues: NewPiViewModel.transcriptTintHues(for: runtime.transcript),
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；
                         // 无记录则落底。文档内同步锚定，无「高度未回」中间态。
                         restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID),
@@ -78,24 +82,28 @@ struct NewPiSessionPanel: View {
                         }
                     )
                     .overlay(alignment: .bottom) {
-                        if runtime.isStreaming && !docController.isNearBottom {
-                            Button {
-                                docController.scrollToBottom()
-                            } label: {
-                                Label("Jump to latest", systemImage: "arrow.down")
-                                    .font(.callout.weight(.medium))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 8)
-                                    .background(.regularMaterial, in: Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, 12)
-                            .transition(.opacity)
+                        // 常驻挂载 + 透明度开关（STREAMING-LAYOUT-ISOLATION）：条件插入/移除
+                        // 会在流式中途制造结构性布局失效并向 WKWebView 子树传播；
+                        // 恒定结构 + opacity 翻转零布局成本，动画观感与原 transition 等价。
+                        let jumpVisible = runtime.isStreaming && !docController.isNearBottom
+                        Button {
+                            docController.scrollToBottom()
+                        } label: {
+                            Label("Jump to latest", systemImage: "arrow.down")
+                                .font(.callout.weight(.medium))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(.regularMaterial, in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                                )
                         }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 12)
+                        .opacity(jumpVisible ? 1 : 0)
+                        .allowsHitTesting(jumpVisible)
+                        .animation(.easeInOut(duration: 0.15), value: jumpVisible)
                     }
                 }
 
@@ -112,24 +120,42 @@ struct NewPiSessionPanel: View {
 
             chatComposer
         }
+        .overlay(alignment: .bottomTrailing) {
+            // 小礼花层：allowsHitTesting(false)，不挡 transcript 滚动 / rail / jump 按钮；
+            // 发射原点固定在面板右下角（Send 按钮恒在最右），粒子向上飞进 transcript 区域。
+            NewPiConfettiBurstView(trigger: confettiTrigger)
+                .zIndex(10)
+        }
+        .onAppear {
+            // 流式直连通道（STREAMING-LAYOUT-ISOLATION）：runtime ↔ 本面板控制器结对。
+            // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
+            runtime.docController = docController
+            if let latency = runtime.latencyTrace {
+                docController.beginLatencyTrace(latency, firstTextItemID: runtime.latencyFirstTextItemID)
+            }
+        }
+        .onDisappear {
+            docController.setVisible(false)
+            docController.endLiveApply()
+            if runtime.docController === docController {
+                if let live = runtime.liveTranscript {
+                    runtime.transcript = live
+                    runtime.liveTranscript = nil
+                }
+                runtime.docController = nil
+            }
+        }
+        .onChange(of: runtime.finalAnswerComplete) { oldValue, newValue in
+            // 礼花表达“任务完成”，而不是“请求刚开始”。只有最终答复（无后续工具调用）
+            // 落定时才触发；本地校验失败、请求刚发出、中间工具轮次和取消都不会误放。
+            if oldValue == false && newValue == true {
+                confettiTrigger += 1
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 轮对话色调：只给用户气泡与助手正文卡片传色相，工具/思考卡保持中性色。
-    private func turnTintHues(for transcript: [NewPiTranscriptItem]) -> [UUID: Int] {
-        var result: [UUID: Int] = [:]
-        var currentAnchor: UUID?
-        for item in transcript {
-            if item.kind == .user {
-                currentAnchor = item.id
-            }
-            guard let anchor = currentAnchor else { continue }
-            if item.kind == .user || item.isAssistantMarkdown {
-                result[item.id] = Color.bubbleTintHueDegrees(for: anchor)
-            }
-        }
-        return result
-    }
+    /// 轮对话色调已上移为 NewPiViewModel.transcriptTintHues（流式直连路径共用）。
 
     private var chatComposer: some View {
         VStack(spacing: 0) {
@@ -151,9 +177,13 @@ struct NewPiSessionPanel: View {
                             groups: viewModel.providerModelGroups,
                             activeProfileID: viewModel.activeProviderID,
                             activeModelID: viewModel.activeProviderModel,
+                            thinkingLevel: viewModel.activeThinkingLevel,
                             isDisabled: runtime.isStreaming,
                             onSelect: { profileID, modelID in
                                 Task { await viewModel.switchModel(profileID: profileID, modelID: modelID) }
+                            },
+                            onThinkingSelect: { level in
+                                Task { await viewModel.setThinkingLevel(level) }
                             }
                         )
                     )
@@ -163,20 +193,17 @@ struct NewPiSessionPanel: View {
                         NewPiDraftAttachmentStrip(drafts: $draftAttachments)
                     }
 
-                    // 多行输入框（NSTextView）：真实多行、自动增高，
+                    // 固定 4 行输入框（NSTextView）：超出后内部滚动，
                     // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
                     NewPiComposerTextView(
                         text: $input,
-                        isDisabled: runtime.isStreaming,
-                        placeholder: "Message NewPi…",
+                        isDisabled: false,
+                        placeholder: runtime.isStreaming ? "Prepare your next message…" : "Message NewPi…",
                         onSubmit: sendComposerInput,
-                        onImagesPicked: appendDrafts,
-                        onHeightChange: { newHeight in
-                            guard abs(composerInputHeight - newHeight) > 0.5 else { return }
-                            composerInputHeight = newHeight
-                        }
+                        onImagesPicked: appendDrafts
                     )
-                    .frame(height: composerInputHeight)
+                    .help(runtime.isStreaming ? "可以先编辑下一条消息；当前任务结束后才能发送。" : "Return 发送，Shift+Return 换行")
+                    .frame(height: NewPiComposerScrollView.fixedHeight)
                     // 高亮：与状态栏一致的淡 accent 填充 + 描边。
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -195,7 +222,6 @@ struct NewPiSessionPanel: View {
                     Image(systemName: "photo.on.rectangle.angled")
                 }
                 .buttonStyle(.borderless)
-                .disabled(runtime.isStreaming)
                 .help("添加图片（也可直接拖拽或 ⌘V 粘贴到输入框）")
                 .frame(minWidth: 32)
 
@@ -228,9 +254,11 @@ struct NewPiSessionPanel: View {
         // 空文本 + 有图片也可发送（识图场景常只发图）；拦截与体积校验在 ViewModel.send。
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty,
               !runtime.isStreaming else { return }
+        // 只有消息通过模型能力、附件体积与落盘等全部校验并真正进入会话后，
+        // 才清空草稿。失败时保留用户文本和图片，便于修正配置后重试。
+        guard viewModel.send(text, draftAttachments: drafts) else { return }
         input = ""
         draftAttachments = []
-        viewModel.send(text, draftAttachments: drafts)
         // 发送 = 明确要看最新内容的意图（聊天应用惯例）：显式钉底，
         // 否则用户停在中部时，流式输出按保锚纪律不跟随（看起来像没反应）。
         docController.scrollToBottom()
@@ -310,7 +338,7 @@ private struct NewPiDraftAttachmentStrip: View {
 
 // MARK: - Multiline composer (NSTextView)
 
-/// 多行输入框：基于 NSTextView，支持真实多行输入、随内容自动增高（达上限后滚动），
+/// 多行输入框：基于 NSTextView，固定显示 4 行，超出后内部滚动；
 /// Return 发送 / Shift+Return 换行。替代原先近似单行的 TextField(axis: .vertical)。
 struct NewPiComposerTextView: NSViewRepresentable {
     @Binding var text: String
@@ -319,10 +347,6 @@ struct NewPiComposerTextView: NSViewRepresentable {
     var onSubmit: () -> Void = {}
     /// 图片采集回调（输入框拖拽 / ⌘V 粘贴）：汇入外层草稿附件条。
     var onImagesPicked: ([DraftImageAttachment]) -> Void = { _ in }
-    /// 内容高度变化回调：外层据此用 .frame(height:) 精确控制高度，
-    /// 不依赖 intrinsicContentSize（NSScrollView hugging 优先级低，会被 VStack 拉伸）。
-    var onHeightChange: (CGFloat) -> Void = { _ in }
-
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -372,22 +396,14 @@ struct NewPiComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
         textView.placeholder = placeholder
-        textView.isEditable = !isDisabled
+        if textView.isEditable != !isDisabled {
+            textView.isEditable = !isDisabled
+        }
         textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
-        // 发送后外部把 text 清空：同步回 textView（guard 防止打字途中回写打断输入）。
-        if textView.string != text {
-            textView.string = text
-            textView.scrollToEndOfDocument(nil)
-        }
-        scrollView.invalidateIntrinsicContentSize()
-        // 首次布局 / 宽度变化后重报高度。异步避免在 view update 周期内改 @State。
-        let report = onHeightChange
-        DispatchQueue.main.async {
-            let height = scrollView.measuredContentHeight
-            if height > 0 { report(height) }
-        }
+        context.coordinator.synchronizeText(text)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NewPiComposerTextView
         weak var textView: NewPiComposerInnerTextView?
@@ -396,46 +412,32 @@ struct NewPiComposerTextView: NSViewRepresentable {
             self.parent = parent
         }
 
+        func synchronizeText(_ text: String) {
+            guard let textView else { return }
+            // IME marked text 属于 AppKit 的未提交编辑，和 Binding 暂时不同是正常状态。
+            // 流式输出会反复调用 updateNSView，不能把旧 Binding 当成清空/替换命令。
+            guard !textView.hasMarkedText() else { return }
+            if textView.string != text {
+                textView.string = text
+                textView.scrollToEndOfDocument(nil)
+            }
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            guard !textView.hasMarkedText() else { return }
             parent.text = textView.string
-            // 内容行数变化 → 重新测量高度，驱动 composer 自动增高。
-            if let scrollView = textView.enclosingScrollView as? NewPiComposerScrollView {
-                scrollView.invalidateIntrinsicContentSize()
-                parent.onHeightChange(scrollView.measuredContentHeight)
-            }
         }
     }
 }
 
-/// 自适应高度的 ScrollView：高度由内容行数决定，夹在 [单行, 4 行] 之间。
+/// 固定 4 行高的 ScrollView；内容超过 4 行后由 NSScrollView 内部滚动。
 final class NewPiComposerScrollView: NSScrollView {
-    /// 最多显示 4 行，超出后内部滚动。
-    var maxVisibleLines: CGFloat = 4
-    /// 布局未就绪时的兜底高度（4 行：13pt 字体约 16pt/行 + 内边距 14pt）。
-    static let fallbackHeight: CGFloat = 78
-
-    /// 当前内容应有的高度（默认 4 行，超出 4 行后内部滚动）。
-    var measuredContentHeight: CGFloat {
-        guard let textView = documentView as? NSTextView,
-              let layoutManager = textView.layoutManager,
-              let container = textView.textContainer,
-              container.size.width > 0 else {
-            return Self.fallbackHeight
-        }
-        layoutManager.ensureLayout(for: container)
-        let usedHeight = layoutManager.usedRect(for: container).height
-        let insets = textView.textContainerInset
-        let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let lineHeight = layoutManager.defaultLineHeight(for: font)
-        let fourLines = lineHeight * maxVisibleLines + insets.height * 2
-        let contentHeight = usedHeight + insets.height * 2
-        // 下限=上限=4 行：空输入也保持 4 行高，内容超出后滚动。
-        return ceil(min(max(contentHeight, fourLines), fourLines))
-    }
+    /// 13pt 系统字体约 16pt/行，加上 NSTextView 上下各 7pt 内边距。
+    static let fixedHeight: CGFloat = 78
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: measuredContentHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.fixedHeight)
     }
 }
 

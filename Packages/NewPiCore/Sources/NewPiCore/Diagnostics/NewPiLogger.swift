@@ -38,9 +38,16 @@ public struct NewPiLogEntry: Sendable, Identifiable, Equatable {
         }
     }
 
-    /// Thread-safe shared formatter so we do not allocate a new `ISO8601DateFormatter`
+    /// Thread-safe shared formatter so we do not allocate a new `DateFormatter`
     /// for every log entry (a notable cost when assembling large log views).
-    private nonisolated(unsafe) static let timestampFormatter = ISO8601DateFormatter()
+    /// 输出本地时区时间（如 `2026-09-06 18:20:19`），与用户所见一致，无需自行换算 UTC。
+    private nonisolated(unsafe) static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        return formatter
+    }()
     private static let timestampFormatterLock = NSLock()
 
     private static func formattedTimestamp(_ date: Date) -> String {

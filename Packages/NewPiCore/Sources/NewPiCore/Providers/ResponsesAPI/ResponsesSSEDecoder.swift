@@ -2,6 +2,7 @@ import Foundation
 
 public enum ResponsesStreamEvent: Sendable, Equatable {
     case textDelta(String)
+    case textDone
     case reasoningDelta(String)
     case functionCallMeta(outputIndex: Int, callID: String?, name: String?)
     case functionCallArgumentsDelta(outputIndex: Int, delta: String)
@@ -32,6 +33,8 @@ public struct ResponsesSSEDecoder: Sendable {
                 if let delta = json["delta"] as? String, !delta.isEmpty {
                     events.append(.textDelta(delta))
                 }
+            case "response.output_text.done":
+                events.append(.textDone)
             case "response.reasoning_text.delta":
                 if let delta = json["delta"] as? String, !delta.isEmpty {
                     events.append(.reasoningDelta(delta))

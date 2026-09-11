@@ -1,9 +1,32 @@
+import AppKit
 import NewPiCore
 import SwiftUI
 
 struct NewPiToolApprovalSheet: View {
     @ObservedObject var viewModel: NewPiViewModel
     let request: ToolApprovalRequest
+
+    var body: some View {
+        NewPiApprovalContent(request: request) { decision in
+            if decision.approved { viewModel.approvePendingTool(scope: decision.scope) }
+            else { viewModel.denyPendingTool() }
+        }
+        .id(request.id)
+    }
+}
+
+/// Session 与聊天室共用展示和风险按钮；授权状态与响应仍由各自控制器持有。
+struct NewPiApprovalContent: View {
+    struct ChatRoomContext {
+        let name: String
+        let role: String
+        let directory: String
+    }
+
+    let request: ToolApprovalRequest
+    var chatroom: ChatRoomContext? = nil
+    let onDecision: (ApprovalDecision) -> Void
+    @State private var responded = false
 
     private var dangerColor: Color {
         switch request.dangerLevel {
@@ -20,12 +43,28 @@ struct NewPiToolApprovalSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            if let chatroom {
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("聊天室", value: chatroom.name)
+                    LabeledContent("申请角色", value: chatroom.role)
+                    Text(chatroom.directory)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                        .help(chatroom.directory)
+                }
+            }
             contentBlock
             if let reason = request.dangerReason, !reason.isEmpty {
                 dangerBanner(reason)
             }
             if isHighRisk {
                 Text("该操作风险极高。即使本次允许，后续每次执行仍会再次确认。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if chatroom != nil {
+                Text("本聊天室授权覆盖所有角色的整类工具，仅本次 App 运行期间有效。允许 bash 不代表其访问范围被限制在工作目录内。高风险操作仍需确认。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -45,7 +84,7 @@ struct NewPiToolApprovalSheet: View {
                 .foregroundStyle(dangerColor)
                 .frame(width: 36, height: 36)
                 .background(dangerColor.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(approvalTitle)
@@ -56,6 +95,15 @@ struct NewPiToolApprovalSheet: View {
                 }
             }
             Spacer()
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(request.summary, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("复制操作详情")
+            .accessibilityLabel("复制操作详情")
         }
     }
 
@@ -81,9 +129,9 @@ struct NewPiToolApprovalSheet: View {
         }
         .frame(maxHeight: 180)
         .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
         )
     }
@@ -110,7 +158,7 @@ struct NewPiToolApprovalSheet: View {
     private var actionRow: some View {
         HStack(spacing: 10) {
             Button("拒绝") {
-                viewModel.denyPendingTool()
+                respond(.deny)
             }
             .keyboardShortcut(.cancelAction)
 
@@ -118,11 +166,13 @@ struct NewPiToolApprovalSheet: View {
 
             if !isHighRisk {
                 Menu {
-                    Button("本对话中不再询问 \(request.toolName)") {
-                        viewModel.approvePendingTool(scope: .session)
+                    Button(chatroom == nil ? "本对话中不再询问 \(request.toolName)" : "本聊天室内允许 \(request.toolName)") {
+                        respond(.allowSession)
                     }
-                    Button("一直允许 \(request.toolName)") {
-                        viewModel.approvePendingTool(scope: .forever)
+                    if chatroom == nil {
+                        Button("一直允许 \(request.toolName)") {
+                            respond(.allowForever)
+                        }
                     }
                 } label: {
                     Text("不再询问…")
@@ -134,11 +184,18 @@ struct NewPiToolApprovalSheet: View {
             }
 
             Button("允许一次") {
-                viewModel.approvePendingTool(scope: .once)
+                respond(.allowOnce)
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
         }
+        .disabled(responded)
+    }
+
+    private func respond(_ decision: ApprovalDecision) {
+        guard !responded else { return }
+        responded = true
+        onDecision(decision)
     }
 
     private var approvalTitle: String {

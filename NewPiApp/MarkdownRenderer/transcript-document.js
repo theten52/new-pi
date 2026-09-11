@@ -67,6 +67,9 @@
     // restoringAnchor 模式下的目标锚点与截止期限（有界校正，防无限跟随）。
     restoreTarget: null,
     restoreDeadline: 0,
+    // 最近一次程序滚动的时刻：scroll 事件据此区分「程序钉底/锚点校正」与
+    // 「滚动条拖拽」（后者不发 wheel，必须靠 scroll 事件识别用户接管）。
+    lastProgrammaticScrollAt: 0,
 
     isNearBottom: function () {
       return (document.documentElement.scrollHeight - window.scrollY - window.innerHeight) < nearBottomThreshold;
@@ -95,6 +98,7 @@
       if (!el) {
         return false;
       }
+      this.lastProgrammaticScrollAt = Date.now();
       const target = el.getBoundingClientRect().top + window.scrollY + anchor.delta;
       if (Math.abs(window.scrollY - target) >= 1) {
         window.scrollTo(0, target);
@@ -103,6 +107,7 @@
     },
 
     pinBottom: function () {
+      this.lastProgrammaticScrollAt = Date.now();
       window.scrollTo(0, document.documentElement.scrollHeight);
     },
 
@@ -121,6 +126,9 @@
       if (this.intent === "restoringAnchor") {
         return { anchor: this.restoreTarget };
       }
+      // 流式钉底的维持不在 beginBatch：onScrollSettled 保证 pinnedBottom 在流式
+      // 期间不降级（大块内容后布局导致的「未近底」不再误释放），本分支保持原
+      // 语义——jumpTo 落点/锚点恢复位置不被迫拽回底部。
       if (this.intent === "userScrolling" || !this.isNearBottom()) {
         return { anchor: this.topAnchor() };
       }
@@ -154,6 +162,22 @@
         // 只有用户滚动输入（onUserScrollInput）能提前接管。
         return;
       }
+      // 流式期间钉底不因「内容长高导致的未近底」而释放（bd92de0 的意图），
+      // 但也不在此补钉：settle→pinBottom 会形成「每次 flush 都多一轮强制布局 +
+      // scroll 事件 → Poller/Warmer 重武装」的持续活跃链，页面在流式期间
+      // 永不间断地跑渲染更新（STALL 回归根因）。下一批内容的 endBatch(pin)
+      // 自会追平新高度（间隔即 flush 节奏，不可感知）。
+      if (forkLocked && this.intent === "pinnedBottom") {
+        return;
+      }
+      // PIN-FIX：钉底宽限期内同样不降级——发送→forkLock 空窗（数百毫秒~数秒）内
+      // 布局噪声（分组收起/估算高校正）可让 settle 瞬间未近底，按旧逻辑会把
+      // pinnedBottom 误贬为 idle，钉底永久丢失（与拖拽误判同一根因的另一条路径）。
+      // 宽限过期后恢复「不近底即降级」，用户拖走仍能正常脱离钉底。
+      if (this.intent === "pinnedBottom"
+          && Date.now() - this.lastProgrammaticScrollAt < 1500) {
+        return;
+      }
       this.intent = this.isNearBottom() ? "pinnedBottom" : "idle";
     },
 
@@ -163,12 +187,16 @@
         return;
       }
       this.intent = "jumpingToTarget";
+      // 平滑滚动持续数百毫秒：期间抑制用户接管误判（时间戳写到未来）
+      this.lastProgrammaticScrollAt = Date.now() + 700;
       state.el.scrollIntoView({ block: "start", behavior: "smooth" });
+      Poller.arm();
     },
 
     scrollToBottom: function (smooth) {
       this.intent = "pinnedBottom";
       if (smooth) {
+        this.lastProgrammaticScrollAt = Date.now() + 600;
         window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
       } else {
         this.pinBottom();
@@ -253,6 +281,11 @@
       this.raf = null;
       if (performance.now() > this.activeUntil) {
         this.heights.clear();
+        // 到达边界的滚轮/同位置跳转可能不产生 scrollend，仍需恢复空闲预热。
+        if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
+          Scroll.onScrollSettled();
+          Warmer.schedule();
+        }
         return;
       }
       // pinnedBottom / jumpingToTarget / restoringAnchor 由各自意图逻辑持滚动权，不补偿。
@@ -316,7 +349,8 @@
     pending: false,
 
     schedule: function () {
-      if (this.pending) {
+      if (this.pending || forkLocked ||
+          Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
         return;
       }
       this.pending = true;
@@ -330,11 +364,17 @@
     },
 
     runChunk: function () {
-      // 用户主动滚动/跳转中让路（避免滚动中塞布局工作），稍后再试。
+      // 用户主动滚动/跳转中让路，由滚动结束重新唤醒，不持续排空转计时器。
       // restoringAnchor 不让路：恢复 RAF 每帧都在校正锚点，预热的高度变化
       // 会被同一纪律覆盖——否则会白等 3s 恢复窗口，用户恰在这几秒内开始滚动。
       if (Scroll.intent === "userScrolling" || Scroll.intent === "jumpingToTarget") {
-        this.schedule();
+        return;
+      }
+      // 流式期间暂停预热（实验：BACKLOG-STALL 根因验证）。
+      // Warmer 的 setTimeout(0) 链连续强制布局会占据 WebContent 的 JS 线程，
+      // 让 applyOps 排队等待，表现就是「输出暂停、滚动一泵就续上」。
+      // 流式结束后（forkLocked=false）恢复预热；代价是流式期间滚动条高度略虚。
+      if (forkLocked) {
         return;
       }
       const kids = main.children;
@@ -425,11 +465,14 @@
     const payload = {
       nearBottom: Scroll.isNearBottom(),
       scrollTop: Math.round(window.scrollY),
+      // PIN-PROBE2：文档总高随流式的变化——区分「文档没长高」（布局/容器问题）
+      // 与「长高了但 scrollY 没跟」（pinBottom/scrollTo 失效）。
+      docHeight: Math.round(document.documentElement.scrollHeight),
       anchorID: anchor ? anchor.id : null,
       anchorDelta: anchor ? Math.round(anchor.delta) : 0,
       intent: Scroll.intent
     };
-    const key = payload.nearBottom + "|" + payload.scrollTop + "|" + (payload.anchorID || "") + "|" + payload.anchorDelta + "|" + payload.intent;
+    const key = payload.nearBottom + "|" + payload.scrollTop + "|" + (payload.anchorID || "") + "|" + payload.anchorDelta + "|" + payload.intent + "|" + payload.docHeight;
     if (key === lastScrollReport) {
       return;
     }
@@ -440,7 +483,33 @@
   }
 
   window.addEventListener("scroll", function () {
-    Poller.arm();
+    // 程序钉底的 scroll 不武装 Poller（STALL 回归根因另一半）：流式期间
+    // 每次 flush 的 pin 都走这里，持续 arm 会让 rAF 轮询链整场 60fps 空转，
+    // 页面失去 flush 间的安静。用户真滚动（intent 已是 userScrolling）照常武装。
+    const streamingPinned = forkLocked && Scroll.intent === "pinnedBottom";
+    if (!streamingPinned) {
+      Poller.arm();
+    }
+    // 滚动条拖拽识别（不发 wheel/touch 事件）：距上次程序滚动超过窗口期的
+    // 视口位移视为用户接管。
+    // 流式钉底期间必须跳过该判定：scroll anchoring（视口上方内容定稿/预热时
+    // 浏览器的 scrollY 微调）也走 scroll 事件，会被误判为拖拽而释放钉底——
+    // 输出越快高度抖动越大，误判越频繁（钉不住的根因）。滚轮/触控/键盘的
+    // onUserScrollInput 不受影响，仍是即时接管通道。
+    // PIN-FIX：保护范围增加「钉底宽限期」——发送时的 scrollToBottom 到流式首批
+    // forkLock 到达之间有数百毫秒空窗（Release/忙主线下更长），空窗内任何
+    // scroll 事件（布局微调/锚定噪声）都会经此路径把 pinnedBottom 误贬为
+    // userScrolling，钉底永久丢失且无任何机制重新武装（「发送后不跟随」根因）。
+    // 宽限期取 1.5s（覆盖发送→流式起点），过后恢复拖拽识别；流式中仍由
+    // streamingPinned 接管保护（与 bd92de0 一致）。
+    const pinGrace = Scroll.intent === "pinnedBottom"
+        && Date.now() - Scroll.lastProgrammaticScrollAt < 1500;
+    if (!streamingPinned
+        && !pinGrace
+        && Date.now() - Scroll.lastProgrammaticScrollAt > 150
+        && Scroll.intent !== "userScrolling") {
+      Scroll.onUserScrollInput();
+    }
     // scroll 事件在当帧布局后、绘制前分发：这里直接轮询一次，高度平移可同帧抵消，
     // 避免 rAF（下一帧布局前才跑）晚一拍留下单帧闪动。
     if (Scroll.intent === "userScrolling" || Scroll.intent === "idle") {
@@ -538,13 +607,19 @@
       const card = header.closest(".card");
       if (card) {
         card.classList.toggle("expanded");
+        // 卡片会在 thinking delta / 工具结果到达时整体重建。把用户的展开选择
+        // 存进条目的长命 state，而不是只留在即将被替换的 DOM class 上。
+        const ti = card.closest(".ti");
+        const id = ti ? ti.getAttribute("data-iid") : null;
+        const state = id ? items.get(id) : null;
+        if (state) {
+          state.cardExpanded = card.classList.contains("expanded");
+        }
         // 折叠/展开改变布局：走统一的批次纪律（非底部保持视口锚定）。
         const plan = Scroll.beginBatch();
         Scroll.endBatch(plan);
         scheduleTurnOffsetsReport();
         // 展开态高度变了，已固化的占位高过时——重新预热该条目。
-        const ti = card.closest(".ti");
-        const id = ti ? ti.getAttribute("data-iid") : null;
         if (id) {
           Warmer.warmed.delete(id);
           Warmer.schedule();
@@ -769,7 +844,8 @@
     el.textContent = "";
 
     const card = document.createElement("div");
-    card.className = "card" + (op.toolError ? " is-error" : "");
+    card.className = "card" + (op.toolError ? " is-error" : "") +
+      (state.cardExpanded ? " expanded" : "");
 
     const header = document.createElement("button");
     header.type = "button";
@@ -840,13 +916,21 @@
   function renderAssistant(el, op, state) {
     el.className = "ti ti-answer";
     applyTint(el, op.tint);
+    // PIN-FREEZE 修复：流式期间强制渲染该条目（绕过 content-visibility 调度）。
+    // 实测现象：气泡高度超过一个视口后，docHeight/scrollY 一起冻结在「恰好一屏」
+    // 处，内容仍在流入但布局不再长高（CV 估算高被 lockIntrinsicHeight 逐批锁定后
+    // 与真实内容脱钩）；流结束 renderFinal 后才恢复。流式条日本来就该在屏上，
+    // 让 CV 调度它没有收益只有风险；定型后归还调度。
+    el.style.contentVisibility = op.streaming ? "visible" : "";
     if (!state.renderer) {
       el.textContent = "";
       const card = document.createElement("div");
       card.className = "card answer";
       const hd = document.createElement("div");
       hd.className = "answer-hd";
-      hd.textContent = op.kind === "summary" ? "Summary" : "NewPi";
+      // speaker（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言显示角色名，session 路径仍为 NewPi。
+      // 注意 header 只在首次渲染创建——speaker 按条目 id 固定（消息→角色不变），无更新问题。
+      hd.textContent = op.kind === "summary" ? "Summary" : (op.speaker || "NewPi");
       const article = document.createElement("article");
       article.className = "markdown-body article";
       card.appendChild(hd);
@@ -969,6 +1053,8 @@
   }
 
   function applyOps(ops) {
+    // UI 侧指标：本批 DOM 应用耗时（原生侧测不到，回传 uiTiming 供「API 监控」定位 JS/DOM 渲染）。
+    const renderStart = performance.now();
     // 滚动纪律：批次开始时按意图决定本批的视口策略，结束后同步执行——
     // 保存锚点 → 变更 → 恢复在同一执行块内，不存在高度未回的中间态。
     // 显式滚动 op（jumpTo/scrollToBottom/restoreAnchor）优先于批次策略。
@@ -987,7 +1073,11 @@
       } else if (op.op === "forkLock") {
         // 全局 fork 锁切换（FORK-LOCK-GLOBAL）：更新所有已有 fork 按钮的禁用态。
         // 锁住（进入流式）或解锁（流式结束）都只影响 fork 按钮，历史条目自身 streaming 位不变。
+        const wasLocked = forkLocked;
         forkLocked = !!op.locked;
+        if (wasLocked && !forkLocked) {
+          Warmer.schedule();
+        }
         const forkButtons = main.querySelectorAll(".ti-action-fork");
         for (let i = 0; i < forkButtons.length; i += 1) {
           const btn = forkButtons[i];
@@ -995,6 +1085,24 @@
           const state = ti ? items.get(ti.getAttribute("data-iid")) : null;
           const selfStreaming = state ? !!state.streaming : false;
           btn.disabled = selfStreaming || forkLocked;
+        }
+        // 收尾对齐（CHATROOM-STREAM-PIN）：流式结束的同一批里发生 renderFinal
+        // 重排、候选块追加、详情组收起；流式光标还会停留 ~1.4s 后移除（再次
+        // 引起高度变化），hljs 高亮也有异步布局——全部落在最后一次钉底之后。
+        // 若此前处于钉底跟随，在窗口期内逐帧无条件钉底（到点即停）；
+        // 用户上滚（intent 变 userScrolling）立即退出，不打扰阅读。
+        if (wasLocked && !forkLocked && Scroll.intent === "pinnedBottom") {
+          const catchUpDeadline = Date.now() + 1600;
+          const catchUp = function () {
+            if (Scroll.intent !== "pinnedBottom") {
+              return;
+            }
+            Scroll.pinBottom();
+            if (Date.now() < catchUpDeadline) {
+              window.requestAnimationFrame(catchUp);
+            }
+          };
+          window.requestAnimationFrame(catchUp);
         }
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));
@@ -1030,6 +1138,9 @@
     if (!explicitScroll) {
       Scroll.endBatch(plan);
     }
+    // PIN-PROBE2：批次结束后主动上报一次（内部有去重）——scrollY 不动时
+    // scroll 事件不触发，docHeight 的变化也能反映出来。
+    reportScrollState();
     // 批次结束后固化触达条目的真实高度（可见条目是真实高；离屏条目读到占位高，同值无害）。
     for (const el of touchedEls) {
       lockIntrinsicHeight(el);
@@ -1037,6 +1148,10 @@
     // 新内容入场后安排空闲预热。
     if (touchedEls.length > 0) {
       Warmer.schedule();
+    }
+    const renderMs = performance.now() - renderStart;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.uiTiming) {
+      window.webkit.messageHandlers.uiTiming.postMessage({ durationMs: renderMs, opsCount: ops.length });
     }
     reportScrollState();
     scheduleTurnOffsetsReport();

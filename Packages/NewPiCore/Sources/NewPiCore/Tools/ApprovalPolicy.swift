@@ -24,29 +24,36 @@ public struct ApprovalPolicy: Sendable, Equatable, Codable {
     public var toolBaseline: [String: ToolDangerLevel]
     /// 是否启用 LLM 补充评估（本地规则命中时仍优先、永不降级）。
     public var llmSupplementEnabled: Bool
+    /// 项目根内文件操作（含删除）免审批（PROJECT-SCOPE-AUTO-APPROVE）。
+    /// 根过宽（home/系统目录）时策略内部自动失效，此处只控制总开关。
+    public var projectScopeAutoApprove: Bool
 
     public init(
         riskRules: [ApprovalRiskRule] = ApprovalPolicy.defaultRiskRules,
         toolBaseline: [String: ToolDangerLevel] = ApprovalPolicy.defaultToolBaseline,
-        llmSupplementEnabled: Bool = false
+        llmSupplementEnabled: Bool = false,
+        projectScopeAutoApprove: Bool = true
     ) {
         self.riskRules = riskRules
         self.toolBaseline = toolBaseline
         self.llmSupplementEnabled = llmSupplementEnabled
+        self.projectScopeAutoApprove = projectScopeAutoApprove
     }
 
-    /// 兼容旧 JSON：缺失字段时回退默认值（尤其是新增的 llmSupplementEnabled）。
+    /// 兼容旧 JSON：缺失字段时回退默认值（尤其是新增的 llmSupplementEnabled / projectScopeAutoApprove）。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         riskRules = try container.decodeIfPresent([ApprovalRiskRule].self, forKey: .riskRules) ?? ApprovalPolicy.defaultRiskRules
         toolBaseline = try container.decodeIfPresent([String: ToolDangerLevel].self, forKey: .toolBaseline) ?? ApprovalPolicy.defaultToolBaseline
         llmSupplementEnabled = try container.decodeIfPresent(Bool.self, forKey: .llmSupplementEnabled) ?? false
+        projectScopeAutoApprove = try container.decodeIfPresent(Bool.self, forKey: .projectScopeAutoApprove) ?? true
     }
 
     private enum CodingKeys: String, CodingKey {
         case riskRules
         case toolBaseline
         case llmSupplementEnabled
+        case projectScopeAutoApprove
     }
 
     /// 覆盖常见 `rm` 变体：合并参数、分离参数、`--recursive/--force` 组合。

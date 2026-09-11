@@ -24,18 +24,19 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
     ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                // do / catch 共享的指标计时器与状态码（catch 分支也要上报）。
+                var perf = LLMRequestTiming()
+                var httpStatus: Int?
                 do {
                     let endpoint = try ResponsesEndpoint.resolveURL(for: profile)
                     let apiKey = try await apiKeyProvider()
-                    let definition = ProviderPresetCatalog.definition(for: profile.preset)
 
                     var request = URLRequest(url: endpoint)
                     request.httpMethod = "POST"
                     ResponsesRequestPolicy.applyCommonHeaders(
                         request: &request,
                         profile: profile,
-                        apiKey: apiKey,
-                        definition: definition
+                        apiKey: apiKey
                     )
 
                     var body: [String: Any] = [
@@ -48,11 +49,7 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                             profile: profile
                         ),
                         "reasoning": [
-                            "effort": ResponsesRequestPolicy.reasoningEffort(
-                                model: model,
-                                profile: profile,
-                                hasTools: !tools.isEmpty
-                            ),
+                            "effort": ResponsesRequestPolicy.reasoningEffort(model: model),
                         ],
                     ]
 
@@ -73,13 +70,26 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                         secrets: redactionSecrets
                     )
 
+                    perf.markRequestSent()
                     let (bytes, response) = try await session.bytes(for: request)
+                    perf.markResponse()
+                    httpStatus = (response as? HTTPURLResponse)?.statusCode
                     if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
                         var errorData = Data()
                         for try await byte in bytes {
                             errorData.append(byte)
                         }
                         let message = String(data: errorData, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                        perf.markEnd()
+                        await LLMMetricsRecorder.shared.record(metric(
+                            timing: perf,
+                            statusCode: http.statusCode,
+                            usage: UsageStats(),
+                            errorType: "http_error",
+                            errorMessage: String(message.prefix(500)),
+                            model: model,
+                            hasTools: !tools.isEmpty
+                        ))
                         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
                         NewPiLogger.logLLMResponse(
                             category: "responses-api",
@@ -113,13 +123,26 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                         for block in sseParser.feed(byte) {
                             let rawEvents = decoder.decodeLines(block)
                             for raw in rawEvents {
-                                if case let .failed(message) = raw {
+                                switch raw {
+                                case .textDone:
+                                    perf.markTextDone()
+                                case .completed:
+                                    perf.markTerminal()
+                                case let .failed(message):
+                                    perf.markTerminal()
                                     failedMessage = message
                                     didReachTerminal = true
+                                default:
+                                    break
                                 }
                             }
                             let parsed = parser.parse(events: rawEvents)
                             for event in parsed {
+                                switch event {
+                                case .textDelta: perf.markText()
+                                case .thinkingDelta: perf.markThinking()
+                                default: break
+                                }
                                 if case let .completed(_, usage) = event {
                                     lastUsage = usage
                                     didReachTerminal = true
@@ -133,12 +156,25 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     for block in sseParser.finish() {
                         let rawEvents = decoder.decodeLines(block)
                         for raw in rawEvents {
-                            if case let .failed(message) = raw {
+                            switch raw {
+                            case .textDone:
+                                perf.markTextDone()
+                            case .completed:
+                                perf.markTerminal()
+                            case let .failed(message):
+                                perf.markTerminal()
                                 failedMessage = message
+                            default:
+                                break
                             }
                         }
                         let parsed = parser.parse(events: rawEvents)
                         for event in parsed {
+                            switch event {
+                            case .textDelta: perf.markText()
+                            case .thinkingDelta: perf.markThinking()
+                            default: break
+                            }
                             if case let .completed(_, usage) = event {
                                 lastUsage = usage
                             }
@@ -147,13 +183,38 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     }
 
                     for event in parser.finish() {
+                        switch event {
+                        case .textDelta: perf.markText()
+                        case .thinkingDelta: perf.markThinking()
+                        default: break
+                        }
                         continuation.yield(event)
                     }
 
                     if let failedMessage {
+                        perf.markEnd()
+                        await LLMMetricsRecorder.shared.record(metric(
+                            timing: perf,
+                            statusCode: httpStatus,
+                            usage: lastUsage,
+                            errorType: "llm_error",
+                            errorMessage: String(failedMessage.prefix(500)),
+                            model: model,
+                            hasTools: !tools.isEmpty
+                        ))
                         throw AgentError.llmFailed(failedMessage)
                     }
 
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: lastUsage,
+                        errorType: nil,
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.logLLMStreamFinished(
                         category: "responses-api",
                         model: model.modelID,
@@ -161,8 +222,28 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     )
                     continuation.finish()
                 } catch is CancellationError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "cancelled",
+                        errorMessage: nil,
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     continuation.finish(throwing: AgentError.aborted)
                 } catch let error as AgentError {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "llm_error",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "responses-api",
                         message: "LLM request failed",
@@ -170,6 +251,16 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
                     )
                     continuation.finish(throwing: error)
                 } catch {
+                    perf.markEnd()
+                    await LLMMetricsRecorder.shared.record(metric(
+                        timing: perf,
+                        statusCode: httpStatus,
+                        usage: UsageStats(),
+                        errorType: "network",
+                        errorMessage: String(error.localizedDescription.prefix(500)),
+                        model: model,
+                        hasTools: !tools.isEmpty
+                    ))
                     NewPiLogger.error(
                         category: "responses-api",
                         message: "LLM request failed",
@@ -181,5 +272,55 @@ public struct ResponsesAPIProvider: LLMProvider, Sendable {
 
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// 构造一次请求的指标（供流式循环各出口上报）。mode 固定 responses。
+    private func metric(
+        timing: LLMRequestTiming,
+        statusCode: Int?,
+        usage: UsageStats,
+        errorType: String?,
+        errorMessage: String?,
+        model: ModelConfig,
+        hasTools: Bool
+    ) -> LLMRequestMetric {
+        let cost = LLMRequestMetric.estimatedCost(
+            inputTokens: usage.inputTokens,
+            cachedTokens: usage.cacheReadTokens,
+            cacheCreation: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            pricing: profile.modelDefinition(for: model.modelID)?.pricing
+        )
+        return LLMRequestMetric(
+            runID: timing.runID,
+            startedAt: timing.startedAt,
+            providerName: profile.name,
+            preset: profile.preset.rawValue,
+            vendor: LLMMetricVendor.name(for: profile.preset.rawValue, baseURL: profile.option(.baseURL), model: model.modelID),
+            model: model.modelID,
+            mode: "responses",
+            thinkingLevel: model.thinkingLevel == .off ? nil : model.thinkingLevel.rawValue,
+            hasTools: hasTools,
+            responseAt: timing.responseAt,
+            firstThinkingAt: timing.firstThinkingAt,
+            lastThinkingAt: timing.lastThinkingAt,
+            firstTextAt: timing.firstTextAt,
+            lastTextAt: timing.lastTextAt,
+            textDoneAt: timing.textDoneAt,
+            terminalAt: timing.terminalAt,
+            endedAt: timing.endedAt,
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cacheReadTokens,
+            cacheCreationTokens: usage.cacheCreationTokens,
+            outputTokens: usage.outputTokens,
+            contextWindow: profile.contextWindow(for: model.modelID),
+            textDeltaCount: timing.textDeltaCount,
+            thinkingDeltaCount: timing.thinkingDeltaCount,
+            statusCode: statusCode,
+            errorType: errorType,
+            errorMessage: errorMessage,
+            costAmount: cost?.amount,
+            costCurrency: cost?.currency
+        )
     }
 }

@@ -8,7 +8,7 @@ macOS 编码 agent 应用（SwiftUI + AppKit + WKWebView），支持 Anthropic /
 
 ```bash
 cd Packages/NewPiCore
-swift test                    # 21 个测试文件
+swift test                    # 核心包测试（不含 App / WebKit 校验脚本）
 swift build
 swift run new-pi              # CLI 入口
 ```
@@ -69,17 +69,20 @@ scrollToBottom / restoreAnchor），**不消费任何内容高度**。遗留的 
 
 ## 文档
 
-`docs/` 下三份 UI 文档互相引用，改动结论时需同步：
+入口见 [`docs/README.md`](docs/README.md)。当前架构以 `architecture.md` 和
+`ui-architecture-decision.md` 为导航，未完成事项见 `TODO.md`；下列三份 UI 文档
+保留历史调研与迁移过程，改动跨文档结论时需同步，不能把旧台账当当前待办：
 
 | 文档 | 内容 |
 |---|---|
-| `ui-architecture-research.md` | 13 仓库调研（含 §4.0 现状台账：已完成 vs 待办） |
+| `ui-architecture-research.md` | 13 仓库调研（§4.0 为迁移前遗留路径台账） |
 | `ui-architecture-research-verification.md` | 上文的源码级核验记录与修正依据 |
-| `ui-target-architecture.md` | 单文档 transcript 目标架构提案（架构前提与前两份不同） |
+| `ui-target-architecture.md` | 已实施的单文档迁移记录，含历史方案与后续方向 |
 
 其他：`architecture.md`、`TODO.md`、`approval-permissions-design.md`、
 `multi-model-collaboration-plan.md`、`session-switch-instant-resume-plan.md`、
-`rendered-result-replay-plan.md`、`multi-modal-vision-plan.md`（图片支持，规划未执行）
+`rendered-result-replay-plan.md`（单文档持久化 replay 尚未接入）、
+`multi-modal-vision-plan.md`（图片输入 MVP 已实现，含后续能力与验证限制）
 
 ## 工作约定
 

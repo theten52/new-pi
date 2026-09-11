@@ -1,12 +1,22 @@
 # 渲染产物重放方案（Render-Once, Replay-Forever）
 
-> 本文档记录「会话切换/冷加载不再重新渲染」的最终方案：动静分离 + 渲染产物持久化。
+> 本文档记录「会话切换/冷加载不再重新渲染」的历史方案：动静分离 + 渲染产物持久化。
 > 上游设计史：[`session-switch-instant-resume-plan.md`](./session-switch-instant-resume-plan.md)（高度缓存/保活/快照三级方案）、
 > [`dev-notes/2026-08-28-streaming-markdown-rendering-context.md`](./dev-notes/2026-08-28-streaming-markdown-rendering-context.md)（单引擎流式渲染）。
 
+> **当前状态（2026-09-12 源码核对）：未接入当前生产单文档路径，非已集成能力。**
+> `transcript-document.js` 创建正文 renderer 时显式设置 `postSnapshot: false`；
+> `NewPiTranscriptDocumentView.swift` 未注册 `renderedSnapshot` 通道，冷加载走
+> `transcriptDocumentHTML` + transcript diff → ops → JS 渲染，而不是预填持久化 HTML。
+> `markdown-renderer.js` 仍有 `replayRendered` / 产物回传的遗留接口，**接口存在不等于生产接通**。
+> 下述 `MarkdownRenderingCache`、`replayDocumentHTML`、每消息高度表与 Preheater
+> 属于旧 per-message 架构资产/设计，当前原生路径已移除，不应按“扩展现有实现”继续执行。
+> 当前已实现热 runtime / 面板保活和冷锚点恢复；后者不是 HTML 产物重放，也不是位图快照兜底。
+> 下文需求、技术推理、文件路径及旧落地记录均保留作历史；本次未运行构建或测试。
+
 ---
 
-## 一、需求定稿（与用户对齐，2026-08-29）
+## 一、需求定稿（历史，与用户对齐，2026-08-29）
 
 | # | 需求 | 强度 |
 |---|---|---|
@@ -22,7 +32,10 @@
 用户明确接受**动静分离**：历史消息可以直接展示渲染产物而不必重新渲染，
 渲染结果（HTML + 高度）作为数据单独持久化，供之后切换展示。
 
-## 二、为什么不是全原生（方向 B 对比结论）
+## 二、为什么不是全原生（旧 per-message 前提下的对比结论）
+
+> 历史边界：下述「跨消息选择仅全原生可提供」建立在每消息一个 WebView 的前提上；
+> 当前单文档已消除该选择域分隔，不再据此推导必须换全原生；Cmd+F 产品接线需另行核对。
 
 效果维度上，R3「逐像素一致」只有重放能结构性满足（同引擎、同 CSS、同一份 HTML 输出）；
 全原生（TextKit 2 / SwiftStreamingMarkdown）只能无限逼近 markdown-it + hljs 的观感，
@@ -32,7 +45,7 @@
 当前判为可接受取舍。方向 B 保留为长期选项，触发条件：① 会话规模涨到几百条以上；
 ② 跨消息选择升级为强需求。
 
-## 三、方案
+## 三、方案（历史，未接入当前单文档路径）
 
 **动静分界线**：流式中/刚完成 = 动（现有单引擎块级增量渲染，不动）；
 flush 完成 = 产物落盘，此后**永远重放、不再解析**。
@@ -49,7 +62,7 @@ flush 完成 = 产物落盘，此后**永远重放、不再解析**。
   → rail 跳转/原位恢复从"追赶变化高度"变成纯算术（R2）
 ```
 
-### 缓存设计（扩展现有 `MarkdownRenderingCache`）
+### 缓存设计（当时拟扩展的 `MarkdownRenderingCache`，当前已移除）
 
 - key：`SHA256(markdown)` + 宽度桶（沿用现有分桶），**全局跨会话共享**
   （fork/分支/同内容消息天然命中，用户已确认）。
@@ -77,7 +90,7 @@ flush 完成 = 产物落盘，此后**永远重放、不再解析**。
 历史消息首次切回时缓存里只有高度没有 HTML → 走正常渲染一次并捕获产物，
 之后永远重放。无需迁移脚本，体验逐会话自愈。
 
-### 对现有机制的处置
+### 对当时既有机制的处置（历史，不代表当前保留）
 
 - **高度缓存**：保留并升级（并入产物缓存），首帧高度语义不变。
 - **保活 LRU5**：保留（热路径零成本）。
@@ -85,16 +98,17 @@ flush 完成 = 产物落盘，此后**永远重放、不再解析**。
   （首见内容）场景；命中产物缓存的会话首帧即正确，门控瞬时通过。
   后续实测若确认 miss 场景稀少，可考虑移除预热器（待议）。
 
-## 四、落地步骤
+## 四、落地步骤（旧架构实施记录与计划，非当前待办）
 
 1. ✅ 工作区清理：门控/预热器作为独立 commit 落盘（`7554710`），后续改动可对照。
 2. 缓存层：`Entry` 增加 `html/engine`，`snapshot(for:)` / `setSnapshot(...)`，引擎指纹计算。
 3. JS：最终渲染后回传产物（`renderedSnapshot` 通道，剥光标）；新增 `replayRendered()` + 复制按钮/链接重绑。
 4. Swift：`replayDocumentHTML`；`loadInitial` 命中产物时走重放文档；Coordinator 接收产物写缓存。
 5. 每步 `xcodebuild` 验证；全部完成后人工实测：切会话秒开、滚动条稳定、rail 精确跳转、复制按钮可用。
-6.（后续，R2 收尾）被淘汰会话的"锚点消息 ID + 行内偏移"原位恢复——高度已准确，轻量可做。
+6.（当时后续，R2 收尾）被淘汰会话的"锚点消息 ID + 行内偏移"原位恢复——高度已准确，轻量可做。
+  **当前已在单文档路径实现锚点恢复，不依赖上述产物缓存或原生高度表。**
 
-## 五、风险与边界
+## 五、风险与边界（历史方案评估）
 
 > **实现与调试全记录**：见 [`dev-notes/2026-08-29-render-replay-windowing-scroll-restore.md`](./dev-notes/2026-08-29-render-replay-windowing-scroll-restore.md)（含窗口化、锚点恢复与设计原则 P1–P5）。
 

@@ -2,7 +2,7 @@ import Foundation
 
 public struct SubAgentTool: AgentTool {
     public static let toolName = "subagent"
-    public static let defaultMaxTurns = 8
+    public static let defaultMaxTurns = 64
 
     public let name = SubAgentTool.toolName
     public let definition: ToolDefinition
@@ -88,6 +88,7 @@ public struct SubAgentTool: AgentTool {
             toolApprovalTracker: context.toolApprovalTracker,
             dangerEvaluator: context.dangerEvaluator,
             dangerCache: context.dangerCache,
+            projectScope: context.projectScope,
             auditLogger: context.auditLogger
         )
 
