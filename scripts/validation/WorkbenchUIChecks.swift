@@ -327,6 +327,11 @@ struct WorkbenchUIChecks {
     private static func run() async throws {
         let model = WorkbenchModel()
         let fullWindow = ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_FULL_WINDOW"] == "1"
+        let interaction = ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_INTERACTION"] == "1"
+        // 仅影响鼠标交互模式的初始场景，默认截图矩阵仍按原有循环执行。
+        let initialWidth: CGFloat = interaction && !fullWindow
+            && ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_INTERACTION_NARROW"] == "1" ? 620 : 900
+        let initialDark = interaction && ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_INTERACTION_DARK"] == "1"
         let host = NSHostingController(rootView: WorkbenchProbeRoot(model: model, fullWindow: fullWindow))
         host.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 900, height: 820),
@@ -334,9 +339,9 @@ struct WorkbenchUIChecks {
         window.isReleasedWhenClosed = false
         window.contentViewController = host
         // 赋值 contentViewController 会采用其初始 fitting size；之后再设置探针的实际视口。
-        window.setContentSize(NSSize(width: 900, height: 820))
+        window.setContentSize(NSSize(width: initialWidth, height: 820))
         window.title = "NewPi · 文档工作台原生验证"
-        window.appearance = NSAppearance(named: .aqua)
+        window.appearance = NSAppearance(named: initialDark ? .darkAqua : .aqua)
         window.level = .floating
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
@@ -358,7 +363,14 @@ struct WorkbenchUIChecks {
             "nonPersistent WebKit；storeKey=nil，无会话/滚动数据落盘")
         await check("Markdown 与详情交互") { try await checkDocument(web, model: model) }
 
-        if ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_INTERACTION"] == "1" {
+        if interaction {
+            try await eventually("鼠标场景：\(Int(initialWidth))pt / \(initialDark ? "dark" : "light") 外观尺寸同步") {
+                try await web.evaluateJavaScript("matchMedia('(prefers-color-scheme: dark)').matches") as? Bool == initialDark
+                    && abs(host.view.bounds.width - initialWidth) < 1
+            }
+            if !fullWindow {
+                try await checkLayout(model, host: host.view, window: window, web: web, width: initialWidth)
+            }
             try await checkMouseInteractions(model, host: host.view, window: window, web: web, editor: editor)
             return
         }
@@ -806,8 +818,18 @@ struct WorkbenchUIChecks {
         try await settle(web)
         guard let anchor = model.coordinateView else { throw Failure("缺少窗口坐标转换视图") }
         window.makeKeyAndOrderFront(nil)
-        NSRunningApplication.current.activate(options: [])
-        try await eventually("鼠标探针窗口获得焦点") { window.isKeyWindow }
+        let activationAccepted = NSRunningApplication.current.activate(options: [])
+        func focusState() -> String {
+            let application = NSRunningApplication.current
+            return "activationAccepted=\(activationAccepted) appActive=\(NSApp.isActive) runningActive=\(application.isActive) finishedLaunching=\(application.isFinishedLaunching) policy=\(NSApp.activationPolicy().rawValue) key=\(window.isKeyWindow) main=\(window.isMainWindow) canBecomeKey=\(window.canBecomeKey) visible=\(window.isVisible) frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil")"
+        }
+        print("FOCUS BEFORE: \(focusState())")
+        do {
+            try await eventually("鼠标探针窗口获得焦点") { window.isKeyWindow }
+        } catch {
+            print("FOCUS TIMEOUT: \(focusState())")
+            throw error
+        }
         func type(_ text: String) async throws {
             window.makeFirstResponder(editor)
             editor.setSelectedRange(NSRange(location: 0, length: (editor.string as NSString).length))

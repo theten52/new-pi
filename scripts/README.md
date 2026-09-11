@@ -206,6 +206,13 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 完整窗口的侧栏 toolbar 按钮在独立宿主中仍无法定位，明确 SKIP；加 `NEWPI_WORKBENCH_UI_STRICT=1` 时因此失败。
 鼠标检查通过不等于旧 AX 按压检查或 VoiceOver 已通过，也不包括真实会话网络调用、聊天室阶段业务及全部外观组合。
 
+组件鼠标模式可附加 `NEWPI_WORKBENCH_INTERACTION_NARROW=1`（620pt，默认 900pt）与
+`NEWPI_WORKBENCH_INTERACTION_DARK=1`（深色，默认浅色）；NARROW 在 FULL_WINDOW 模式不生效。
+2026-09-12 后续实跑四种组合均在 strict 下通过：原生/WebKit 外观尺寸一致、阅读列无横向溢出、
+长模型名与 32×32 主按钮无碰撞，鼠标送停、草稿保持及用量有值/无值开关通过。
+焦点检查前及超时时打印 `FOCUS` 状态（应用激活结果、启动完成、key/main、可见性和前台 bundle ID）；
+保留 5s 焦点断言。此前两次焦点超时本轮未复现，不宣称已修复间歇性激活问题。
+
 ### 正式 App 系统侧栏开关验证
 
 `scripts/validation/NativeSidebarChecks.swift` 检查真正 WindowGroup 中系统提供的侧栏按钮。
