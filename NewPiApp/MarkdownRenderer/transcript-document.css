@@ -4,8 +4,9 @@
 html, body {
   margin: 0;
   padding: 0;
-  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  color: #1d1d1f;
+  font: 14px/1.75 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: var(--newpi-text);
+  background: var(--newpi-canvas);
   /* 关键覆盖：共享的 markdown-renderer.css 把 html/body 设为 overflow:hidden
      （遗留路径每条消息一个 WebView、高度由原生驱动，禁止内部滚动）。
      单文档路径窗口滚动由文档自持，必须改回 visible（本表加载顺序在后，同优先级后定义生效）。 */
@@ -13,7 +14,11 @@ html, body {
 }
 
 #transcript {
-  padding: 16px 16px 32px;
+  /* 与原生输入外层共用阅读列规格：800px 包含两侧 padding。 */
+  width: 100%;
+  max-width: 800px;
+  margin: auto;
+  padding: 24px 24px 32px;
   box-sizing: border-box;
 }
 
@@ -37,20 +42,22 @@ html, body {
 .ti-thinking, .ti-tool { contain-intrinsic-size: auto 48px; }
 .ti-system, .ti-error { contain-intrinsic-size: auto 40px; }
 
-/* ===== 用户气泡（右对齐，轮对话色调由 --tint（色相度数）驱动） ===== */
+/* ===== 用户输入：左对齐、占满阅读列，不随轮次 tint 改变底色 ===== */
 
 /* 带图附件的气泡更高：估算高相应提升，冷恢复锚点重定位更准（auto 仍会记住真实高）。 */
 .ti-user:has(.bubble-attachments) { contain-intrinsic-size: auto 168px; }
 
 .ti-user .bubble {
-  max-width: 640px;
-  margin-left: auto;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
   padding: 12px;
   /* 右侧预留按钮空间：hover 浮现的复制/分叉按钮绝对定位在右上角，
      避免遮挡首行长文本尾部（pre-wrap 正文会占满宽度）。 */
-  padding-right: 40px;
-  border-radius: 14px;
-  background: hsl(var(--tint, 212) 55% 60% / 0.18);
+  padding-right: 70px;
+  border-radius: 8px;
+  background: var(--newpi-surface);
+  text-align: left;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   position: relative;
@@ -74,16 +81,16 @@ html, body {
   height: 128px;
   max-width: 100%;
   border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--newpi-border);
   object-fit: cover;
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--newpi-surface);
   cursor: zoom-in;
 }
 
 .bubble-attachment:hover,
 .bubble-attachment:focus-visible {
   filter: brightness(1.06);
-  outline: 2px solid rgba(0, 0, 0, 0.25);
+  outline: 2px solid var(--newpi-secondary);
   outline-offset: 1px;
 }
 
@@ -93,16 +100,12 @@ html, body {
   height: 48px;
   padding: 0 12px;
   border-radius: 8px;
-  border: 1px dashed rgba(0, 0, 0, 0.25);
-  color: rgba(0, 0, 0, 0.45);
+  border: 1px dashed var(--newpi-border);
+  color: var(--newpi-secondary);
   font-size: 12px;
 }
 
-/* ===== 消息级操作按钮（复制 / 分叉）：hover 浮现在气泡 / 卡片右上角 ===== */
-
-.ti-answer .card.answer {
-  position: relative;
-}
+/* ===== 消息级操作按钮（复制 / 分叉）：不占流式正文布局 ===== */
 
 .ti-actions {
   position: absolute;
@@ -130,16 +133,15 @@ html, body {
   padding: 0;
   border: 0;
   border-radius: 6px;
-  color: rgba(60, 60, 67, 0.55);
+  color: var(--newpi-secondary);
   /* 实底背景（非半透明叠加）：避免悬浮在正文上时透出底层文字。 */
-  background: rgba(242, 242, 247, 0.92);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  background: var(--newpi-surface);
   cursor: pointer;
 }
 
 .ti-action:hover {
-  color: rgba(60, 60, 67, 0.9);
-  background: rgba(255, 255, 255, 1);
+  color: var(--newpi-text);
+  background: var(--newpi-canvas);
 }
 
 .ti-action:disabled {
@@ -149,37 +151,41 @@ html, body {
 
 /* 复制成功反馈：短暂切勾图标 + 高亮（复用代码块 .copied 的视觉语义）。 */
 .ti-action-copy.copied {
-  color: rgba(52, 199, 89, 1);
+  color: var(--newpi-accent);
 }
 
-@media (prefers-color-scheme: dark) {
-  .ti-action {
-    color: rgba(235, 235, 245, 0.6);
-    background: rgba(44, 44, 46, 0.92);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  }
-  .ti-action:hover {
-    color: rgba(235, 235, 245, 0.95);
-    background: rgba(58, 58, 60, 1);
-  }
-  .ti-action-copy.copied {
-    color: rgba(48, 209, 88, 1);
-  }
+.ti-action:focus-visible,
+.card-hd:focus-visible,
+.detail-row:focus-visible {
+  outline: 2px solid var(--newpi-accent);
+  outline-offset: -2px;
 }
 
-/* ===== 助手回答卡片（左对齐，同轮色调） ===== */
+/* ===== 助手回答：文档式阅读面，保留角色署名而不铺卡片底色 ===== */
 
 .ti-answer .card.answer {
-  max-width: 760px;
-  padding: 12px;
-  border-radius: 14px;
-  background: hsl(var(--tint, 212) 55% 60% / 0.18);
+  position: relative;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ti-answer .ti-actions {
+  top: 0;
+  right: 0;
 }
 
 .answer-hd {
   font-size: 11px;
   font-weight: 600;
-  color: rgba(60, 60, 67, 0.6);
+  color: var(--newpi-secondary);
+  /* 24px 按钮留在署名行；长角色名可自然换行，不遮挡正文首行。 */
+  min-height: 24px;
+  line-height: 24px;
+  padding-right: 60px;
+  overflow-wrap: anywhere;
   margin-bottom: 6px;
 }
 
@@ -191,27 +197,29 @@ html, body {
 
 .ti-thinking .card,
 .ti-tool .card {
-  max-width: 640px;
-  border-radius: 12px;
-  background: rgba(120, 120, 128, 0.10);
-  border: 1px solid rgba(60, 60, 67, 0.08);
+  border-radius: 0;
+  color: var(--newpi-text);
+  background: transparent;
+  border: 0;
+  border-block: 1px solid var(--newpi-border);
   overflow: hidden;
 }
 
 .ti-tool .card.is-error {
-  background: rgba(255, 59, 48, 0.06);
-  border-color: rgba(255, 59, 48, 0.2);
+  background: var(--newpi-danger-surface);
+  border-color: var(--newpi-danger);
 }
 
 .card-hd {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 10px 12px;
+  padding: 6px 0;
   border: 0;
   background: transparent;
   font: inherit;
+  color: inherit;
   text-align: left;
   cursor: pointer;
   box-sizing: border-box;
@@ -220,7 +228,7 @@ html, body {
 .card-chevron::before {
   content: "▸";
   font-size: 11px;
-  color: rgba(60, 60, 67, 0.5);
+  color: var(--newpi-secondary);
   display: inline-block;
   width: 12px;
   transition: transform 0.15s ease;
@@ -231,41 +239,36 @@ html, body {
 }
 
 .card-title {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: rgba(0, 112, 255, 0.12);
-  color: #1d1d1f;
-}
-
-.card-title.thinking {
-  background: rgba(175, 82, 222, 0.14);
+  overflow-wrap: anywhere;
+  min-width: 0;
+  color: var(--newpi-text);
 }
 
 .card-badge {
   font-size: 10px;
   font-weight: 500;
-  color: rgba(60, 60, 67, 0.6);
+  color: var(--newpi-secondary);
 }
 
 .card-badge::before {
   content: "●";
   margin-right: 4px;
-  color: #34c759;
+  color: var(--newpi-accent);
 }
 
 .card-badge.error::before {
-  color: #ff3b30;
+  color: var(--newpi-danger);
 }
 
 .card-badge.running::before {
-  color: #ff9500;
+  color: var(--newpi-warning);
 }
 
 .card-preview {
   font-size: 11px;
-  color: rgba(60, 60, 67, 0.6);
+  color: var(--newpi-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,8 +284,8 @@ html, body {
   display: none;
   margin: 0;
   padding: 8px 12px;
-  border-top: 1px solid rgba(60, 60, 67, 0.08);
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top: 1px solid var(--newpi-border);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   max-height: 280px;
@@ -290,27 +293,27 @@ html, body {
 }
 
 .card.is-error .card-body {
-  color: #d70015;
+  color: var(--newpi-danger);
 }
 
 .card.expanded .card-body {
   display: block;
 }
 
-/* 工具卡展开区的命令块：与结果分色分隔（命令=调用意图，结果=执行产出） */
+/* 工具展开区以中性底色和弱分隔区分命令与结果。 */
 
 .card-cmd {
   display: none;
   margin: 0;
   padding: 8px 12px;
-  border-top: 1px solid rgba(60, 60, 67, 0.08);
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top: 1px solid var(--newpi-border);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   max-height: 160px;
   overflow-y: auto;
-  color: #0550ae;
-  background: rgba(9, 105, 218, 0.06);
+  color: var(--newpi-secondary);
+  background: var(--newpi-surface);
 }
 
 .card.expanded .card-cmd {
@@ -319,7 +322,7 @@ html, body {
 
 .card-sep {
   display: none;
-  border-top: 1px dashed rgba(60, 60, 67, 0.18);
+  border-top: 1px dashed var(--newpi-border);
 }
 
 .card.expanded .card-sep {
@@ -330,14 +333,14 @@ html, body {
 
 .ti-system .sysline,
 .ti-error .sysline {
-  max-width: 760px;
-  padding: 12px;
+  padding: 8px 0;
   font-size: 12px;
-  color: rgba(60, 60, 67, 0.75);
+  color: var(--newpi-secondary);
+  overflow-wrap: anywhere;
 }
 
 .ti-error .sysline {
-  color: #d70015;
+  color: var(--newpi-danger);
 }
 
 /* ===== 处理详情组（BACKLOG-DETAIL-GROUP）===== */
@@ -347,38 +350,35 @@ html, body {
   contain-intrinsic-size: auto 48px;
 }
 
-/* 外框与最终答复（.ti-answer .card.answer）保持一致：max-width 760px、圆角 14px、
-   背景色与对话气泡同源（--tint 色相驱动的半透明底）。 */
+/* 分组入口是阅读列内的弱分隔行，不再是彩色大按钮。 */
 .detail-row {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  max-width: 760px;
-  padding: 10px 12px;
-  /* button 的 UA 默认是 border-box；改回 content-box 让 max-width:760px 只约束内容，
-     加上左右 padding 后外框 = 784px，与最终答复（.card.answer content-box）精确对齐。 */
-  box-sizing: content-box;
+  padding: 8px 0;
+  box-sizing: border-box;
   border: 0;
-  background: hsl(var(--tint, 212) 55% 60% / 0.18);
-  border-radius: 14px;
+  border-block: 1px solid var(--newpi-border);
+  background: transparent;
+  border-radius: 0;
   font: inherit;
   text-align: left;
   cursor: pointer;
-  color: rgba(60, 60, 67, 0.7);
+  color: var(--newpi-secondary);
 }
 
 .detail-row:hover {
-  background: hsl(var(--tint, 212) 55% 60% / 0.24);
+  background: var(--newpi-surface);
 }
 
 .detail-chevron::before {
   content: "▸";
-  font-size: 22px;
+  font-size: 12px;
   line-height: 1;
-  color: rgba(60, 60, 67, 0.5);
+  color: var(--newpi-secondary);
   display: inline-block;
-  width: 16px;
+  width: 12px;
   transition: transform 0.15s ease;
 }
 
@@ -387,7 +387,7 @@ html, body {
 }
 
 .detail-label {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -397,19 +397,22 @@ html, body {
   display: none;
 }
 
-/* ===== 系统外观适配 =====
-   WKWebView 背景是透明的，颜色必须跟随宿主窗口，而不能继续依赖只支持浅色的
-   github-markdown-light.css。这里集中覆盖该表中影响可读性的固定颜色。 */
+/* ===== A 文档工作台语义色：浅深外观只切变量，不重复铺卡片背景 =====
+  次级文字用不透明色，在阅读面与中性底板上均满足 4.5:1。 */
 :root {
   color-scheme: light dark;
-  --newpi-text: #1d1d1f;
-  --newpi-secondary: rgba(60, 60, 67, 0.72);
-  --newpi-tertiary: rgba(60, 60, 67, 0.52);
-  --newpi-border: rgba(60, 60, 67, 0.14);
-  --newpi-surface: rgba(120, 120, 128, 0.10);
-  --newpi-code-surface: #f6f8fa;
-  --newpi-link: #0969da;
-  --newpi-bubble-alpha: 0.18;
+  --newpi-canvas: #fdfdfb;
+  --newpi-text: #242c29;
+  --newpi-secondary: #56635a;
+  --newpi-border: #e1e5df;
+  --newpi-surface: #f4f5f1;
+  --newpi-code-surface: #f4f5f1;
+  --newpi-link: #32654d;
+  --newpi-accent: #32654d;
+  --newpi-warning: #946016;
+  --newpi-danger: #b44942;
+  --newpi-danger-surface: #fbedea;
+  --borderColor-accent-emphasis: var(--newpi-accent);
 }
 
 .markdown-body {
@@ -438,72 +441,24 @@ html, body {
 .markdown-body table tr { background-color: transparent; }
 .markdown-body table tr:nth-child(2n) { background-color: var(--newpi-surface); }
 
+/* 注释属于次级正文，不沿用只适合旧代码背景的低对比灰色。 */
+.hljs-comment { color: var(--newpi-secondary); }
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --newpi-text: #f2f2f7;
-    --newpi-secondary: rgba(235, 235, 245, 0.72);
-    --newpi-tertiary: rgba(235, 235, 245, 0.52);
-    --newpi-border: rgba(235, 235, 245, 0.16);
-    --newpi-surface: rgba(235, 235, 245, 0.10);
-    --newpi-code-surface: rgba(28, 28, 30, 0.92);
-    --newpi-link: #64a8ff;
-    --newpi-bubble-alpha: 0.22;
+    --newpi-canvas: #252b28;
+    --newpi-text: #e4e9e2;
+    --newpi-secondary: #b7c2b9;
+    --newpi-border: #3b443d;
+    --newpi-surface: #2c332f;
+    --newpi-code-surface: #2c332f;
+    --newpi-link: #a1c3a3;
+    --newpi-accent: #a1c3a3;
+    --newpi-warning: #edc786;
+    --newpi-danger: #f2a49a;
+    --newpi-danger-surface: #442f2b;
   }
 
-  html, body { color: var(--newpi-text); }
-  .ti-user .bubble,
-  .ti-answer .card.answer,
-  .detail-row {
-    background: hsl(var(--tint, 212) 48% 58% / var(--newpi-bubble-alpha));
-  }
-  .detail-row { color: var(--newpi-secondary); }
-  .detail-row:hover {
-    background: hsl(var(--tint, 212) 48% 58% / 0.30);
-  }
-  .answer-hd,
-  .card-preview,
-  .card-badge,
-  .ti-system .sysline { color: var(--newpi-secondary); }
-  .ti-thinking .card,
-  .ti-tool .card {
-    color: var(--newpi-text);
-    background: var(--newpi-surface);
-    border-color: var(--newpi-border);
-  }
-  .card-title {
-    color: var(--newpi-text);
-    background: rgba(10, 132, 255, 0.22);
-  }
-  .card-title.thinking { background: rgba(191, 90, 242, 0.22); }
-  .card-chevron::before,
-  .detail-chevron::before { color: var(--newpi-tertiary); }
-  .card-body,
-  .card-cmd { border-color: var(--newpi-border); }
-  .card-sep { border-color: var(--newpi-border); }
-  .card-cmd {
-    color: #7db7ff;
-    background: rgba(10, 132, 255, 0.10);
-  }
-  .card.is-error .card-body,
-  .ti-error .sysline { color: #ff6961; }
-  .code-block-container { border-color: var(--newpi-border); }
-  .code-block-header {
-    color: var(--newpi-secondary);
-    background: var(--newpi-surface);
-    border-bottom-color: var(--newpi-border);
-  }
-  .code-block-copy { color: var(--newpi-secondary); }
-  .code-block-copy:hover { background: rgba(235, 235, 245, 0.12); }
-  .bubble-attachment {
-    border-color: var(--newpi-border);
-    background: var(--newpi-surface);
-  }
-  .bubble-attachment-missing {
-    color: var(--newpi-tertiary);
-    border-color: var(--newpi-border);
-  }
-  .bubble-attachment:hover,
-  .bubble-attachment:focus-visible { outline-color: var(--newpi-tertiary); }
   .markdown-body kbd {
     color: var(--newpi-text);
     background: var(--newpi-surface);
@@ -555,7 +510,7 @@ html, body {
   .hljs-symbol { color: #ffa657; }
   .hljs-code,
   .hljs-comment,
-  .hljs-formula { color: #8b949e; }
+  .hljs-formula { color: var(--newpi-secondary); }
   .hljs-name,
   .hljs-quote,
   .hljs-selector-pseudo,

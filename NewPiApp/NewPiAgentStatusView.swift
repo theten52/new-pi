@@ -1,10 +1,128 @@
+import AppKit
 import NewPiCore
 import SwiftUI
+
+/// 文档工作台共享样式；高对比模式优先使用系统语义色。
+enum NewPiWorkbenchStyle {
+    static let maxReadingWidth: CGFloat = 800
+    static let horizontalInset: CGFloat = 24
+
+    static let surface = adaptiveColor(
+        "surface", light: 0xFDFDFB, dark: 0x252B28, highContrast: .windowBackgroundColor
+    )
+    static let surfaceRaised = adaptiveColor(
+        "surfaceRaised", light: 0xFFFFFF, dark: 0x2B322E, highContrast: .controlBackgroundColor
+    )
+    static let line = adaptiveColor(
+        "line", light: 0xE1E5DF, dark: 0x3B443D, highContrast: .separatorColor
+    )
+    static let accent = adaptiveColor(
+        "accent", light: 0x32654D, dark: 0xA1C3A3, highContrast: .labelColor
+    )
+    static let primaryText = Color(nsColor: .labelColor)
+    static let secondaryText = Color(nsColor: .secondaryLabelColor)
+
+    private static func adaptiveColor(
+        _ name: String, light: UInt32, dark: UInt32, highContrast: NSColor
+    ) -> Color {
+        Color(nsColor: NSColor(name: NSColor.Name("NewPiWorkbench.\(name)")) { appearance in
+            let match = appearance.bestMatch(from: [
+                .aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua,
+            ])
+            if match == .accessibilityHighContrastAqua || match == .accessibilityHighContrastDarkAqua {
+                return highContrast
+            }
+            let rgb = match == .darkAqua ? dark : light
+            return NSColor(
+                srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+                green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                blue: CGFloat(rgb & 0xFF) / 255,
+                alpha: 1
+            )
+        })
+    }
+}
+
+/// 输入区与底部工具栏共用的外壳；焦点、输入行为及高度由调用方管理。
+struct NewPiComposerSurface<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(12)
+            .background {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(NewPiWorkbenchStyle.surfaceRaised)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(NewPiWorkbenchStyle.line, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+/// 普通会话与聊天室共用的主操作；不注册 Return 快捷键，避免输入时误停止。
+struct NewPiComposerPrimaryAction: View {
+    let isRunning: Bool
+    let canSend: Bool
+    let onSend: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        Button {
+            if isRunning {
+                onStop()
+            } else if canSend {
+                onSend()
+            }
+        } label: {
+            Label(actionLabel, systemImage: isRunning ? "square.fill" : "arrow.up")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 32, height: 32)
+                .foregroundStyle(NewPiWorkbenchStyle.surfaceRaised)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isRunning ? NewPiWorkbenchStyle.primaryText : NewPiWorkbenchStyle.accent)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isRunning && !canSend)
+        .opacity(!isRunning && !canSend ? 0.45 : 1)
+        .accessibilityLabel(actionLabel)
+        .help(actionLabel)
+    }
+
+    private var actionLabel: String {
+        isRunning ? "停止生成" : "发送消息"
+    }
+}
 
 struct NewPiAgentStatusPresentation: Equatable {
     let systemImage: String
     let label: String
     let isActive: Bool
+
+    /// 审批与错误优先于活跃态；运行只使用低饱和强调色，不表示成功。
+    var foregroundColor: Color {
+        switch systemImage {
+           case "hand.raised", "hand.raised.fill", "hand.raised.circle", "hand.raised.circle.fill",
+               "exclamationmark.triangle", "exclamationmark.triangle.fill":
+            .orange
+           case "exclamationmark.circle", "exclamationmark.circle.fill",
+               "exclamationmark.octagon", "exclamationmark.octagon.fill",
+               "xmark.circle", "xmark.circle.fill", "xmark.octagon", "xmark.octagon.fill":
+            .red
+        default:
+            isActive ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.secondaryText
+        }
+    }
 
     static func toolIcon(for toolName: String) -> String {
         switch toolName {
@@ -59,48 +177,12 @@ struct NewPiAgentStatusIcon: View {
     var size: NewPiAgentStatusIconSize = .toolbar
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous)
-                .fill(backgroundColor)
-                .overlay {
-                    RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous)
-                        .strokeBorder(borderColor, lineWidth: 1)
-                }
-                .frame(width: size.frame, height: size.frame)
-
-            // 持续 symbolEffect 会触发 RenderBox 表面同步等待，阻塞正文流式消费。
-            // 图标保持静态，活跃反馈由文字呼吸承担；减动效策略仍由标签处理。
-            Image(systemName: presentation.systemImage)
-                .font(.system(size: size.symbolSize, weight: .semibold))
-                .foregroundStyle(foregroundColor)
-        }
-        .accessibilityHidden(true)
-    }
-
-    private var backgroundColor: Color {
-        if presentation.isActive {
-            // 需求：激活（working/thinking/running tool）时给绿色背景，使其更显眼。
-            return Color.green.opacity(0.16)
-        }
-        return Color(nsColor: .controlBackgroundColor)
-    }
-
-    private var borderColor: Color {
-        if presentation.isActive {
-            return Color.green.opacity(0.35)
-        }
-        return Color.primary.opacity(0.08)
-    }
-
-    private var foregroundColor: Color {
-        if pendingApproval {
-            return .orange
-        }
-        return presentation.isActive ? Color.accentColor : .secondary
-    }
-
-    private var pendingApproval: Bool {
-        presentation.systemImage == "hand.raised.circle"
+        // 保持静态，避免持续 symbolEffect 阻塞正文流式消费。
+        Image(systemName: presentation.systemImage)
+            .font(.system(size: size.symbolSize, weight: .semibold))
+            .foregroundStyle(presentation.foregroundColor)
+            .frame(width: size.frame, height: size.frame)
+            .accessibilityHidden(true)
     }
 }
 
@@ -175,6 +257,7 @@ struct NewPiModelPickerMenu: View {
                 Text(activeModelID.isEmpty ? "选择模型" : activeModelID)
                     .font(.caption.monospaced())
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 // 思考开启时给个小图标，让当前档位一眼可见（off 不显示）。
                 if thinkingLevel != .off {
                     Image(systemName: "brain")
@@ -185,123 +268,116 @@ struct NewPiModelPickerMenu: View {
                     .font(.system(size: 8, weight: .semibold))
             }
             .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(maxWidth: 220, alignment: .leading)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
+        .frame(maxWidth: 220, alignment: .leading)
         .disabled(isDisabled || groups.isEmpty)
+        .accessibilityLabel("模型与思考级别")
+        .accessibilityValue("\(activeModelID.isEmpty ? "未选择模型" : activeModelID)，思考：\(thinkingLevel.displayName)")
         .help("切换当前会话使用的模型与思考档位（当前思考：\(thinkingLevel.displayName)）")
     }
 }
 
-/// Input-area status strip — always visible above the composer.
-/// 输入框上方状态栏基座：左侧 agent 状态，右侧模型选择菜单 + 本会话 token 用量。
+/// 输入区的静态任务状态；用量明细按需展开，模型菜单保留给旧调用方。
 struct NewPiAgentStatusBar: View {
     let presentation: NewPiAgentStatusPresentation
-    /// 累计用量文本（如 "↑12.3k ↓4.5k"）；nil 时隐藏。
+    /// 累计用量文本（如 "↑12.3k ↓4.5k"）；nil 时显示暂无数据。
     var usageText: String? = nil
-    /// 最近一轮用量文本，用于 tooltip 明细。
+    /// 最近一轮用量文本。
     var lastTurnUsageText: String? = nil
-    /// 缓存命中率文本（如 "85%"）；nil 时隐藏。
+    /// 缓存命中率文本（如 "85%"）。
     var cacheHitRateText: String? = nil
-    /// 上下文占用文本（如 "上下文 9.2% / 1.0M"）；nil 时隐藏。
+    /// 上下文占用文本（如 "上下文 9.2% / 1.0M"）。
     var contextText: String? = nil
-    /// 流式输出 token 速率文本（如 "24 tok/s"）；nil 时隐藏（非流式期间）。
+    /// 流式输出 token 速率文本（如 "24 tok/s"）。
     var tokenRateText: String? = nil
     /// 模型选择菜单；nil 时隐藏（如 spike 窗口）。
     var modelPicker: NewPiModelPickerMenu? = nil
 
+    @State private var isUsagePresented = false
+
     var body: some View {
-        // 图标用与文本同高的紧凑尺寸；整条用与输入框一致的圆角矩形包裹
-        //（宽度由调用方 .padding(.horizontal) 控制，与输入框对齐）。
         HStack(spacing: 8) {
             NewPiAgentStatusIcon(presentation: presentation, size: .compact)
-            NewPiStatusBreathingLabel(text: presentation.label, isActive: presentation.isActive)
+            Text(presentation.label)
+                .font(.subheadline)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(presentation.foregroundColor)
+                .help(presentation.label)
+                .layoutPriority(1)
             Spacer(minLength: 0)
             if let modelPicker {
                 modelPicker
             }
-            if let cacheHitRateText {
-                Label(cacheHitRateText, systemImage: "bolt.fill")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help("本会话累计缓存命中率（命中缓存的输入 token / 总输入 token）")
+            Button {
+                isUsagePresented.toggle()
+            } label: {
+                Text("用量")
+                    .font(.caption)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 3)
             }
-            if let contextText {
-                Label(contextText, systemImage: "square.stack.3d.up.fill")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help("当前上下文占用（最近一轮输入 token / 模型上下文窗口）")
-            }
-            if let tokenRateText {
-                Label(tokenRateText, systemImage: "speedometer")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help("当前输出速率（基于流式文本估算的 token/秒）")
-            }
-            if let usageText {
-                Text(usageText)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help(
-                        lastTurnUsageText.map {
-                            "本会话累计 token 用量（↑ 输入 / ↓ 输出）\n最近一轮：\($0)"
-                        } ?? "本会话累计 token 用量（↑ 输入 / ↓ 输出）"
-                    )
+            .buttonStyle(.borderless)
+            .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(2)
+            .accessibilityLabel("用量")
+            .accessibilityHint("显示本会话用量明细")
+            .help("显示本会话用量明细")
+            .popover(isPresented: $isUsagePresented, arrowEdge: .bottom) {
+                usageDetails
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        // 高亮：与输入框一致的淡 accent 填充 + 描边，让状态栏/输入框区域更显眼。
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.accentColor.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(presentation.label)
+        // 保留各个控件的可访问性，不能合并后吞掉用量按钮或模型菜单。
+        .accessibilityElement(children: .contain)
+    }
+
+    private var usageDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("用量明细")
+                .font(.headline)
+            usageRow("累计用量", value: usageText, detail: "本会话累计 token（↑ 输入 / ↓ 输出）")
+            usageRow("最近一轮", value: lastTurnUsageText, detail: "最近一轮 token（↑ 输入 / ↓ 输出）")
+            usageRow("缓存命中率", value: cacheHitRateText, detail: "命中缓存的输入 token / 总输入 token")
+            usageRow("上下文占用", value: contextText, detail: "调用方提供的当前上下文占用")
+            usageRow("输出速率", value: tokenRateText, detail: "流式文本估算的 token/秒")
+        }
+        .padding(16)
+        .frame(width: 320, alignment: .leading)
+    }
+
+    private func usageRow(_ title: String, value: String?, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            Text(value.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? "暂无数据")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(NewPiWorkbenchStyle.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .help(detail)
     }
 }
 
-/// 状态栏文字标签：激活（working / thinking / running tool / 待审批）时，
-/// 以绿色做「呼吸灯」脉动闪烁（透明度在 0.55↔1 之间往复，不会透明到看不见）。
-/// 非激活（如 "NewPi is ready"）时恒定为主色，不做任何呼吸。
+/// 保留旧名称与初始化参数以兼容外部调用；标签现为静态，不再启动定时器。
 struct NewPiStatusBreathingLabel: View {
     let text: String
     let isActive: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// 呼吸相位：开关翻转驱动透明度在亮/暗间往复，形成连续呼吸。
-    @State private var breathing = false
-
-    /// 呼吸周期定时器：仅在激活时翻转相位。
-    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Text(text)
             .font(.subheadline)
             .lineLimit(1)
-            .foregroundStyle(textColor)
-            .opacity(shouldAnimate ? (breathing ? 1.0 : 0.55) : 1.0)
-            .animation(shouldAnimate ? .easeInOut(duration: 1.1) : nil, value: breathing)
-            .onReceive(timer) { _ in
-                guard shouldAnimate else {
-                    breathing = false
-                    return
-                }
-                breathing.toggle()
-            }
-    }
-
-    private var textColor: Color {
-        isActive ? Color.green : Color.secondary
-    }
-
-    private var shouldAnimate: Bool {
-        isActive && !reduceMotion
+            .truncationMode(.tail)
+            .foregroundStyle(isActive ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.secondaryText)
     }
 }
 
@@ -346,4 +422,63 @@ extension UsageStats {
         )
     )
     .frame(width: 480)
+}
+
+#Preview("窄栏 · 审批与旧模型菜单") {
+    NewPiAgentStatusBar(
+        presentation: NewPiAgentStatusPresentation(
+            systemImage: "hand.raised.circle",
+            label: "等待工具审批…",
+            isActive: true
+        ),
+        modelPicker: NewPiModelPickerMenu(
+            groups: [NewPiProviderModelGroup(
+                profileID: "preview",
+                profileName: "预览 Provider",
+                systemImage: "cpu",
+                hasAPIKey: false,
+                models: ["preview-model-with-a-long-name"]
+            )],
+            activeProfileID: "preview",
+            activeModelID: "preview-model-with-a-long-name",
+            onSelect: { _, _ in }
+        )
+    )
+    .frame(width: 320)
+    .padding()
+    .background(NewPiWorkbenchStyle.surface)
+}
+
+#Preview("深色 · 错误") {
+    NewPiAgentStatusBar(
+        presentation: NewPiAgentStatusPresentation(
+            systemImage: "exclamationmark.circle.fill",
+            label: "请求失败，请重试",
+            isActive: false
+        )
+    )
+    .frame(width: 320)
+    .padding()
+    .background(NewPiWorkbenchStyle.surface)
+    .preferredColorScheme(.dark)
+}
+
+#Preview("输入外壳 · 主按钮状态") {
+    NewPiComposerSurface {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("输入区由调用方提供")
+                .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            HStack {
+                Text("底部工具栏")
+                    .font(.caption)
+                Spacer()
+                NewPiComposerPrimaryAction(isRunning: false, canSend: false, onSend: {}, onStop: {})
+                NewPiComposerPrimaryAction(isRunning: false, canSend: true, onSend: {}, onStop: {})
+                NewPiComposerPrimaryAction(isRunning: true, canSend: false, onSend: {}, onStop: {})
+            }
+        }
+    }
+    .frame(width: 480)
+    .padding(NewPiWorkbenchStyle.horizontalInset)
+    .background(NewPiWorkbenchStyle.surface)
 }

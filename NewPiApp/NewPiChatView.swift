@@ -40,8 +40,6 @@ struct NewPiSessionPanel: View {
     @State private var input = ""
     /// 待发送的图片草稿（附件按钮 / 拖拽 / 粘贴采集；发送时随文本一起落盘，BACKLOG-IMAGE-INPUT）。
     @State private var draftAttachments: [DraftImageAttachment] = []
-    /// 回答完成礼花触发序号：每次最终答复真正落定后自增一。
-    @State private var confettiTrigger = 0
     /// 单文档 transcript 的控制器（jumpTo/scrollToBottom 意图 + JS 上报的 isNearBottom/minimap 位置）。
     @StateObject private var docController = TranscriptDocumentController()
 
@@ -56,6 +54,22 @@ struct NewPiSessionPanel: View {
     // rail（minimap）与 jump-to-latest 是原生浮层（不在流内，不参与布局）。
     var body: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("会话")
+                    .font(.caption.weight(.medium))
+                Image(systemName: "folder")
+                Text(viewModel.projectURL?.path ?? "未选择项目")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(viewModel.projectURL?.path ?? "未选择项目")
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+            .padding(.vertical, 10)
+            .overlay(alignment: .bottom) { Divider() }
+
             ZStack(alignment: .trailing) {
                 if runtime.transcript.isEmpty {
                     if viewModel.isSwitchingSession {
@@ -85,11 +99,11 @@ struct NewPiSessionPanel: View {
                         // 常驻挂载 + 透明度开关（STREAMING-LAYOUT-ISOLATION）：条件插入/移除
                         // 会在流式中途制造结构性布局失效并向 WKWebView 子树传播；
                         // 恒定结构 + opacity 翻转零布局成本，动画观感与原 transition 等价。
-                        let jumpVisible = runtime.isStreaming && !docController.isNearBottom
+                        let jumpVisible = !docController.isNearBottom
                         Button {
                             docController.scrollToBottom()
                         } label: {
-                            Label("Jump to latest", systemImage: "arrow.down")
+                            Label("回到最新", systemImage: "arrow.down")
                                 .font(.callout.weight(.medium))
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
@@ -120,12 +134,7 @@ struct NewPiSessionPanel: View {
 
             chatComposer
         }
-        .overlay(alignment: .bottomTrailing) {
-            // 小礼花层：allowsHitTesting(false)，不挡 transcript 滚动 / rail / jump 按钮；
-            // 发射原点固定在面板右下角（Send 按钮恒在最右），粒子向上飞进 transcript 区域。
-            NewPiConfettiBurstView(trigger: confettiTrigger)
-                .zIndex(10)
-        }
+        .background(NewPiWorkbenchStyle.surface)
         .onAppear {
             // 流式直连通道（STREAMING-LAYOUT-ISOLATION）：runtime ↔ 本面板控制器结对。
             // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
@@ -145,107 +154,83 @@ struct NewPiSessionPanel: View {
                 runtime.docController = nil
             }
         }
-        .onChange(of: runtime.finalAnswerComplete) { oldValue, newValue in
-            // 礼花表达“任务完成”，而不是“请求刚开始”。只有最终答复（无后续工具调用）
-            // 落定时才触发；本地校验失败、请求刚发出、中间工具轮次和取消都不会误放。
-            if oldValue == false && newValue == true {
-                confettiTrigger += 1
-            }
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// 轮对话色调已上移为 NewPiViewModel.transcriptTintHues（流式直连路径共用）。
 
     private var chatComposer: some View {
-        VStack(spacing: 0) {
-            // 分隔线移到状态栏上方：状态栏与输入框之间不再隔开，视觉上连成一体。
-            Divider()
+        VStack(spacing: 6) {
+            NewPiAgentStatusBar(
+                presentation: viewModel.agentStatusPresentation,
+                usageText: runtime.totalUsage.newPiCompactText,
+                lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
+                cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
+                contextText: viewModel.contextUsageText(for: runtime.lastTurnUsage),
+                tokenRateText: viewModel.tokenRateText
+            )
 
-            HStack(alignment: .bottom, spacing: 8) {
-                // 状态栏 + 输入框同一列：状态栏宽度 = 输入框宽度，上下左右边缘对齐
-                //（按钮在外层 HStack，不再挤占输入框宽度）。
-                VStack(spacing: 8) {
-                    NewPiAgentStatusBar(
-                        presentation: viewModel.agentStatusPresentation,
-                        usageText: runtime.totalUsage.newPiCompactText,
-                        lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
-                        cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
-                        contextText: viewModel.contextUsageText(for: runtime.lastTurnUsage),
-                        tokenRateText: viewModel.tokenRateText,
-                        modelPicker: NewPiModelPickerMenu(
-                            groups: viewModel.providerModelGroups,
-                            activeProfileID: viewModel.activeProviderID,
-                            activeModelID: viewModel.activeProviderModel,
-                            thinkingLevel: viewModel.activeThinkingLevel,
-                            isDisabled: runtime.isStreaming,
-                            onSelect: { profileID, modelID in
-                                Task { await viewModel.switchModel(profileID: profileID, modelID: modelID) }
-                            },
-                            onThinkingSelect: { level in
-                                Task { await viewModel.setThinkingLevel(level) }
-                            }
-                        )
-                    )
-
-                    // 草稿附件条（BACKLOG-IMAGE-INPUT）：非空才占位。
+            NewPiComposerSurface {
+                VStack(alignment: .leading, spacing: 8) {
                     if !draftAttachments.isEmpty {
                         NewPiDraftAttachmentStrip(drafts: $draftAttachments)
                     }
 
-                    // 固定 4 行输入框（NSTextView）：超出后内部滚动，
-                    // Return 发送 / Shift+Return 换行（BACKLOG-COMPOSER-MULTILINE）。
+                    // 只换外壳；保持 NSTextView、四行视口与 IME/草稿同步机制不变。
                     NewPiComposerTextView(
                         text: $input,
                         isDisabled: false,
-                        placeholder: runtime.isStreaming ? "Prepare your next message…" : "Message NewPi…",
+                        placeholder: runtime.isStreaming ? "先写下一条消息，当前任务结束后发送…" : "继续提问，或告诉 NewPi 下一步做什么…",
                         onSubmit: sendComposerInput,
                         onImagesPicked: appendDrafts
                     )
                     .help(runtime.isStreaming ? "可以先编辑下一条消息；当前任务结束后才能发送。" : "Return 发送，Shift+Return 换行")
                     .frame(height: NewPiComposerScrollView.fixedHeight)
-                    // 高亮：与状态栏一致的淡 accent 填充 + 描边。
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.08))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
-                    )
-                }
 
-                // 附件按钮（BACKLOG-IMAGE-INPUT）：NSOpenPanel 多选图片；拖拽 / ⌘V 粘贴走输入框自身。
-                Button {
-                    pickImages()
-                } label: {
-                    Image(systemName: "photo.on.rectangle.angled")
-                }
-                .buttonStyle(.borderless)
-                .help("添加图片（也可直接拖拽或 ⌘V 粘贴到输入框）")
-                .frame(minWidth: 32)
+                    HStack(spacing: 10) {
+                        Button(action: pickImages) {
+                            Label("添加图片", systemImage: "plus")
+                                .labelStyle(.iconOnly)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("添加图片（也可直接拖拽或 ⌘V 粘贴到输入框）")
 
-                Button("Stop") {
-                    viewModel.abort()
+                        modelPicker
+                        Spacer(minLength: 8)
+                        NewPiComposerPrimaryAction(
+                            isRunning: runtime.isStreaming,
+                            canSend: !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty,
+                            onSend: sendComposerInput,
+                            onStop: { viewModel.abort() }
+                        )
+                    }
                 }
-                .opacity(runtime.isStreaming ? 1 : 0)
-                .disabled(!runtime.isStreaming)
-                .frame(minWidth: 52)
-
-                // Return 发送由 composer 自身处理，按钮不再占用 Return 快捷键，
-                // 避免与 NSTextView 的按键处理双重触发。
-                Button("Send", action: sendComposerInput)
-                    .disabled(
-                        (input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            && draftAttachments.isEmpty) || runtime.isStreaming
-                    )
             }
-            .padding(.top, 8)
-            .padding(.horizontal)
-            .padding(.bottom)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+        .padding(.top, 6)
+        .padding(.bottom, 16)
+        .frame(maxWidth: NewPiWorkbenchStyle.maxReadingWidth)
+        .frame(maxWidth: .infinity)
+        .background(NewPiWorkbenchStyle.surface)
         .animation(nil, value: runtime.isStreaming)
+    }
+
+    private var modelPicker: NewPiModelPickerMenu {
+        NewPiModelPickerMenu(
+            groups: viewModel.providerModelGroups,
+            activeProfileID: viewModel.activeProviderID,
+            activeModelID: viewModel.activeProviderModel,
+            thinkingLevel: viewModel.activeThinkingLevel,
+            isDisabled: runtime.isStreaming,
+            onSelect: { profileID, modelID in
+                Task { await viewModel.switchModel(profileID: profileID, modelID: modelID) }
+            },
+            onThinkingSelect: { level in
+                Task { await viewModel.setThinkingLevel(level) }
+            }
+        )
     }
 
     private func sendComposerInput() {

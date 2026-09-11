@@ -6,7 +6,7 @@ import WebKit
 final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
     let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 650))
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
-        styleMask: [.borderless], backing: .buffered, defer: false)
+      styleMask: [.titled], backing: .buffered, defer: false)
     let root: URL
 
     init(root: URL) {
@@ -382,8 +382,9 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         checkTail('gap-last-answer','jump back to latest');
         apply([{op:'reset'},{op:'upsert',id:'short-answer',kind:'assistant',body:'Short answer',streaming:true}]);
         await frames();
-        check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-16)<1,
-          'short conversation must stay top aligned');
+        // A 文档工作台将顶部设计留白从 16px 调整为 24px；尾距仍严格保持 32px。
+        check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-24)<1,
+          'short conversation must stay top aligned with 24px document padding');
         check(node('short-answer').style.height==='', 'short conversation must also use natural height');
         // 收尾不应改变末行屏幕位置；history 已有占位收敛后再比较，不掩盖变更本身。
         const reflowGeometry=[];
@@ -453,12 +454,169 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         }
         return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting, warmer pause/resume, natural-height alternation (${geometry.length} checks), 32px tail gap and history anchor; ${markdownCases.length} semantic cases, reference invalidation, tail repair; final reflow ${JSON.stringify(reflowGeometry)}`;
         """#
+        // 独立于性能计时：切换真实 NSAppearance/窗口宽度，而不是注入测试专用 CSS。
+        let styleScript = #"""
+        const check=(condition,name)=>{ if(!condition) throw new Error(`${expectedDark?'dark':'light'}/${viewportWidth}: ${name}`); };
+        const frames=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        for(let i=0;i<10;i++){
+          await frames();
+          if(matchMedia('(prefers-color-scheme: dark)').matches===expectedDark && innerWidth===viewportWidth) break;
+        }
+        check(matchMedia('(prefers-color-scheme: dark)').matches===expectedDark,'native appearance must reach WebKit');
+        check(innerWidth===viewportWidth,'native width must reach WebKit');
+        const apply=ops=>window.transcriptDoc.apply(JSON.stringify(ops));
+        const node=id=>document.querySelector(`[data-iid="${id}"]`);
+        const css=el=>getComputedStyle(el), rect=el=>el.getBoundingClientRect();
+        const near=(a,b)=>Math.abs(a-b)<1;
+        const transparent=el=>css(el).backgroundColor==='rgba(0, 0, 0, 0)' && css(el).backgroundImage==='none';
+        const source='First paragraph 正文首行。\n\n```swift\nlet value = "'+'x'.repeat(120)+'"\n```';
+        const speaker='Role A / '+'协作评审员'.repeat(10);
+        apply([{op:'reset'},{op:'forkLock',locked:true},
+          {op:'upsert',id:'style-user',kind:'user',body:'User steering 用户输入 '+ 'readable text '.repeat(8),
+            tint:30,canFork:true,messageIndex:0},
+          {op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:true,
+            tint:210,canFork:true,messageIndex:1},
+          {op:'upsert',id:'style-group',kind:'detailGroup',detailTurnID:'style-turn',collapsed:false,body:''},
+          {op:'upsert',id:'style-thinking',kind:'thinking',detailTurnID:'style-turn',body:'Reasoning'},
+          {op:'upsert',id:'style-tool',kind:'tool',detailTurnID:'style-turn',toolName:'read',command:'file.swift',body:'Output'},
+          {op:'upsert',id:'style-danger',kind:'tool',toolName:'bash',body:'Failed',toolError:true},
+          {op:'upsert',id:'style-error',kind:'error',body:'Error message'}]);
+        await frames();
+        const main=document.getElementById('transcript'), mainRect=rect(main), mainCSS=css(main);
+        const padding=24;
+        // 非覆盖式滚动条占用的宽度不属于阅读列，媒体查询仍按窗口视口判断。
+        check(mainCSS.boxSizing==='border-box' && near(mainRect.width,Math.min(800,document.documentElement.clientWidth)),
+          'reading column must be at most 800px including padding');
+        check(near(mainRect.left,(document.documentElement.clientWidth-mainRect.width)/2),
+          'reading column must be centered with auto margins');
+        check(parseFloat(mainCSS.paddingLeft)===padding && parseFloat(mainCSS.paddingRight)===padding,
+          'reading column must use the same 24px padding as the native composer');
+        check(mainCSS.paddingTop==='24px' && mainCSS.paddingBottom==='32px','document top/bottom spacing');
+        const bubble=node('style-user').querySelector('.bubble');
+        const answer=node('style-answer'), card=answer.querySelector('.card.answer');
+        const article=answer.querySelector('.markdown-body'), header=answer.querySelector('.answer-hd');
+        const detail=node('style-group').querySelector('.detail-row');
+        const contentLeft=mainRect.left+padding, contentWidth=mainRect.width-2*padding;
+        for(const el of [bubble,card,article,detail]){
+          check(near(rect(el).left,contentLeft) && near(rect(el).width,contentWidth),
+            'user, assistant, Markdown and detail must share one reading column');
+        }
+        check(css(bubble).textAlign==='left' && css(bubble).marginLeft==='0px','user must be left aligned');
+        check(!transparent(bubble),'user must retain a light neutral surface');
+        check(transparent(answer) && transparent(card) && transparent(article),'assistant must have no card background');
+        check(['Top','Right','Bottom','Left'].every(side=>parseFloat(css(card)['border'+side+'Width'])===0 &&
+          parseFloat(css(card)['padding'+side])===0),'assistant card must have no border or padding');
+        check(css(article).fontSize==='14px' && near(parseFloat(css(article).lineHeight),24.5),
+          'Markdown font override must be 14px/1.75');
+        check(css(document.body).fontSize==='14px' && css(bubble).lineHeight===css(article).lineHeight,
+          'user and Markdown must share body typography');
+        check(header.textContent===speaker && css(header).display!=='none','speaker header must remain visible');
+        const actions=card.querySelector('.ti-actions'), userActions=bubble.querySelector('.ti-actions');
+        check(actions.children.length===2 && userActions.children.length===2,'fixtures must cover copy and fork');
+        check(css(actions).position==='absolute' && css(userActions).position==='absolute',
+          'message actions must stay out of flow');
+        check(rect(article).top>=rect(actions).bottom,'assistant actions must not cover first body line');
+        const textRect=el=>{ const range=document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect(); };
+        check(textRect(header).right<=rect(actions).left,'wrapped speaker must leave room for both actions');
+        const userRange=document.createRange(); userRange.selectNode(bubble.firstChild);
+        check(userRange.getBoundingClientRect().right<=rect(userActions).left,'user text must leave room for both actions');
+        const neutralNodes=[bubble,card,detail,node('style-thinking').querySelector('.card'),node('style-tool').querySelector('.card')];
+        const backgrounds=neutralNodes.map(el=>css(el).backgroundColor);
+        for(const tint of [0,120,280]){
+          document.querySelectorAll('.ti').forEach(el=>el.style.setProperty('--tint',String(tint)));
+          check(neutralNodes.every((el,i)=>css(el).backgroundColor===backgrounds[i]),'turn tint must not affect surfaces');
+        }
+        check(transparent(detail) && css(detail).borderTopWidth==='1px' && css(detail).borderRadius==='0px',
+          'detail group must be a weak separator, not a colored rounded button');
+        for(const id of ['style-thinking','style-tool']){
+          const el=node(id), inner=el.querySelector('.card'), title=el.querySelector('.card-title');
+          check(transparent(inner) && rect(inner).height<48,'collapsed process must be a compact neutral row');
+          check(transparent(title) && css(title).padding==='0px' && css(title).borderRadius==='0px',
+            'process titles must not be capsules');
+          check(css(el).contentVisibility==='auto' && el.style.height==='',
+            'nonstreaming rows must retain CV and natural height');
+        }
+        const before=rect(answer).height;
+        apply([{op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:false,
+          tint:300,canFork:true,messageIndex:1}]);
+        await frames();
+        check(answer.querySelector('.card.answer')===card && near(rect(answer).height,before),
+          'appearance matrix finalization must retain DOM and natural height');
+        check(answer.style.height==='' && near(rect(answer).height,rect(card).height),'answer must have no artificial height');
+        const code=article.querySelector('pre code'), pre=article.querySelector('pre');
+        check(css(code).fontSize==='12px' && near(parseFloat(css(code).lineHeight),19.2) &&
+          css(pre).fontSize==='12px' && near(parseFloat(css(pre).lineHeight),19.2),'code must use 12px/1.6');
+        check(pre.scrollWidth>pre.clientWidth && css(pre).overflowX==='auto','long code must scroll locally');
+        check(document.documentElement.scrollWidth<=document.documentElement.clientWidth,
+          'wide code must not overflow the document');
+        const rgb=value=>value.match(/[\d.]+/g).slice(0,3).map(Number);
+        const luminance=value=>rgb(value).map(v=>{ v/=255; return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4; })
+          .reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
+        const contrast=(a,b)=>{ const x=luminance(a),y=luminance(b); return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05); };
+        const canvas=css(document.body).backgroundColor;
+        check(canvas===(expectedDark?'rgb(37, 43, 40)':'rgb(253, 253, 251)'),
+          'canvas must use A warm-neutral light/dark colors');
+        check(css(bubble).backgroundColor===(expectedDark?'rgb(44, 51, 47)':'rgb(244, 245, 241)'),
+          'user surface must be neutral in both appearances');
+        const secondary=css(header).color;
+        for(const bg of [canvas,css(bubble).backgroundColor,css(pre).backgroundColor]){
+          check(contrast(secondary,bg)>=4.5,'secondary text contrast must meet 4.5:1 on neutral surfaces');
+        }
+        const danger=node('style-danger').querySelector('.card');
+        const errorColor=css(node('style-error').querySelector('.sysline')).color;
+        check(!transparent(danger) && css(danger).borderTopColor!==css(detail).borderTopColor &&
+          errorColor!==secondary && rgb(errorColor)[0]>rgb(errorColor)[1], 'error/danger must retain distinct styling');
+        const copy=article.querySelector('.code-block-copy');
+        // 先呈现代码按钮所在的 CV 条目；不能要求跳过布局的视口外控件立刻获得可见焦点。
+        copy.scrollIntoView({block:'center'});
+        await frames();
+        copy.focus();
+        for(let attempt=0;attempt<30;attempt++){
+          if(document.activeElement===copy && parseFloat(css(copy).opacity)>0.99) break;
+          await frames();
+        }
+        const focusAvailable=document.hasFocus();
+        if(focusAvailable){
+          check(document.activeElement===copy && article.querySelector('.code-block-container').matches(':focus-within') &&
+            parseFloat(css(copy).opacity)>0.99,'code copy must be visible on keyboard focus without hover');
+        }
+        copy.blur();
+        return `${expectedDark?'dark':'light'}/${viewportWidth}${focusAvailable?'':' (SKIP keyboard visibility: WebKit page has no focus)'}`;
+        """#
         Task { @MainActor in
             do {
                 let result = try await webView.callAsyncJavaScript(script,
                     arguments: ["benchmark": ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_PERFORMANCE"] == "1"],
                     in: nil, contentWorld: .page)
                 print(result ?? "missing result")
+                // :focus-within 依赖 WebKit 的真实焦点，后台非 key 窗口不能代表键盘使用场景。
+                let previouslyActive = NSWorkspace.shared.frontmostApplication
+                window.level = .floating
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate()
+                window.makeFirstResponder(webView)
+                defer {
+                  window.orderOut(nil)
+                  previouslyActive?.activate(options: [])
+                }
+                var appearances: [String] = []
+                for dark in [false, true] {
+                    let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.appearance = appearance
+                    webView.appearance = appearance
+                    // 同时覆盖断点两侧与恰好 700px 的包含边界。
+                    for width in [900, 701, 700, 480] {
+                        let size = NSSize(width: CGFloat(width), height: 650)
+                        window.setContentSize(size)
+                        webView.setFrameSize(size)
+                        webView.layoutSubtreeIfNeeded()
+                        let styleResult = try await webView.callAsyncJavaScript(styleScript,
+                            arguments: ["expectedDark": dark, "viewportWidth": width],
+                            in: nil, contentWorld: .page)
+                        appearances.append(styleResult as? String ?? "missing style result")
+                    }
+                }
+                print("PASS: A document-workbench computed styles, contrast, action clearance and final geometry: \(appearances.joined(separator: ", "))")
                 exit(0)
             } catch { print("FAIL: \(error)"); exit(1) }
         }

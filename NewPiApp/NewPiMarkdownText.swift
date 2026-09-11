@@ -29,20 +29,22 @@ struct NewPiChatEmptyStateView: View {
     var hasProject: Bool
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 42))
-                .foregroundStyle(.secondary)
-            Text(hasProject ? "Start a session" : "Open a project")
-                .font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: hasProject ? "text.bubble" : "folder")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(NewPiWorkbenchStyle.accent)
+                .padding(.bottom, 8)
+            Text(hasProject ? "从一个问题开始" : "选择你的工作项目")
+                .font(.title2.weight(.medium))
             Text(hasProject
-                ? "Ask NewPi to read, edit, or run commands in your project. Sessions are saved automatically."
-                : "Choose a project folder to load AGENTS.md, skills, and saved sessions.")
+                ? "在已有会话中输入任务，或从侧边栏新建会话。一起理解代码、定位问题，再逐步完成修改。"
+                : "从侧边栏打开项目文件夹，加载项目指令、技能与已保存的会话。")
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .lineSpacing(5)
                 .frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
+        .padding(32)
+        .background(NewPiWorkbenchStyle.surface)
     }
 }

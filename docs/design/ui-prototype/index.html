@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>NewPi · 界面设计 A/B 原型</title>
+  <link rel="stylesheet" href="prototype.css">
+  <script defer src="../../../NewPiApp/MarkdownRenderer/markdown-it.min.js"></script>
+  <script defer src="../../../NewPiApp/MarkdownRenderer/highlight.min.js"></script>
+  <script defer src="prototype.js"></script>
+</head>
+<body data-theme="light" data-variant="document" data-width="wide">
+  <header class="study-bar">
+    <div class="study-brand"><span class="study-dot"></span><strong>NewPi</strong><span class="study-label">INTERFACE STUDY / 01</span></div>
+    <div class="study-controls">
+      <div class="segmented" role="group" aria-label="设计方案">
+        <button type="button" data-variant="document" aria-pressed="true">A · 文档工作台</button>
+        <button type="button" data-variant="chat" aria-pressed="false">B · 轻量聊天</button>
+      </div>
+      <label class="control-label">场景<select id="scene-select">
+        <option value="complete">完成 · 长回答</option><option value="running">执行中</option>
+        <option value="approval">等待审批</option><option value="room">多模型协作</option>
+        <option value="error">连接失败</option><option value="empty">新会话</option>
+      </select></label>
+      <label class="control-label">外观<select id="theme-select"><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select></label>
+      <button type="button" id="width-toggle" class="study-button" aria-pressed="false">窄窗口</button>
+      <button type="button" id="reset-scene" class="study-button" title="清空当前场景的演示操作与草稿">重置场景</button>
+    </div>
+  </header>
+
+  <section class="study-intro" aria-label="方案说明">
+    <div><p class="eyebrow">少一点界面，多一点思考空间</p><h1 id="variant-title">让答案回到中心。</h1></div>
+    <p id="variant-description">文档式阅读面 · 收敛的过程信息 · 一个完整的输入区</p>
+  </section>
+
+  <main class="app-window" aria-label="NewPi 交互原型">
+    <aside class="sidebar" id="sidebar" aria-label="工作区导航">
+      <div class="sidebar-chrome"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><span class="app-mark" aria-hidden="true">n<span>·</span></span></div>
+      <div class="workspace-label">个人工作区</div>
+      <div class="project-card"><span class="project-icon" data-icon="folder"></span><div><strong>new-pi</strong><span>本地项目</span></div><span class="local-dot" title="本地演示项目"></span></div>
+      <button type="button" class="new-session" data-scene="empty"><span data-icon="plus"></span>新会话<span class="shortcut" aria-hidden="true">⌘ N</span></button>
+      <nav class="session-nav" aria-label="会话与聊天室">
+        <div class="nav-section-label"><span>会话</span><span>3</span></div>
+        <button type="button" class="nav-row" data-scene="complete"><span data-icon="message"></span><span><strong>让 Markdown 收尾更稳定</strong><small>刚刚 · 2 个文件</small></span></button>
+        <button type="button" class="nav-row" data-scene="running"><span data-icon="activity"></span><span><strong>检查长会话渲染</strong><small>今天 · 演示执行中</small></span></button>
+        <button type="button" class="nav-row" data-scene="error"><span data-icon="message"></span><span><strong>梳理项目结构</strong><small>昨天</small></span></button>
+        <div class="nav-section-label room-label"><span>聊天室</span><span>1</span></div>
+        <button type="button" class="nav-row" data-scene="room"><span data-icon="people"></span><span><strong>界面设计评审</strong><small>独立目录 · design-lab</small></span></button>
+      </nav>
+      <div class="sidebar-bottom"><div class="offline-label"><span data-icon="shield"></span>本地交互原型</div><button type="button" id="design-info" class="quiet-button"><span data-icon="info"></span>设计说明</button></div>
+    </aside>
+
+    <section class="workspace" aria-label="会话内容">
+      <header class="workspace-header">
+        <button type="button" id="sidebar-toggle" class="icon-button" aria-label="收起侧边栏" aria-controls="sidebar" aria-expanded="true"><span data-icon="sidebar"></span></button>
+        <div class="conversation-heading"><div><span id="mode-label" class="mode-label">会话</span><h2 id="conversation-title">让 Markdown 收尾更稳定</h2></div><p><span data-icon="folder"></span><span id="working-directory">~/personal/projects/new-pi</span></p></div>
+        <button type="button" id="changes-button" class="quiet-button header-action"><span data-icon="diff"></span><span>改动 <span class="count">2</span></span></button>
+      </header>
+
+      <div id="room-bar" class="room-bar" hidden><div class="role-stack" aria-label="协作角色"><span>架</span><span>程</span><span>审</span></div><span>3 位角色</span><span class="room-divider"></span><span>当前阶段</span><strong>讨论</strong><span class="room-note">手动推进</span></div>
+      <div id="transcript" class="transcript" tabindex="0" aria-label="对话正文"><div id="messages" class="reading-column"></div></div>
+      <div class="jump-slot"><button type="button" id="jump-latest" class="jump-latest" hidden><span data-icon="arrowDown"></span>回到最新</button></div>
+
+      <footer class="composer-dock">
+        <div class="composer-wrap">
+          <div class="run-line"><span class="status-indicator" id="status-indicator"></span><span id="run-status" role="status" aria-live="polite">本轮已完成</span><span id="run-detail" class="run-detail">2 个文件 · 19 项检查</span><button type="button" id="metrics-button" class="metrics-button" aria-label="查看用量详情"><span data-icon="chart"></span>用量</button></div>
+          <form id="composer-form" class="composer" aria-label="消息输入">
+            <div id="attachment-strip" class="attachment-strip" hidden><span data-icon="image"></span><span>界面参考.png <small>演示附件，不读取文件</small></span><button type="button" id="remove-attachment" class="icon-button" aria-label="移除演示附件"><span data-icon="close"></span></button></div>
+            <label class="sr-only" for="message-input">消息草稿</label>
+            <textarea id="message-input" rows="3" placeholder="继续提问，或告诉 NewPi 下一步做什么…"></textarea>
+            <div class="composer-tools"><button type="button" id="attach-button" class="icon-button" aria-label="添加演示图片"><span data-icon="plus"></span></button><label class="model-selector"><span data-icon="sparkle"></span><span class="sr-only">演示模型</span><select id="model-select"><option>Claude Sonnet</option><option>GPT-5</option><option>本地模型</option></select></label><span class="composer-spacer"></span><span id="input-hint" class="input-hint">↵ 发送 · ⇧↵ 换行</span><button type="submit" id="primary-action" class="primary-action" aria-label="发送演示消息" disabled><span data-icon="arrowUp"></span></button></div>
+          </form>
+          <p class="prototype-notice">仅演示交互，不调用模型、不执行命令、不读写会话或项目文件。</p>
+        </div>
+      </footer>
+    </section>
+  </main>
+
+  <footer class="study-footer"><span><strong id="variant-tag">A / DOCUMENT</strong>同一内容与状态，只比较视觉方案</span><span>⌘ / Ctrl + Enter 发送演示消息 · Esc 关闭弹窗</span></footer>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="detail-dialog" aria-labelledby="dialog-title"><header class="dialog-header"><h2 id="dialog-title"></h2><button type="button" id="close-dialog" class="icon-button" aria-label="关闭弹窗"><span data-icon="close"></span></button></header><div id="dialog-content"></div></dialog>
+  <noscript><p class="noscript">请启用 JavaScript 查看交互原型。页面不发送网络请求。</p></noscript>
+</body>
+</html>

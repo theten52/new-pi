@@ -1595,6 +1595,7 @@ struct ChatRoomDetailView: View {
             // 输入栏
             inputBar
         }
+        .background(NewPiWorkbenchStyle.surface)
         // 历史消息在控制器创建时加载；runningTask 不随视图显隐取消——审批 continuation
         // 由控制器持有的 approvalManager 承载，切走时挂起、切回时审批 sheet 自动重弹。
         // 发言收尾的落底对齐在渲染器 JS 侧完成（forkLock 翻转时的 RAF 追平）。
@@ -1644,10 +1645,14 @@ struct ChatRoomDetailView: View {
     
     private var headerBar: some View {
         HStack {
-            VStack(alignment: .leading) {
-                Text(runtime.chatroom.name)
-                    .font(.headline)
-                HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("聊天室")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(runtime.chatroom.name)
+                        .font(.headline)
+                        .lineLimit(1)
                     PhaseBadge(phase: runtime.chatroom.currentPhase)
                     if runtime.chatroom.currentPhase == .execution || runtime.chatroom.currentPhase == .review {
                         Text("第 \(runtime.chatroom.reviewRoundCount) 轮")
@@ -1655,6 +1660,12 @@ struct ChatRoomDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Label(runtime.chatroom.projectPath, systemImage: "folder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help("聊天室独立工作目录：\(runtime.chatroom.projectPath)")
             }
             
             Spacer()
@@ -1667,7 +1678,7 @@ struct ChatRoomDetailView: View {
                         .padding(4)
                         .background(
                             runtime.currentSpeaker?.id == role.id
-                                ? Color.accentColor.opacity(0.2)
+                                ? NewPiWorkbenchStyle.accent.opacity(0.12)
                                 : Color.clear
                         )
                         .clipShape(Circle())
@@ -1699,8 +1710,10 @@ struct ChatRoomDetailView: View {
                 Image(systemName: "ellipsis.circle")
             }
         }
-        .padding()
-        .background(.bar)
+        .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+        .padding(.vertical, 12)
+        .background(NewPiWorkbenchStyle.surface)
+        .overlay(alignment: .bottom) { Divider() }
     }
     
     // MARK: - 消息列表
@@ -1732,7 +1745,7 @@ struct ChatRoomDetailView: View {
                     Button {
                         docController.scrollToBottom()
                     } label: {
-                        Label("Jump to latest", systemImage: "arrow.down")
+                        Label("回到最新", systemImage: "arrow.down")
                             .font(.callout.weight(.medium))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -1756,74 +1769,19 @@ struct ChatRoomDetailView: View {
 
     private var inputBar: some View {
         VStack(spacing: 8) {
-            // 操作按钮
-            HStack {
-                // 推进发言按钮
-                Button {
-                    controller.triggerNextSpeaker()
-                } label: {
-                    Label("推进下一发言", systemImage: "play.fill")
+            // 宽窗口同一行，窄窗口两行；阶段与角色控制不挤占正文输入区。
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    speakerActions
+                    Spacer(minLength: 16)
+                    phaseActions
                 }
-                .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
-
-                // 指定发言人
-                Button {
-                    showingRolePicker = true
-                } label: {
-                    Label("@指定", systemImage: "at")
-                }
-                .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
-
-                Spacer()
-
-                // 阶段流转按钮
-                switch runtime.chatroom.currentPhase {
-                case .discussion:
-                    Button("结束讨论") {
-                        // 决策 #4：由用户选择走向——多方案时询问发起投票还是直接执行
-                        if extractCandidates().count >= 2 {
-                            showingEndDiscussionDialog = true
-                        } else {
-                            endDiscussion(.proceedDirect)
-                        }
-                    }
-                    .disabled(runtime.isRunning)
-                case .voting:
-                    Button("投票") {
-                        showingVoteSheet = true
-                    }
-                    // 决策 #19：投票后由用户手动点击「进入执行」
-                    Button("进入执行") {
-                        advancePhase()
-                    }
-                    .disabled(runtime.chatroom.selectedOptionID == nil)
-                case .execution:
-                    Button("进入 Review") {
-                        advancePhase()
-                    }
-                    .disabled(runtime.isRunning)
-                case .review:
-                    if runtime.chatroom.pausedAtRoundLimit == true {
-                        Text("流程已暂停，请在上方选择处理方式")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        HStack {
-                            Button("通过") {
-                                review(approved: true)
-                            }
-                            // 轮数上限时不再禁用：handleReviewResult 会暂停并等待用户解锁
-                            Button("需修改") {
-                                review(approved: false)
-                            }
-                        }
-                        .disabled(runtime.isRunning)
-                    }
-                case .completed:
-                    Text("已完成")
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    speakerActions
+                    phaseActions
                 }
             }
+            .controlSize(.small)
 
             // 状态栏（对齐 session）：发言状态（正在思考/等待审批）+ 累计用量 + 上下文占用。
             // 聊天室没有的维度（token 速率/缓存命中率/全局模型切换）不硬加。
@@ -1833,28 +1791,47 @@ struct ChatRoomDetailView: View {
                 contextText: chatroomContextText
             )
 
-            // 输入框（Phase A：复用 Session 的多行 Composer）——固定 4 行、超出后滚动，
-            // Return 发送 / Shift+Return 换行；发言进行中保持可输入（插话走 steering）。
-            NewPiComposerTextView(
-                text: $inputText,
-                placeholder: "输入消息…（Return 发送，Shift+Return 换行；发言中发送 = 插话）",
-                onSubmit: {
-                    sendUserMessage()
-                }
-            )
-            .frame(height: NewPiComposerScrollView.fixedHeight)
+            NewPiComposerSurface {
+                VStack(alignment: .leading, spacing: 8) {
+                    // 保留聊天室运行中 Return 插话的既有行为，不把它改成停止。
+                    NewPiComposerTextView(
+                        text: $inputText,
+                        placeholder: runtime.isRunning ? "写下你的补充，Return 发送插话…" : "向聊天室发送消息…",
+                        onSubmit: sendUserMessage
+                    )
+                    .frame(height: NewPiComposerScrollView.fixedHeight)
+                    .help("Return 发送，Shift+Return 换行；发言中发送 = 插话")
 
-            HStack {
-                Spacer()
-
-                Button("发送") {
-                    sendUserMessage()
+                    HStack(spacing: 12) {
+                        Text(runtime.isRunning ? "发言中可插话" : "Return 发送 · Shift+Return 换行")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        // 常驻占位保证运行状态变化不重建输入组件；插话与停止是两个明确动作。
+                        Button("发送插话", action: sendUserMessage)
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .opacity(runtime.isRunning ? 1 : 0)
+                            .disabled(!runtime.isRunning || inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityHidden(!runtime.isRunning)
+                        NewPiComposerPrimaryAction(
+                            isRunning: runtime.isRunning,
+                            canSend: !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                            onSend: sendUserMessage,
+                            onStop: { controller.cancelRunning() }
+                        )
+                    }
                 }
-                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding()
-        .background(.bar)
+        .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+        .frame(maxWidth: NewPiWorkbenchStyle.maxReadingWidth)
+        .frame(maxWidth: .infinity)
+        .background(NewPiWorkbenchStyle.surface)
+        .animation(nil, value: runtime.isRunning)
         .confirmationDialog("讨论有多个候选方案", isPresented: $showingEndDiscussionDialog, titleVisibility: .visible) {
             Button("发起投票") { endDiscussion(.startVoting) }
             Button("直接进入执行（跳过投票）") { endDiscussion(.proceedDirect) }
@@ -1873,6 +1850,56 @@ struct ChatRoomDetailView: View {
         .sheet(isPresented: $showingRolePicker) {
             RolePickerSheet(roles: runtime.chatroom.configuredRoles) { roleID in
                 controller.triggerSpeaker(roleID: roleID)
+            }
+        }
+    }
+
+    private var speakerActions: some View {
+        HStack(spacing: 12) {
+            Button { controller.triggerNextSpeaker() } label: {
+                Label("推进下一发言", systemImage: "play.fill")
+            }
+            Button { showingRolePicker = true } label: {
+                Label("指定角色", systemImage: "at")
+            }
+        }
+        .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
+    }
+
+    @ViewBuilder
+    private var phaseActions: some View {
+        HStack(spacing: 8) {
+            switch runtime.chatroom.currentPhase {
+            case .discussion:
+                Button("结束讨论") {
+                    if extractCandidates().count >= 2 {
+                        showingEndDiscussionDialog = true
+                    } else {
+                        endDiscussion(.proceedDirect)
+                    }
+                }
+                .disabled(runtime.isRunning)
+            case .voting:
+                Button("投票") { showingVoteSheet = true }
+                Button("进入执行") { advancePhase() }
+                    .disabled(runtime.chatroom.selectedOptionID == nil)
+            case .execution:
+                Button("进入 Review") { advancePhase() }
+                    .disabled(runtime.isRunning)
+            case .review:
+                if runtime.chatroom.pausedAtRoundLimit == true {
+                    Text("流程已暂停，请在上方选择处理方式")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("通过") { review(approved: true) }
+                        .disabled(runtime.isRunning)
+                    Button("需修改") { review(approved: false) }
+                        .disabled(runtime.isRunning)
+                }
+            case .completed:
+                Text("已完成")
+                    .foregroundStyle(.secondary)
             }
         }
     }

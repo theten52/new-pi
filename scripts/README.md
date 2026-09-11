@@ -166,6 +166,22 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 探针使用真实生产源码，只有诊断 logger/metrics 替换为空实现，滚动 sessionID 为 nil，不写用户滚动位置。
 文件读取紧接着 fixture 写入，可能命中 OS 页缓存；不能作为真实磁盘冷读或整个 App 的首屏性能结论。
 
+## 文档工作台真实组件 probe（2026-09-12）
+
+仓库根目录运行 `NEWPI_WORKBENCH_UI=1 bash scripts/validation/check-transcript-cold-load.sh`。
+该模式选择 `WorkbenchUIChecks.swift`（`-Onone`），使用真实共享状态栏、composer 外壳/主按钮、生产 NSTextView、Coordinator 与 WKWebView；
+业务状态和指标为内存 fixture，不调用模型、不访问凭据或用户会话，不代表完整 App、侧边栏或聊天室阶段集成验收，也不是默认冷加载/性能模式。
+需要 macOS 图形登录会话；采用进程内公开 AppKit 接口，不请求系统辅助功能或屏幕录制权限。
+
+900/620 × 浅深四张 NSView + WK snapshot 合成截图默认写入 `/private/tmp/newpi-ui/`：
+`workbench-light.png`、`workbench-dark.png`、`workbench-narrow.png`、`workbench-narrow-dark.png`；可用 `NEWPI_UI_SNAPSHOTS` 改目录。
+本次交接结果为 **PARTIAL**：四张截图已生成，独立键盘/DOM 检查 PASS；`SwiftUI.AccessibilityNode` 未声明完整 `NSAccessibilityProtocol`，
+9 项 AX 按钮边界/用量 popover/disabled-send-stop 按压检查 **SKIP**，不能称按钮或用量点击通过，退出码 0 不等于全部通过。
+
+严格入口：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_UI_STRICT=1 bash scripts/validation/check-transcript-cold-load.sh`。
+实际 FAIL 总会非零退出；strict 下任何 SKIP 也失败，故上述 AX 限制仍在时 strict 会失败。
+本轮最终 WK/Debug 复跑、cold/performance 结果待主 agent 回填；人工验收清单及证据边界见 [实施记录](../docs/dev-notes/2026-09-12-document-workbench-ui.md)。
+
 ## 共用审批 UI 验证
 
 `bash scripts/validation/check-approval-ui.sh` 编译真实 `NewPiApprovalContent`，通过独立 Accessibility 进程操作按钮/菜单并验证回调范围：
