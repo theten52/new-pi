@@ -13,6 +13,11 @@ cp -R "$ROOT/NewPiApp/MarkdownRenderer" "$TMP/Probe.app/Contents/Resources/Markd
 if [[ -n "${NEWPI_RENDERER_REVISION:-}" ]]; then
   git -C "$ROOT" show "${NEWPI_RENDERER_REVISION}:NewPiApp/MarkdownRenderer/markdown-renderer.js" > "$TMP/Probe.app/Contents/Resources/MarkdownRenderer/markdown-renderer.js"
 fi
+if [[ -n "${NEWPI_TRANSCRIPT_REVISION:-}" ]]; then
+  for resource in transcript-document.js transcript-document.css; do
+    git -C "$ROOT" show "${NEWPI_TRANSCRIPT_REVISION}:NewPiApp/MarkdownRenderer/$resource" > "$TMP/Probe.app/Contents/Resources/MarkdownRenderer/$resource"
+  done
+fi
 python3 - "$ROOT" "$TMP" <<'PY'
 from pathlib import Path
 import sys, plistlib, uuid

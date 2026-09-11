@@ -13,7 +13,7 @@ html, body {
 }
 
 #transcript {
-  padding: 16px;
+  padding: 16px 16px 32px;
   box-sizing: border-box;
 }
 
@@ -23,6 +23,11 @@ html, body {
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
   margin-bottom: 16px;
+}
+
+/* 尾部留白只由文档 padding 提供；详情折叠后，最后一个 DOM 节点可能并不可见。 */
+.ti:nth-last-child(1 of .ti:not(.detail-hidden)) {
+  margin-bottom: 0;
 }
 
 /* 按条目类型给更接近真实值的估算高：冷恢复锚点重定位的精度取决于估算与真实的差距

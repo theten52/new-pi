@@ -1021,35 +1021,8 @@
     // detailTurnID 有 → 标记为 detail-item（遵守组折叠状态）；无 → 移除（最终答复移出组）。
     applyDetailGroupClass(el, op, state);
 
-    applyStreamingHeightStep(el, op, state);
-
     state.kind = op.kind;
     return el;
-  }
-
-  // ===== 流式高度量化（STREAM-HEIGHT-STEP）=====
-  // ccbb69e 在旧 per-message 路径上的等价实现（该路径随 e173f11 删除而丢失，回归根因）：
-  // 实测（sample，两次独立确认）主线程大比例阻塞在 RBLayer display →
-  // wait_for_allocations——内容每次真实长高都触发底部 tile/表面重分配，秒级阻塞。
-  // 高度量化到 160pt 向上步进：未越档不改 height（零布局成本），重分配次数降
-  // 一到两个数量级。多余空隙 ≤160pt（视口钉底时文本略高于底缘），完成态落回自然高度。
-  const streamingHeightStep = 160;
-  function applyStreamingHeightStep(el, op, state) {
-    if (op.streaming) {
-      // el 可能已经被上一批设置了固定 height；offsetHeight 此时只会返回旧档位，
-      // 无法感知内部内容继续增长。scrollHeight 会包含溢出的真实内容高度，因而能
-      // 正确跨入后续 160pt 档位，避免长回答永久卡在第一档。
-      const natural = Math.max(el.scrollHeight, el.firstElementChild ? el.firstElementChild.scrollHeight : 0);
-      const stepped = Math.ceil(Math.max(1, natural) / streamingHeightStep) * streamingHeightStep;
-      if (stepped > (state.steppedHeight || 0)) {
-        state.steppedHeight = stepped;
-        el.style.height = stepped + "px";
-      }
-    } else if (state.steppedHeight) {
-      // 完成态（renderFinal 已重渲染）：去除量化占位，高度落回内容自然值。
-      state.steppedHeight = 0;
-      el.style.height = "";
-    }
   }
 
   // 按 op.detailTurnID 维护条目的 detail-item / data-turn-id / detail-hidden class。

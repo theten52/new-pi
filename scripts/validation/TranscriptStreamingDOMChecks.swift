@@ -74,7 +74,7 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         apply([{op:'upsert',id:'answer',kind:'assistant',speaker:'Role A',body:'A paragraph grows\n\n```swift\nlet x = 1\n```',streaming:false}]);
         check(renders.final === 1, 'message end must freeze before run ends');
         check(!answer.querySelector('.streaming-caret'), 'must not reintroduce disabled caret');
-        check(answer.style.height === '', 'message end must release stepped height');
+        check(answer.style.height === '', 'message end must retain natural height');
         check(!!answer.querySelector('pre code'), 'final markdown must retain code block');
         check(node('user').textContent.includes('User steering'), 'user steering must not disappear');
         apply([{op:'forkLock',locked:false}]);
@@ -206,6 +206,101 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         } finally {
           window.setTimeout = originalTimeout;
         }
+        // 正文/思考/工具共用自然高度与文档尾距，不允许完成态释放人工占位。
+        const frames = () => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        const history = Array.from({length:25},(_,i)=>({
+          op:'upsert',id:`gap-history-${i}`,kind:'user',body:`History ${i}\n`+'history line\n'.repeat(5)
+        }));
+        apply([{op:'reset'}, ...history, {op:'forkLock',locked:true},
+          {op:'upsert',id:'gap-group',kind:'detailGroup',detailTurnID:'gap-turn',collapsed:false,body:''},
+          {op:'upsert',id:'gap-thinking',kind:'thinking',detailTurnID:'gap-turn',body:'Thinking',streaming:true},
+          {op:'scrollToBottom',smooth:false}]);
+        await frames();
+        // 新建历史的 CV 估算先收敛；后面的类型切换不再额外补滚动意图。
+        for(let attempt=0;attempt<30;attempt++){
+          if(Math.abs(window.innerHeight-node('gap-thinking').getBoundingClientRect().bottom-32)<2) break;
+          apply([{op:'scrollToBottom',smooth:false}]);
+          await frames();
+        }
+        const geometry = [];
+        const checkTail = (id, stage) => {
+          const el=node(id), child=el.firstElementChild;
+          const rect=el.getBoundingClientRect();
+          check(el.style.height === '', stage+': no stepped inline height');
+          check(Math.abs(rect.height-child.getBoundingClientRect().height)<1,
+            stage+': row must fit its visible content');
+          const gap=window.innerHeight-rect.bottom;
+          check(Math.abs(gap-32)<2, stage+': bottom gap must be 32px, got '+gap);
+          geometry.push({stage,gap,height:rect.height});
+        };
+        checkTail('gap-thinking','thinking');
+        apply([
+          {op:'upsert',id:'gap-thinking',kind:'thinking',detailTurnID:'gap-turn',body:'Thinking',streaming:false},
+          {op:'upsert',id:'gap-answer',kind:'assistant',detailTurnID:'gap-turn',body:'line 1',streaming:true}
+        ]);
+        await frames();
+        checkTail('gap-answer','short answer');
+        let gapBody='line 1', previousHeight=node('gap-answer').getBoundingClientRect().height;
+        for(let i=2;i<=40;i++){
+          gapBody+='\n'+'line '+i;
+          apply([{op:'upsert',id:'gap-answer',kind:'assistant',detailTurnID:'gap-turn',body:gapBody,streaming:true}]);
+          await frames();
+          checkTail('gap-answer','growing answer '+i);
+          const height=node('gap-answer').getBoundingClientRect().height;
+          check(height>previousHeight && height-previousHeight<40, 'one line must grow naturally, not in 160px steps');
+          previousHeight=height;
+        }
+        apply([{op:'upsert',id:'gap-answer',kind:'assistant',detailTurnID:'gap-turn',body:gapBody,streaming:false}]);
+        await frames();
+        checkTail('gap-answer','answer boundary');
+        check(Math.abs(node('gap-answer').getBoundingClientRect().height-previousHeight)<1,
+          'same source at message end must not shrink');
+        apply([{op:'upsert',id:'gap-tool',kind:'tool',detailTurnID:'gap-turn',toolName:'bash',
+          command:'echo test',toolRunning:true,body:'',streaming:false}]);
+        await frames();
+        checkTail('gap-tool','running tool');
+        node('gap-tool').querySelector('.card-hd').click();
+        await frames();
+        checkTail('gap-tool','expanded tool');
+        apply([
+          {op:'upsert',id:'gap-tool',kind:'tool',detailTurnID:'gap-turn',toolName:'bash',
+            command:'echo test',toolRunning:false,body:'test',streaming:false},
+          {op:'upsert',id:'gap-next',kind:'assistant',detailTurnID:'gap-turn',body:'Next answer',streaming:true}
+        ]);
+        await frames();
+        checkTail('gap-next','next answer');
+        check(node('gap-tool').querySelector('.card').classList.contains('expanded'),
+          'completed tool must retain manual expansion');
+        // 尾部隐藏节点仍存在，折叠后的最后可见 disclosure 也只能留同一个底距。
+        apply([{op:'upsert',id:'gap-group',kind:'detailGroup',detailTurnID:'gap-turn',collapsed:true,body:''}]);
+        await frames();
+        checkTail('gap-group','collapsed detail');
+        apply([
+          {op:'upsert',id:'gap-next',kind:'assistant',body:'Next answer',streaming:false},
+          {op:'forkLock',locked:false}
+        ]);
+        await frames();
+        checkTail('gap-next','final answer');
+        // 离底阅读时，工具插入和正文增长仍应保住既有顶部锚点。
+        apply([{op:'jumpTo',id:'gap-history-5'}]);
+        await new Promise(r=>setTimeout(r,1000));
+        window.dispatchEvent(new WheelEvent('wheel',{deltaY:-1}));
+        await frames();
+        const anchorBefore=node('gap-history-5').getBoundingClientRect().top;
+        apply([{op:'forkLock',locked:true},
+          {op:'upsert',id:'gap-last-tool',kind:'tool',toolName:'read',body:'result',toolRunning:false},
+          {op:'upsert',id:'gap-last-answer',kind:'assistant',body:'More text\n'.repeat(50),streaming:true}]);
+        await frames();
+        check(Math.abs(node('gap-history-5').getBoundingClientRect().top-anchorBefore)<1,
+          'reading history must not be pulled to new output');
+        apply([{op:'scrollToBottom',smooth:false}]);
+        await frames();
+        checkTail('gap-last-answer','jump back to latest');
+        apply([{op:'reset'},{op:'upsert',id:'short-answer',kind:'assistant',body:'Short answer',streaming:true}]);
+        await frames();
+        check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-16)<1,
+          'short conversation must stay top aligned');
+        check(node('short-answer').style.height==='', 'short conversation must also use natural height');
         if (benchmark) {
           const results = [];
           const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -240,7 +335,7 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
           // JS synchronous apply timings include serialization and forced layout, not GPU/frame presentation.
           return JSON.stringify({benchmark:'WKWebView synchronous apply; not end-to-end latency', results},null,2);
         }
-        return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting and warmer pause/resume`;
+        return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting, warmer pause/resume, natural-height alternation (${geometry.length} checks), 32px tail gap and history anchor`;
         """#
         Task { @MainActor in
             do {

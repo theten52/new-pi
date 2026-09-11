@@ -102,6 +102,8 @@ struct TranscriptPresentationChecks {
         let hostView = host.view
         window.title = "NewPi synthetic 200-line presentation replay"
         window.setContentSize(NSSize(width: 1100, height: 780))
+        // 只用于可见呈现探针，避免其它应用抢前台导致 RAF 暂停；A/B 使用相同窗口层级。
+        window.level = .floating
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
@@ -174,6 +176,9 @@ struct TranscriptPresentationChecks {
             var applied = 0
             var dispatches = 0
             while applied < chunks.count {
+                guard window.occlusionState.contains(.visible) else {
+                    throw Failure(message: "Replay window became occluded during turn \(turn); not a presentation sample")
+                }
                 let available = progress.withLock { $0 }
                 if available > applied {
                     applied = available
@@ -195,7 +200,7 @@ struct TranscriptPresentationChecks {
             model.controller.endLiveApply()
             let complete = try await webView.callAsyncJavaScript("""
                 await new Promise((resolve,reject)=>{
-                  const timeout=setTimeout(()=>reject(new Error('No animation frame in visible replay')),3000);
+                  const timeout=setTimeout(()=>reject(new Error('No animation frame; visibility='+document.visibilityState)),3000);
                   requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timeout);resolve();}));
                 });
                 return document.querySelector('main').lastElementChild.querySelector('pre code').textContent === expected;
@@ -223,6 +228,101 @@ struct TranscriptPresentationChecks {
                 throw Failure(message: "MainActor unavailable for more than 500ms")
             }
             try await Task.sleep(for: .seconds(1))
+        }
+        if ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_REVISION"] == nil {
+            try await checkAlternation(model: model, webView: webView)
+        }
+    }
+
+    @MainActor private static func checkAlternation(model: PresentationModel, webView: WKWebView) async throws {
+        var lags: [Double] = []
+        let heartbeat = Task { @MainActor in
+            while !Task.isCancelled {
+                let expected = ContinuousClock.now.advanced(by: .milliseconds(100))
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                lags.append(max(0, milliseconds(expected.duration(to: .now))))
+            }
+        }
+        defer { heartbeat.cancel() }
+        let turn = "alternation", groupID = UUID()
+        model.running = true
+        model.items.append(NewPiTranscriptItem(id: groupID, kind: .detailGroup(collapsed: false),
+            body: "", detailTurnID: turn))
+        var latest = model.items
+        for cycle in 1...3 {
+            let answerID = UUID()
+            latest.append(NewPiTranscriptItem(id: answerID, kind: .assistant, body: "", detailTurnID: turn))
+            var body = ""
+            for line in 1...30 {
+                body += "Cycle \(cycle) line \(line)\n"
+                latest[latest.count-1] = NewPiTranscriptItem(id: answerID, kind: .assistant,
+                    body: body, detailTurnID: turn)
+                model.controller.applyLive(items: latest, isStreaming: true,
+                    streamingBubbleComplete: false, tintHues: [:])
+                try await Task.sleep(for: .milliseconds(45))
+            }
+            try await checkTail(webView: webView, id: answerID, stage: "streaming \(cycle)")
+            model.controller.applyLive(items: latest, isStreaming: true,
+                streamingBubbleComplete: true, tintHues: [:])
+            try await checkTail(webView: webView, id: answerID, stage: "message end \(cycle)")
+            for tool in 1...2 {
+                let toolID = UUID()
+                latest.append(NewPiTranscriptItem(id: toolID, kind: .tool(name: "bash", state: .running),
+                    body: "", toolCommand: "echo \(tool)", detailTurnID: turn))
+                model.controller.applyLive(items: latest, isStreaming: true,
+                    streamingBubbleComplete: true, tintHues: [:])
+                try await checkTail(webView: webView, id: toolID, stage: "tool \(cycle)/\(tool)")
+                latest[latest.count-1] = NewPiTranscriptItem(id: toolID,
+                    kind: .tool(name: "bash", state: .completed(isError: false)),
+                    body: "Synthetic result", toolCommand: "echo \(tool)", detailTurnID: turn)
+            }
+        }
+        guard let groupIndex = latest.firstIndex(where: { $0.id == groupID }) else {
+            throw Failure(message: "Missing detail group fixture")
+        }
+        latest[groupIndex] = NewPiTranscriptItem(id: groupID, kind: .detailGroup(collapsed: true),
+            body: "", detailTurnID: turn)
+        let finalID = UUID()
+        latest.append(NewPiTranscriptItem(id: finalID, kind: .assistant, body: "Alternation complete"))
+        model.controller.applyLive(items: latest, isStreaming: false,
+            streamingBubbleComplete: true, tintHues: [:])
+        model.items = latest
+        model.running = false
+        model.confettiTrigger += 1
+        model.controller.endLiveApply()
+        try await checkTail(webView: webView, id: finalID, stage: "collapsed details and final answer")
+        try await Task.sleep(for: .seconds(2))
+        guard (lags.max() ?? 0) <= 500 else {
+            throw Failure(message: "Alternating output exceeded 500ms MainActor lag")
+        }
+        print(String(format: "PASS: native 3 answer/tool cycles, 6 tools, final collapse, 32px gap; maxMainActorLag=%.1fms",
+            lags.max() ?? 0))
+    }
+
+    @MainActor private static func checkTail(webView: WKWebView, id: UUID, stage: String) async throws {
+        let gap = try await webView.callAsyncJavaScript("""
+            return await new Promise((resolve,reject)=>{
+              let frame;
+              const timeout=setTimeout(()=>{
+                cancelAnimationFrame(frame);
+                reject(new Error('Tail did not settle: '+stage+'; visibility='+document.visibilityState));
+              },3000);
+              function check(){
+                const el=document.querySelector('[data-iid="'+id+'"]');
+                if(el){
+                  const rect=el.getBoundingClientRect(), gap=innerHeight-rect.bottom;
+                  if(el.style.height==='' && Math.abs(gap-32)<2 &&
+                    Math.abs(rect.height-el.firstElementChild.getBoundingClientRect().height)<1){
+                    clearTimeout(timeout); resolve(gap); return;
+                  }
+                }
+                frame=requestAnimationFrame(check);
+              }
+              frame=requestAnimationFrame(check);
+            });
+            """, arguments: ["id": id.uuidString, "stage": stage], in: nil, contentWorld: .page) as? Double
+        guard let gap, abs(gap - 32) < 2 else {
+            throw Failure(message: "Invalid native tail gap for \(stage)")
         }
     }
 

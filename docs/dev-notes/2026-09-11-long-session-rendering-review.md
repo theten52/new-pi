@@ -1638,3 +1638,152 @@ provider 编码/HTTP/首 delta、后台消费、MainActor flush、JS 投递/完�
 验证中发现既有 shutdown 测试只等 provider 把 delta 入队，就要求 Session 持久化完整文本，
 存在调度竞态。现改为先订阅 Session 事件、等实际收到目标正文后再 shutdown，并同时校验
 trace 跨 actor/Task 的继承；没有为测试增加等待毫秒数，也没有改生产取消语义。
+
+## 15. 正文与工具交替时的底部留白跳动
+
+### 15.1 现象与已确认机制
+
+用户反馈：流式正文底部离输入区域较远，工具执行详情却比较贴底；
+正文 → 工具 → 正文交替时，视觉上反复上移、贴底、再上移。
+
+以 `e6d9929` 为本轮修改前基线，相关实现是：
+
+1. [transcript-document.js](../../NewPiApp/MarkdownRenderer/transcript-document.js)
+   对所有 `op.streaming` 条目调用 `applyStreamingHeightStep`，
+   把外层行高向上取整为 160px 的倍数；同一流式阶段只增不减。
+2. 普通工具条目以 `toolRunning` 表示执行中，并不是 `op.streaming`，
+   因而通常保持自然高度。正文在 messageEnd 变为非流式后，又清空固定 `style.height`。
+3. [transcript-document.css](../../NewPiApp/MarkdownRenderer/transcript-document.css)
+   原本是文档四边 16px padding，加每条消息 16px 下边距。
+   无人工占位时，最后可见卡片到文档底部的留白实际上已约为 32px。
+4. `Scroll.beginBatch/endBatch` 按既有底部跟随意图重新钉底；
+   内容高度改变时滚动目标随之变化，不是原生额外增加了一个 160px spacer。
+
+所以用户感知的“固定高度”主要是**人工档位余量**，不是真的固定底距：
+例如自然高 90px 的正文被撑为 160px，多出 70px；到终态就释放这 70px。
+在长会话底部跟随时，该空白会直接推高卡片的可见内容。
+工具执行状态切换再叠加真实的新条目/折叠，放大了阶段交替的视觉不一致。
+
+160px 量化是较早的 RenderBox 卡顿缓解措施。§13 已定位并移除状态图标 pulse，
+但这并不自动证明高度量化可以安全撤除，因此本轮仍做真实 SwiftUI 宿主回放和采样。
+本节更新当前策略；前面章节对量化实现的描述保留为历史调查依据。
+
+### 15.2 候选方案与取舍
+
+| 方案 | 作用 | 风险/代价 | 本轮决定 |
+|---|---|---|---|
+| A：流式也使用内容自然高度 | 消除 160px 档位余量及完成时释放占位；正文和工具使用同一布局规则 | 实际内容每次长高都可能触发布局/合成，必须检查原生呈现是否退化 | **采用**，经回放验收 |
+| B：统一文档底部 24–32px 留白 | 给各类最后条目同样的呼吸空间，不分别补偿正文和工具 | 必须识别最后一个可见条目，否则隐藏详情节点会导致下边距叠加 | **采用 32px**；延续原自然高度条目的实际底距 |
+| C：边界尽量同批，并遵守现有底部跟随/上翻保锚 | 避免同批多次相互矛盾的滚动写入；尊重用户阅读位置 | 如扩大为延迟所有 messageEnd/toolStart 事件，会改变实时反馈与业务语义 | **沿用已有机制**，不新增延迟或改事件队列 |
+| D：给工具也分配 160px 占位 | 看起来与正文一样“离底较远” | 仍然保留档位跳动、终态释放、工具卡片大量空白，属于补偿症状 | 不采用 |
+| E：对 height/scroll 加过渡动画 | 短暂掩盖一次跳变 | 连续流式时动画反复重启，可能持续漂移；与滚动钉底及合成性能冲突 | 不采用 |
+
+最终选择 **A + B，保留 C 的现有滚动纪律**。不通过降低刷新频率、关闭内容显示、
+恢复旧多 WebView 高度桥，或再添加一个原生 scroll writer 来绕开问题。
+
+### 15.3 实际修改与不变项
+
+- 删除 `applyStreamingHeightStep` 及其调用，不再读取 `scrollHeight` 来确定档位，
+  也不再写入/清除流式专属 `height`。
+- 文档改为 `padding: 16px 16px 32px`。
+- 用 `.ti:nth-last-child(1 of .ti:not(.detail-hidden))` 清除最后可见行的下边距。
+  最后 DOM 节点可能是折叠隐藏的工具/思考，不使用简单的 `:last-child`。
+  相邻可见条目的 16px 间距不变；空会话没有虚构消息，短会话仍顶对齐。
+- 保留流式正文 `content-visibility: visible`、完成后恢复 `auto`、
+  intrinsic 高度缓存、Warmer、`setNeedsDisplay(.infinite)`、单飞/latest-only 桥接、
+  40ms 冲刷下限，以及原有 Scroll 状态机。
+- 没有更改手动展开/收起详情、最终详情自动折叠、消息状态和工具执行时序。
+- 没有修改正文光标策略：当前 renderer 内部 `enableCaret = false`，
+  虽然调用方传入 `caret: true`，实际没有显示光标；本轮未重新引入动画或影响布局。
+
+这里的 **32px 指最后可见卡片/行外框到底部视口边界**，前提是长文处于钉底状态。
+它不包含卡片自身内边距，也不是承诺“最后一个字形到输入框文本基线恰好 32px”。
+新工具插入、详情真实折叠、Markdown 最终归一化仍可能合法改变内容高度；
+本轮消除的是人工占位造成的额外跳动，不是冻结所有正常布局变化。
+
+### 15.4 验证结果
+
+#### 几何与行为：真实 WKWebView
+
+扩展 [TranscriptStreamingDOMChecks.swift](../../scripts/validation/TranscriptStreamingDOMChecks.swift)：
+
+- 思考 → 短正文 → 40 行增长 → 同源正文终态 → 执行中工具 → 下段正文；
+- 折叠详情后，尾部隐藏节点仍在 DOM，最后可见 disclosure 的底距仍正确；
+- 最终答复移出组、上翻历史时后台继续新增工具/正文、跳回最新；
+- 48 次尾部几何检查：自然行高贴合实际首个内容子元素，底距 32px（容差 <2px）；
+- 每新增一行确实长高且增量 <40px，不允许保持原档位或突然长高 160px；
+- 同一正文转为终态时不收缩占位，上翻锚点误差 <1px；
+- 手动展开运行中工具后底距仍相同，工具完成后展开状态不丢失；
+- 短会话保持 `scrollY = 0`、首条顶部 16px，不强制底对齐；
+- 保留原回归：100 个增长块共 199 次插入、200 行单围栏追加 0 次子树替换、
+  最终高亮、手动展开和预热暂停/恢复。
+
+历史 fixture 首次插入会经历 CV 估算收敛，几何测试先完成初始钉底准备；
+**后续类型切换不额外补 scrollToBottom**，因此不会用补滚动掩盖本轮切换错误。
+跳转历史使用产品的平滑滚动，测试等待其结束后再模拟 wheel 接管，避免把动画过程误判成保锚失败。
+
+#### 呈现性能：真实 SwiftUI 状态栏 + 原生文档桥 + WKWebView
+
+扩展 [TranscriptPresentationChecks.swift](../../scripts/validation/TranscriptPresentationChecks.swift)，
+仍用 50 条历史、45ms 后台供给、40ms 主线程消费、三轮各 200 行单围栏，
+保留状态栏文字呼吸、首字帧关联和完成礼花；最大 MainActor 延迟门槛仍为 500ms。
+
+| 配置 | 每轮最大 MainActor 延迟 | 每轮 dispatch 次数 | 每轮 JS apply 最大耗时 |
+|---|---|---|---|
+| 旧 JS/CSS（`e6d9929`，160px 量化） | 8.1 / 6.9 / 10.8ms | 202 / 202 / 202 | 15 / 5 / 5ms |
+| 新自然高度 + 32px 尾距 | 47.7 / 7.9 / 8.3ms | 201 / 202 / 201 | 9 / 5 / 5ms |
+
+两组都通过 500ms 门槛。新配置同时运行了 20s、2ms 采样，存在额外观测开销；
+不据此宣称它比旧配置更快，也不把 47.7ms 与 8.1ms 的单次差异归因为高度策略。
+部分供给步合并成一次投递是已有 latest-only 行为，每轮最终 200 行全文相等断言均通过，
+首字 JS/DOM/帧 trace 仍完整。墙钟约 9.6s 主要由固定供给节奏决定，不是在线模型速度测量。
+
+另外新增原生桥接的 **3 组正文/工具交替、6 次工具执行、最终组折叠 + 最终答复**：
+尾距检查通过，最大 MainActor 延迟 **7.3ms**。
+原生层的尾距检查允许桥接与 RAF 在 3s 内收敛；无额外滚动写入。
+严格的同源完成不收缩、逐行不跳档断言在上一组 DOM 检查中完成。
+
+采样位于本次会话 artifacts 的 `natural-height-presentation-sample.txt`，
+开始于 2026-09-11 10:00:29，主线程共 8383 个样本：
+**没有采到主线程 `wait_for_allocations` 阻塞链**。
+不能写成“RenderBox 完全不运行”：主线程仍有少量 `RBLayer display`，
+后台 `com.apple.RenderBox.SharedSurface` 队列还有 4 个 observer/CA 检查样本，
+它们不等价于原先主线程数千样本的同步阻塞。
+
+验证过程中，普通层级探针有两次帧超时，第三次在加可见性检查后明确报告窗口被遮挡；
+这些不完整运行没有算进上述三轮结果，也不据此归因产品卡顿。
+最终 A/B 均使用**相同的临时 `.floating` 测试窗口**防止其它窗口遮住探针，结束后关闭并恢复之前前台应用。
+生产 App 窗口层级完全未改。这个探针不是完整用户 App 的所有窗口、显示器与调试状态。
+
+#### 其它回归
+
+- 普通 cold-load 五场景通过，500/501 行恢复场景锚点误差均 0px；
+- 单飞/latest-only、隐藏文档追平、结构/元数据、WebContent 恢复、帧超时与旧回调隔离通过；
+- App Debug `xcodebuild` 成功，编辑器诊断无错误；
+- 未更改 provider、Core 生产实现或持久化模型；不启动登录 shell 成本优化/工具参数打点两个暂缓事项。
+
+### 15.5 复跑与用户验收
+
+以下命令顺序执行，不并发启动图形性能探针：
+
+```bash
+cd Packages/NewPiCore
+../../scripts/validation/check-transcript-dom.sh
+NEWPI_PRESENTATION_REPLAY=1 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 \
+  NEWPI_TRANSCRIPT_REVISION=e6d9929 ../../scripts/validation/check-transcript-cold-load.sh
+NEWPI_PRESENTATION_REPLAY=1 NEWPI_EXPECT_RESPONSIVE_PRESENTATION=1 \
+  ../../scripts/validation/check-transcript-cold-load.sh
+../../scripts/validation/check-transcript-cold-load.sh
+```
+
+`NEWPI_TRANSCRIPT_REVISION` 仅替换临时 probe 内的 transcript JS/CSS，不改工作区或正在运行的 App。
+有该变量时只做旧资源的连续输出性能回放，不运行明确要求新自然高度的交替几何断言。
+无该变量时额外运行新交替场景。`NEWPI_PRESENTATION_SAMPLE` 可指定独立采样路径。
+
+用户后续在重新构建并启动的最新版 App 中重点验证：
+
+1. 长会话保持底部，让模型交替输出说明、执行多个工具、继续说明；
+   不应再出现正文先悬空一大段、转工具后突然贴底的额外占位变化。
+2. 同时检查短正文、长正文、最终详情折叠和手动展开，正常新卡片出现/折叠的布局变化仍应保留。
+3. 流式途中上翻历史，确认不被持续拉回；点击回到底部后恢复跟随。
+4. 再跑连续 200 行，核对尾字、最终高亮和可编辑草稿；如有秒级卡顿，保留同轮 trace 与现场采样再归因。
