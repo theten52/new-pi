@@ -2,6 +2,41 @@
 
 Tracked blockers and follow-ups discovered during autonomous development.
 
+## 性能后续 — 2026-09-11 多轮测试（暂缓实施）
+
+用户要求先记录，后续再处理。以下证据来自 09:11–09:25 的测试与同机对照，不表示已修复。
+
+### BACKLOG-SHELL-STARTUP — 优化登录 shell 的重复启动成本
+
+- **状态**：open / deferred；优先于下面的工具参数打点。
+- **现象与证据**：23 次 bash 调用累计 13.03s，单次多数为 0.48–0.75s。
+  使用无操作命令 `:` 各测 5 次，`zsh -lc ':'` 中位数 512ms，
+  `zsh -c ':'` 为 10ms，`zsh -fc ':'` 为 9ms。最后一轮任务的 9 次 bash 调用累计约 5s。
+- **代码入口**：[BashTool](../Packages/NewPiCore/Sources/NewPiCore/Tools/BuiltInTools.swift)
+  每次执行都会新建 `/bin/zsh -lc`。对照支持“当前机器的登录 shell 初始化有明显固定成本”，
+  不代表所有机器都有同样耗时，也尚未定位具体启动配置。
+- **后续方向**：评估如何减少重复环境初始化，同时保留 PATH、版本管理器、工具查找、
+  工作目录与环境覆盖行为；不能直接删除 `-l` 后就认定等价，也不预先决定复用常驻 shell。
+- **验收**：相同环境下对照空命令与真实多工具任务的启动/总耗时；验证命令可用性、
+  超时/取消、退出码与输出捕获，避免环境或命令状态跨调用意外泄漏。
+
+### BACKLOG-TOOL-ARGUMENT-TIMING — 补工具参数生成阶段打点
+
+- **状态**：open / deferred。
+- **现象与证据**：09:23:54 发起的一次 Responses 请求，正文停止后约 4.4s 才结束；
+  终态为 `toolUse`，包含一个 `write` 调用，正文仅 85 字符但总输出为 1392 tokens。
+  这段时间可能在生成工具参数，**不能仅凭无正文就判定为服务端静默或 UI 卡顿**。
+- **已有能力**：发送到首字的 runID 时间线、正文末次 delta、text done 和请求终态已经记录，
+  见 [API 指标设计](api-metrics-design.md)。不重做这些已有打点。
+- **待补充**：按 API 请求及工具调用标识关联参数首个 delta、最后 delta、arguments done，
+  并记录事件数/长度；与正文、请求终态和实际工具执行边界分开。
+  入口：[ResponsesSSEDecoder](../Packages/NewPiCore/Sources/NewPiCore/Providers/ResponsesAPI/ResponsesSSEDecoder.swift)、
+  [ResponsesAPIProvider](../Packages/NewPiCore/Sources/NewPiCore/Providers/ResponsesAPI/ResponsesAPIProvider.swift)、
+  [RequestLatencyTrace](../Packages/NewPiCore/Sources/NewPiCore/Diagnostics/RequestLatencyTrace.swift)。
+- **边界与验收**：日志不记录参数正文、文件内容或凭据，不逐 token 写日志；覆盖多个工具调用、
+  多轮请求、子 Agent、无 delta 直接 done、错误与取消。已有 run 级阶段只记首次，
+  不能将后续请求的工具参数时间混入首个请求；不得改变完成语义或提前执行不完整参数。
+
 ## Phase 4 — Session persistence
 
 | ID | Item | Status | Notes |
