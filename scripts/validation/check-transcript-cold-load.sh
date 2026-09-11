@@ -15,16 +15,23 @@ if [[ -n "${NEWPI_RENDERER_REVISION:-}" ]]; then
 fi
 python3 - "$ROOT" "$TMP" <<'PY'
 from pathlib import Path
-import sys, plistlib
+import sys, plistlib, uuid
 root,tmp = map(Path,sys.argv[1:])
 source = (root/'NewPiApp/NewPiViewModel.swift').read_text()
 (tmp/'Types.swift').write_text('import Foundation\nimport NewPiCore\n'+source[source.index('enum NewPiToolState:'):source.index('struct NewPiProviderListItem:')])
-(tmp/'Probe.app/Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'Probe','CFBundleIdentifier':'com.newpi.coldloadprobe','CFBundlePackageType':'APPL'}))
+(tmp/'Probe.app/Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'Probe','CFBundleIdentifier':'com.newpi.coldloadprobe.'+uuid.uuid4().hex,'CFBundlePackageType':'APPL'}))
 PY
-xcrun swiftc -O -swift-version 6 -parse-as-library -I "$BIN/Modules" \
+CHECK="$ROOT/scripts/validation/TranscriptColdLoadChecks.swift"
+OPTIMIZATION="-O"
+if [[ "${NEWPI_PRESENTATION_REPLAY:-0}" == "1" ]]; then
+  CHECK="$ROOT/scripts/validation/TranscriptPresentationChecks.swift"
+  OPTIMIZATION="-Onone"
+fi
+xcrun swiftc "$OPTIMIZATION" -swift-version 6 -parse-as-library -I "$BIN/Modules" \
   "$TMP/Types.swift" "$ROOT/NewPiApp/NewPiChatRoomTranscriptAdapter.swift" \
   "$ROOT/NewPiApp/NewPiTranscriptDocumentView.swift" "$ROOT/NewPiApp/NewPiMarkdownWebRenderer.swift" \
   "$ROOT/NewPiApp/NewPiChatScrollHelper.swift" "$ROOT/NewPiApp/AttachmentSchemeHandler.swift" \
-  "$ROOT/NewPiApp/AttachmentPreviewWindow.swift" "$ROOT/scripts/validation/TranscriptColdLoadChecks.swift" \
+  "$ROOT/NewPiApp/AttachmentPreviewWindow.swift" "$ROOT/NewPiApp/NewPiUserMessageRail.swift" \
+  "$ROOT/NewPiApp/NewPiConfettiBurst.swift" "${NEWPI_STATUS_VIEW_SOURCE:-$ROOT/NewPiApp/NewPiAgentStatusView.swift}" "$CHECK" \
   "$BIN"/NewPiCore.build/*.o -o "$TMP/Probe.app/Contents/MacOS/Probe"
 "$TMP/Probe.app/Contents/MacOS/Probe"

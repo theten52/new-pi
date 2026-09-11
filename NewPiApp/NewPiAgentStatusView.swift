@@ -57,7 +57,6 @@ enum NewPiAgentStatusIconSize {
 struct NewPiAgentStatusIcon: View {
     let presentation: NewPiAgentStatusPresentation
     var size: NewPiAgentStatusIconSize = .toolbar
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -69,10 +68,11 @@ struct NewPiAgentStatusIcon: View {
                 }
                 .frame(width: size.frame, height: size.frame)
 
+            // 持续 symbolEffect 会触发 RenderBox 表面同步等待，阻塞正文流式消费。
+            // 图标保持静态，活跃反馈由文字呼吸承担；减动效策略仍由标签处理。
             Image(systemName: presentation.systemImage)
                 .font(.system(size: size.symbolSize, weight: .semibold))
                 .foregroundStyle(foregroundColor)
-                .symbolEffect(.pulse, isActive: presentation.isActive && !reduceMotion)
         }
         .accessibilityHidden(true)
     }
