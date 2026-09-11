@@ -10,10 +10,11 @@
 
 - **状态**：阶段 1、阶段 2 已实施 / 待用户验收，不关闭本项。第一批阅读列、共用输入区、静态状态与真实可空用量 popover 已调整；第二批 root-only 共享分栏、自定义侧栏、项目卡片/统一条目、唯一身份 header 与实际发言角色横滚栏已接入，不改输入、阶段、steering、审批/权限或单文档架构。
 - **第一批验证（历史）**：WK 19 语义、4 final geometry 零差、浅深 × 900/701/700/480 的 8 组样式/对比度、composer marked text 与完整 Debug build 已报告通过；无页面焦点的键盘样式 SKIP 保留。统一横向 24 后复跑及 cold/performance 数据已回填，不是第二批性能重跑。
-- **独立组件 probe**：900/620 × 浅深四张合成截图；结果 **PARTIAL，9 项 AX SKIP**。键盘与 DOM 独立 PASS，不能称发送/停止按钮或用量 popover 点击通过；strict 下 SKIP 会失败。
+- **独立组件 probe**：早期 900/620 × 浅深合成截图为 **PARTIAL，9 项 AX SKIP**，不追溯改成 PASS；后续真实鼠标模式在 900/620 × 浅深四组 strict 全部通过，覆盖送停、草稿及用量开关。曾出现的焦点超时已增加诊断，后续未复现，根因未确定。
 - **第二批 FULL_WINDOW**：1200/900 × 浅深 × session/room 共 8 组布局/草稿、独立真实 keyDown 与 Web DOM 检查已通过；固定列表与同一 document fixture，room 仅变 header/role，不是 `ChatRoomFlowController` 业务验收。host detail 左边界约 234pt（含 macOS 容器边距），不证明玻璃截图正确。
-- **视觉缺口**：Tahoe 玻璃侧栏经根 cacheDisplay + WK snapshot 及实际 NSSplitView 子视图缓存仍无像素；全窗口截图 **UNVERIFIED / 不完整**，未完成原型同内容对照。无录屏权限，不请求、不抓桌面；不能称完全还原或全部交互通过。
-- **仍需**：用户实机验收侧栏显示/隐藏、项目/会话/聊天室切换、header/角色栏、手动 phase、插话/停止、popover、模型、附件与焦点；Web 高对比未完整验收。完整 Debug build 已至少成功一轮，新显式 toolbar 后的最终 build/controller 待主 agent 运行回填，不预报结果。
+- **视觉状态**：独立 cacheDisplay + WK snapshot 的 Tahoe 玻璃侧栏仍无有效像素；用户后续主动授权后，正式 App 深色普通会话的完整玻璃截图已取得并查看，900/1200pt 布局通过。未完成原型同内容对照与全部外观/聊天室场景，不称完全还原。
+- **正式 App 已验收**：恢复系统侧栏按钮及其过渡（不再使用显式自定义按钮），构建与 AX 开关往返通过；历史会话用量五项展示、非空临时草稿经侧栏往返保持、模型菜单/用量弹层 Escape 关闭后焦点恢复与续写通过。临时草稿已清空，未发送、未切模型；controller 守卫构建验证已回填。
+- **仍需**：项目/会话/聊天室切换时的草稿与滚动恢复、聊天室 header/角色栏及 phase/插话/停止、模型实际切换与运行中禁用、附件与真实 IME、浅色/系统高对比及 VoiceOver。已验证的菜单关闭焦点不代表完整键盘路线通过。
 - **范围**：侧栏“未全面调整”仅为阶段 1 历史范围；第二批已接入、仍待实机视觉验收。设置页面/导航未重写，真实 diff 面板未实现，原型 demo 不进入生产；八项对照与证据见 [实施与验收记录](dev-notes/2026-09-12-document-workbench-ui.md)。
 
 ## 渲染后续 — 2026-09-11 Markdown 结束时小幅跳动
