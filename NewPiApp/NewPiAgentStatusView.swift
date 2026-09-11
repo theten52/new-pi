@@ -13,6 +13,15 @@ enum NewPiWorkbenchStyle {
     static let surfaceRaised = adaptiveColor(
         "surfaceRaised", light: 0xFFFFFF, dark: 0x2B322E, highContrast: .controlBackgroundColor
     )
+    static let sidebar = adaptiveColor(
+        "sidebar", light: 0xF1F2EE, dark: 0x202623, highContrast: .windowBackgroundColor
+    )
+    static let surfaceSoft = adaptiveColor(
+        "surfaceSoft", light: 0xF4F5F1, dark: 0x2C332F, highContrast: .controlBackgroundColor
+    )
+    static let accentSoft = adaptiveColor(
+        "accentSoft", light: 0xE6EEE7, dark: 0x34463A, highContrast: .selectedControlColor
+    )
     static let line = adaptiveColor(
         "line", light: 0xE1E5DF, dark: 0x3B443D, highContrast: .separatorColor
     )
@@ -40,6 +49,243 @@ enum NewPiWorkbenchStyle {
                 alpha: 1
             )
         })
+    }
+}
+
+/// 唯一的原生分栏外壳；不持有运行时，也不修改窗口 frame 或系统保存的窗口配置。
+/// 保留系统标题栏、红绿灯、分栏拖动与 sidebar toggle，生产页和独立探针共用。
+struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
+    private let sidebar: Sidebar
+    private let content: Content
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    init(@ViewBuilder sidebar: () -> Sidebar, @ViewBuilder content: () -> Content) {
+        self.sidebar = sidebar()
+        self.content = content()
+    }
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+                .frame(minWidth: 226, maxWidth: 250, maxHeight: .infinity)
+                .background(NewPiWorkbenchStyle.sidebar)
+                .navigationSplitViewColumnWidth(min: 226, ideal: 226, max: 250)
+        } detail: {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(NewPiWorkbenchStyle.surface)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .navigationTitle("")
+        .toolbar(removing: .sidebarToggle)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                } label: {
+                    Label("显示或隐藏侧栏", systemImage: "sidebar.left")
+                        .labelStyle(.iconOnly)
+                }
+                .help("显示或隐藏侧栏")
+                .accessibilityIdentifier("workbench.sidebar.toggle")
+            }
+        }
+        .toolbarBackground(NewPiWorkbenchStyle.surface, for: .windowToolbar)
+        .tint(NewPiWorkbenchStyle.accent)
+    }
+}
+
+/// 内容区唯一的身份标题；目录必须由当前对象提供，操作不注册输入快捷键。
+struct NewPiWorkbenchHeader<Actions: View>: View {
+    let mode: String
+    let title: String
+    let directory: String
+    private let actions: Actions
+
+    init(mode: String, title: String, directory: String, @ViewBuilder actions: () -> Actions) {
+        self.mode = mode
+        self.title = title
+        self.directory = directory
+        self.actions = actions()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text(mode)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .strokeBorder(NewPiWorkbenchStyle.line, lineWidth: 1)
+                            }
+                            .fixedSize()
+                        Text(title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                            .help(title)
+                    }
+                    Label(directory.isEmpty ? "未选择项目" : directory, systemImage: "folder")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(directory.isEmpty ? "未选择项目" : directory)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 12) { actions }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+            .frame(height: 72)
+            Divider()
+        }
+        .background(NewPiWorkbenchStyle.surface)
+    }
+}
+
+/// 纯标签，不嵌套 Button；尾部阶段或警告由调用方的 HStack 提供。
+struct NewPiWorkbenchSidebarEntry: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.secondaryText)
+                .frame(width: 16, height: 17)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(NewPiWorkbenchStyle.primaryText)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .help(title)
+    }
+}
+
+/// 整张卡片均可选择项目；只调用传入动作，不读取或创建运行时。
+struct NewPiWorkbenchProjectCard: View {
+    let name: String
+    let path: String
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder")
+                    .font(.system(size: 16))
+                    .foregroundStyle(NewPiWorkbenchStyle.accent)
+                    .frame(width: 34, height: 34)
+                    .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9)
+                            .strokeBorder(NewPiWorkbenchStyle.line, lineWidth: 1)
+                    }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(NewPiWorkbenchStyle.primaryText)
+                        .lineLimit(1)
+                    Text(path.isEmpty ? "点击选择工作目录" : "本地项目 · \(URL(fileURLWithPath: path).lastPathComponent)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            }
+            .padding(10)
+            .background(isHovering ? NewPiWorkbenchStyle.line.opacity(0.5) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(path.isEmpty ? "打开项目…" : "打开项目…\n\(path)")
+        .accessibilityLabel("打开项目：\(name)")
+        .accessibilityValue(path.isEmpty ? "未选择项目" : path)
+    }
+}
+
+/// 展示数据不依赖 Core，独立完整窗口探针可直接构造。
+struct NewPiWorkbenchRole: Identifiable {
+    let id: String
+    let name: String
+    let systemImage: String
+    let isSpeaking: Bool
+}
+
+/// 角色多时只横向滚动头像区域，不挤占阶段文字或调用方尾部菜单。
+struct NewPiWorkbenchRoleStrip: View {
+    let phaseTitle: String
+    var roundText: String? = nil
+    let roles: [NewPiWorkbenchRole]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Text("当前阶段")
+                    .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                Text(phaseTitle)
+                    .fontWeight(.medium)
+                    .foregroundStyle(NewPiWorkbenchStyle.accent)
+                if let roundText {
+                    Text(roundText)
+                        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                }
+            }
+            .fixedSize()
+            Divider().frame(height: 14)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(roles) { role in
+                        HStack(spacing: 5) {
+                            Image(systemName: role.systemImage.isEmpty ? "person.fill" : role.systemImage)
+                                .font(.system(size: 11))
+                                .frame(width: 26, height: 26)
+                                .background(role.isSpeaking ? NewPiWorkbenchStyle.accentSoft : NewPiWorkbenchStyle.surfaceSoft,
+                                            in: Circle())
+                            Text(role.name)
+                            if role.isSpeaking {
+                                Text("发言中").font(.system(size: 9, weight: .medium))
+                            }
+                        }
+                        .foregroundStyle(role.isSpeaking ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.secondaryText)
+                        .fixedSize()
+                        .help(role.name + (role.isSpeaking ? " · 正在发言" : ""))
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(role.name)
+                        .accessibilityValue(role.isSpeaking ? "正在发言" : "未发言")
+                    }
+                }
+            }
+            .frame(minWidth: 0, maxWidth: .infinity)
+        }
+        .font(.system(size: 11))
+        .frame(height: 30)
     }
 }
 

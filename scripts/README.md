@@ -173,14 +173,28 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 业务状态和指标为内存 fixture，不调用模型、不访问凭据或用户会话，不代表完整 App、侧边栏或聊天室阶段集成验收，也不是默认冷加载/性能模式。
 需要 macOS 图形登录会话；采用进程内公开 AppKit 接口，不请求系统辅助功能或屏幕录制权限。
 
-900/620 × 浅深四张 NSView + WK snapshot 合成截图默认写入 `/private/tmp/newpi-ui/`：
+独立 component 模式：900/620 × 浅深四张 NSView + WK snapshot 合成截图默认写入 `/private/tmp/newpi-ui/`：
 `workbench-light.png`、`workbench-dark.png`、`workbench-narrow.png`、`workbench-narrow-dark.png`；可用 `NEWPI_UI_SNAPSHOTS` 改目录。
 本次交接结果为 **PARTIAL**：四张截图已生成，独立键盘/DOM 检查 PASS；`SwiftUI.AccessibilityNode` 未声明完整 `NSAccessibilityProtocol`，
 9 项 AX 按钮边界/用量 popover/disabled-send-stop 按压检查 **SKIP**，不能称按钮或用量点击通过，退出码 0 不等于全部通过。
 
 严格入口：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_UI_STRICT=1 bash scripts/validation/check-transcript-cold-load.sh`。
 实际 FAIL 总会非零退出；strict 下任何 SKIP 也失败，故上述 AX 限制仍在时 strict 会失败。
-本轮最终 WK/Debug 复跑、cold/performance 结果待主 agent 回填；人工验收清单及证据边界见 [实施记录](../docs/dev-notes/2026-09-12-document-workbench-ui.md)。
+
+第二批新增完整窗口选择：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_FULL_WINDOW=1 bash scripts/validation/check-transcript-cold-load.sh`。
+复用生产 `NewPiWorkbenchShell` / `Header` / `ProjectCard` / `SidebarEntry` / `RoleStrip`；固定 mock list 与上述同一 document fixture，
+room 模式只切换 header/role fixture，不运行真实 `ChatRoomFlowController`，不能验收聊天室阶段或 steering 业务。
+已报告 1200/900 × light/dark × session/room 共 8 组布局/草稿、独立真实 keyDown 与 Web DOM 检查通过；
+host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/ideal 226、max 250pt），不代表玻璃材质截图正确。
+
+全窗口产物为同目录下 `shell-{1200,900}-{light,dark}-{session,room}.png`，但**完整截图 UNVERIFIED**：
+根 NSView `cacheDisplay` + WK snapshot 在 macOS Tahoe 的玻璃侧栏区域空白，即使尝试实际 `NSSplitView` 子视图缓存仍无有效像素。
+生成 PNG 或退出码 0 不等于完整视觉捕获，未完成与原型同内容对照验收；当前玻璃缺口只打印 `UNVERIFIED`，不保证 strict 因此失败。
+本机无录屏权限，不请求权限、不抓桌面；独立 component 模式的按钮/popover **9 项 AX SKIP** 仍需单独解决。
+
+第一批 WK/Debug 复跑及 cold/performance 数据已记录，不能当作第二批性能重跑；完整 Debug build 已至少成功一轮，
+新显式 toolbar 侧栏按钮后的最终 build/controller 待主 agent 运行回填，不预报结果。
+八项原型对照、人工验收清单及证据边界见 [实施记录](../docs/dev-notes/2026-09-12-document-workbench-ui.md)。
 
 ## 共用审批 UI 验证
 

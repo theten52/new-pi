@@ -27,7 +27,7 @@ struct NewPiChatView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(viewModel.chatNavigationTitle)
+        .background(NewPiWorkbenchStyle.surface)
     }
 }
 
@@ -54,26 +54,10 @@ struct NewPiSessionPanel: View {
     // rail（minimap）与 jump-to-latest 是原生浮层（不在流内，不参与布局）。
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("会话")
-                    .font(.caption.weight(.medium))
-                Image(systemName: "folder")
-                Text(viewModel.projectURL?.path ?? "未选择项目")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(viewModel.projectURL?.path ?? "未选择项目")
-                Spacer(minLength: 0)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
-            .padding(.vertical, 10)
-            .overlay(alignment: .bottom) { Divider() }
-
             ZStack(alignment: .trailing) {
                 if runtime.transcript.isEmpty {
                     if viewModel.isSwitchingSession {
-                        ProgressView("Loading session…")
+                        ProgressView("正在加载会话…")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)

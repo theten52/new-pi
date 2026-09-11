@@ -28,6 +28,7 @@ private final class WorkbenchModel: ObservableObject {
     @Published var running = false
     @Published var hasMetrics = true
     @Published var selectedModel = WorkbenchModel.longModel
+    @Published var isRoom = false
     @Published var items: [NewPiTranscriptItem]
     let controller = TranscriptDocumentController()
     // 几何读数仅供断言，不参与视图布局与滚动，也不触发新一轮发布。
@@ -99,19 +100,32 @@ private struct WorkbenchRoot: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("会话").fontWeight(.medium)
-                Image(systemName: "folder")
-                Text("文档工作台 · 本地固定任务（不调用模型）")
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 0)
+            NewPiWorkbenchHeader(
+                mode: model.isRoom ? "聊天室" : "会话",
+                title: model.isRoom ? "界面设计评审" : "让 Markdown 收尾更稳定",
+                directory: model.isRoom ? "~/personal/projects/design-lab · 独立工作目录" : "~/personal/projects/new-pi"
+            ) {
+                Menu { Text("合成数据，不导出文件") } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                Menu { Text("完整窗口探针") } label: {
+                    Label("更多", systemImage: "ellipsis").labelStyle(.iconOnly)
+                }
             }
-            .font(.caption)
-            .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
-            .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
-            .padding(.vertical, 10)
-            .overlay(alignment: .bottom) { Divider() }
             .measure("header", model: model)
+
+            if model.isRoom {
+                NewPiWorkbenchRoleStrip(phaseTitle: "讨论", roles: [
+                    .init(id: "architect", name: "架构师", systemImage: "building.2", isSpeaking: false),
+                    .init(id: "developer", name: "程序员", systemImage: "terminal", isSpeaking: model.running),
+                    .init(id: "reviewer", name: "评审员", systemImage: "checkmark.shield", isSpeaking: false),
+                    .init(id: "long-name", name: "长角色名称与多角色横向滚动检查", systemImage: "person", isSpeaking: false),
+                ])
+                .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+                .padding(.vertical, 8)
+                .overlay(alignment: .bottom) { Divider() }
+                .measure("roles", model: model)
+            }
 
             NewPiTranscriptDocumentView(
                 transcript: model.items, isStreaming: model.running,
@@ -174,6 +188,72 @@ private struct WorkbenchRoot: View {
     }
 }
 
+/// 整窗检查使用与 root 相同的生产外壳和标签组件，列表数据固定且不访问真实存储。
+private struct WorkbenchProbeRoot: View {
+    @ObservedObject var model: WorkbenchModel
+    let fullWindow: Bool
+
+    var body: some View {
+        if fullWindow {
+            NewPiWorkbenchShell {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 8) {
+                                Text("n·").font(.system(size: 25, weight: .bold, design: .rounded))
+                                    .foregroundStyle(NewPiWorkbenchStyle.accent)
+                                Text("NewPi").font(.system(size: 13, weight: .semibold))
+                                Spacer()
+                            }.padding(.horizontal, 10)
+                            Text("个人工作区").font(.system(size: 10)).foregroundStyle(.secondary)
+                                .padding(.horizontal, 10)
+                            NewPiWorkbenchProjectCard(name: "new-pi", path: "/fixture/new-pi", action: {})
+                            Button { model.isRoom = false } label: {
+                                HStack {
+                                    Image(systemName: "plus")
+                                    Text("新会话")
+                                    Spacer()
+                                    Text("⇧⌘N").foregroundStyle(.secondary).font(.system(size: 10))
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(10)
+                                .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 7))
+                                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(NewPiWorkbenchStyle.line) }
+                            }.buttonStyle(.plain).padding(.horizontal, 4)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("会话").font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10)
+                            row("让 Markdown 收尾更稳定", subtitle: "刚刚 · 2 个文件", room: false, selected: !model.isRoom)
+                            row("检查长会话渲染", subtitle: "今天 · 固定任务", room: false, selected: false)
+                            row("梳理项目结构", subtitle: "昨天", room: false, selected: false)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("聊天室").font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10)
+                            DisclosureGroup("design-lab（1）", isExpanded: .constant(true)) {
+                                row("界面设计评审", subtitle: "独立目录 · design-lab", room: true, selected: model.isRoom)
+                            }.font(.caption)
+                        }
+                    }
+                    .padding(12)
+                }
+            } content: {
+                WorkbenchRoot(model: model)
+            }
+        } else {
+            WorkbenchRoot(model: model)
+        }
+    }
+
+    private func row(_ title: String, subtitle: String, room: Bool, selected: Bool) -> some View {
+        Button { model.isRoom = room } label: {
+            NewPiWorkbenchSidebarEntry(title: title, subtitle: subtitle,
+                systemImage: room ? "person.2" : "bubble.left", isSelected: selected)
+                .padding(10)
+                .background(selected ? NewPiWorkbenchStyle.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 7))
+        }.buttonStyle(.plain)
+    }
+}
+
 private extension View {
     @MainActor
     func measure(_ name: String, model: WorkbenchModel) -> some View {
@@ -228,7 +308,8 @@ struct WorkbenchUIChecks {
 
     private static func run() async throws {
         let model = WorkbenchModel()
-        let host = NSHostingController(rootView: WorkbenchRoot(model: model))
+        let fullWindow = ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_FULL_WINDOW"] == "1"
+        let host = NSHostingController(rootView: WorkbenchProbeRoot(model: model, fullWindow: fullWindow))
         host.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 900, height: 820),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -256,6 +337,11 @@ struct WorkbenchUIChecks {
         try require(!web.configuration.websiteDataStore.isPersistent && model.controller.sessionID == nil,
             "nonPersistent WebKit；storeKey=nil，无会话/滚动数据落盘")
         await check("Markdown 与详情交互") { try await checkDocument(web, model: model) }
+
+        if fullWindow {
+            try await checkFullWindow(model, host: host.view, window: window, web: web, editor: editor)
+            return
+        }
 
         // 四种组合均尝试截图；AX / snapshot 不可验证时仍继续其它组合与键盘检查。
         for (width, dark, screenshot) in [(900, false, "workbench-light.png"),
@@ -318,6 +404,52 @@ struct WorkbenchUIChecks {
         } catch {
             failed.append("\(label)：\(error)")
             print("FAIL: \(label)：\(error)；继续独立检查")
+        }
+    }
+
+    private static func checkFullWindow(_ model: WorkbenchModel, host: NSView, window: NSWindow,
+                                        web: WKWebView, editor: NewPiComposerInnerTextView) async throws {
+        for width in [1200, 900] {
+            for dark in [false, true] {
+                for room in [false, true] {
+                    model.isRoom = room
+                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.setContentSize(NSSize(width: CGFloat(width), height: 820))
+                    let name = "shell-\(width)-\(dark ? "dark" : "light")-\(room ? "room" : "session")"
+                    try await eventually(name + " 外观同步") {
+                        try await web.evaluateJavaScript("matchMedia('(prefers-color-scheme: dark)').matches") as? Bool == dark
+                    }
+                    try await settle(web)
+                    let webRect = host.convert(web.bounds, from: web)
+                    let detailWidth = web.bounds.width
+                    try require(webRect.minX >= 225 && webRect.minX <= 251,
+                        name + ": sidebar width=\(webRect.minX)，不再扩大为旧宽侧栏")
+                    guard let header = model.frames["header"], let surface = model.frames["surface"],
+                          let action = model.frames["action"] else { throw Failure("整窗组件缺少几何读数") }
+                    try require(abs(header.height - 73) < 2 && abs(header.width - detailWidth) < 1,
+                        name + ": 单一身份 header，标题目录不重复")
+                    try require(abs(surface.width - (min(detailWidth, 800) - 48)) < 1 && surface.contains(action),
+                        name + ": 输入区在 detail 内居中且主操作未挤出")
+                    try require(find(in: host, as: NewPiComposerInnerTextView.self) === editor && editor.string == WorkbenchModel.initialDraft,
+                        name + ": 模式/宽度/外观切换不重建输入或丢草稿")
+                    if room {
+                        guard let roles = model.frames["roles"] else { throw Failure("缺少角色栏") }
+                        try require(abs(roles.width - detailWidth) < 1 && roles.height < 55,
+                            name + ": 多角色保持单行滚动，不挤占身份栏")
+                    }
+                    try require(web.bounds.height > 450, name + ": 保留足够正文阅读高度")
+                    model.controller.jumpTo(model.items.first(where: { $0.kind == .assistant })!.id)
+                    try await settle(web)
+                    try await snapshot(host: host, web: web, name: name + ".png")
+                }
+            }
+        }
+        try await checkKeyboardInput(model, host: host, window: window, web: web, editor: editor)
+        try require(failed.isEmpty, "整窗基础 Markdown 检查无失败")
+        print("PASS: 8 full-window scenarios with production shell/header/project/entry/roles; keyboard/draft preserved; buttons/popovers still require separate interaction validation")
+        if !skipped.isEmpty {
+            print("PARTIAL: full-window visual capture SKIP=\(skipped.count); glass sidebar has not been visually verified")
+            if strict { throw Failure("strict 不允许不完整侧栏截图；布局/键盘通过不等于视觉验收完成") }
         }
     }
 
@@ -732,6 +864,37 @@ struct WorkbenchUIChecks {
             width: webRect.width, height: webRect.height)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
+        if ProcessInfo.processInfo.environment["NEWPI_WORKBENCH_FULL_WINDOW"] == "1",
+           let split: NSSplitView = find(in: host), let sidebar = split.subviews.first {
+            // Tahoe 玻璃外壳在根视图 cacheDisplay 中可能遮掉整列；尝试独立捕获真实侧栏子视图。
+            var candidates: [NSView] = [sidebar]
+            var captured = false
+            while !candidates.isEmpty {
+                let view = candidates.removeFirst()
+                let frame = host.convert(view.bounds, from: view)
+                if frame.width > 150 && frame.width < 260 && frame.height > 300,
+                   let sideBitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: sideBitmap)
+                    sideBitmap.size = view.bounds.size
+                    if hasPixels(sideBitmap) {
+                        let image = NSImage(size: view.bounds.size)
+                        image.addRepresentation(sideBitmap)
+                        let rect = NSRect(x: frame.minX - host.bounds.minX,
+                            y: host.isFlipped ? host.bounds.maxY - frame.maxY : frame.minY - host.bounds.minY,
+                            width: frame.width, height: frame.height)
+                        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                        captured = true
+                        print("SIDEBAR SNAPSHOT: captured actual \(type(of: view))")
+                        break
+                    }
+                }
+                candidates.append(contentsOf: view.subviews)
+            }
+            if !captured {
+                skipped.append("\(name): glass sidebar pixels unavailable")
+                print("UNVERIFIED: glass sidebar pixels unavailable in view snapshot; not a complete visual capture")
+            }
+        }
         webImage.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1)
         NSGraphicsContext.restoreGraphicsState()
         guard hasPixels(bitmap), let png = bitmap.representation(using: .png, properties: [:]) else {

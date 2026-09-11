@@ -8,11 +8,13 @@
 
 ### BACKLOG-DOCUMENT-WORKBENCH-ACCEPTANCE — 生产 UI 人工验收与最终验证回填
 
-- **状态**：已实施 / 待验收；用户已选择 A。阅读列、共用输入区、静态状态与真实可空用量 popover 已调整，不重写模型/权限逻辑或单文档架构。
-- **验证边界**：WK 19 语义、4 final geometry 零差与浅深 × 900/701/700/480 的 8 组样式/对比度检查、composer marked text、完整 Debug build 已报告通过；统一横向 24 后最终 WK/Debug 复跑结果待主 agent 回填。
-- **真实组件 probe**：900/620 × 浅深四张合成截图；结果 **PARTIAL，9 项 AX SKIP**。键盘与 DOM 独立 PASS，不能称发送/停止按钮或用量 popover 点击通过；strict 下 SKIP 会失败。
-- **仍需**：实际 App 侧边栏/聊天室切换、手动 phase、插话/停止、popover、模型、附件与焦点验收；Web 高对比未完整验收。本轮 cold/performance 结果待主 agent 填写，不预写全部通过。
-- **范围**：侧边栏与设置导航未全面重写，真实 diff 面板未实现，原型仅作设计对照。详见 [实施与验收记录](dev-notes/2026-09-12-document-workbench-ui.md)。
+- **状态**：阶段 1、阶段 2 已实施 / 待用户验收，不关闭本项。第一批阅读列、共用输入区、静态状态与真实可空用量 popover 已调整；第二批 root-only 共享分栏、自定义侧栏、项目卡片/统一条目、唯一身份 header 与实际发言角色横滚栏已接入，不改输入、阶段、steering、审批/权限或单文档架构。
+- **第一批验证（历史）**：WK 19 语义、4 final geometry 零差、浅深 × 900/701/700/480 的 8 组样式/对比度、composer marked text 与完整 Debug build 已报告通过；无页面焦点的键盘样式 SKIP 保留。统一横向 24 后复跑及 cold/performance 数据已回填，不是第二批性能重跑。
+- **独立组件 probe**：900/620 × 浅深四张合成截图；结果 **PARTIAL，9 项 AX SKIP**。键盘与 DOM 独立 PASS，不能称发送/停止按钮或用量 popover 点击通过；strict 下 SKIP 会失败。
+- **第二批 FULL_WINDOW**：1200/900 × 浅深 × session/room 共 8 组布局/草稿、独立真实 keyDown 与 Web DOM 检查已通过；固定列表与同一 document fixture，room 仅变 header/role，不是 `ChatRoomFlowController` 业务验收。host detail 左边界约 234pt（含 macOS 容器边距），不证明玻璃截图正确。
+- **视觉缺口**：Tahoe 玻璃侧栏经根 cacheDisplay + WK snapshot 及实际 NSSplitView 子视图缓存仍无像素；全窗口截图 **UNVERIFIED / 不完整**，未完成原型同内容对照。无录屏权限，不请求、不抓桌面；不能称完全还原或全部交互通过。
+- **仍需**：用户实机验收侧栏显示/隐藏、项目/会话/聊天室切换、header/角色栏、手动 phase、插话/停止、popover、模型、附件与焦点；Web 高对比未完整验收。完整 Debug build 已至少成功一轮，新显式 toolbar 后的最终 build/controller 待主 agent 运行回填，不预报结果。
+- **范围**：侧栏“未全面调整”仅为阶段 1 历史范围；第二批已接入、仍待实机视觉验收。设置页面/导航未重写，真实 diff 面板未实现，原型 demo 不进入生产；八项对照与证据见 [实施与验收记录](dev-notes/2026-09-12-document-workbench-ui.md)。
 
 ## 渲染后续 — 2026-09-11 Markdown 结束时小幅跳动
 
@@ -140,7 +142,7 @@
 | ID | Item | Status | Priority | Notes |
 |---|---|---|---|---|
 | BACKLOG-TOKEN-BAR | 状态栏显示当前对话的 token 用量 | done | P1 | 已实现：`SessionRuntime` 新增 `totalUsage`/`lastTurnUsage`（@Published），`messageEnd(.assistant)` 时累计；冷恢复由历史消息的 usage 重建（`accumulateUsage`）；输入框上方状态栏右侧显示累计 `↑输入 ↓输出`（紧凑格式，tooltip 含最近一轮明细）+ 缓存命中率（⚡xx%，`UsageStats` 新增 cacheRead/cacheCreation 字段，Anthropic/OpenAI 兼容/Responses 三个 provider 均已解析，含 DeepSeek `prompt_cache_hit_tokens` 变体；旧 JSONL 解码兼容缺省 0）。另：状态栏与输入框间的 Divider 移到状态栏上方。注意：OpenAI 兼容 provider 流式原本不报 usage（REV-PROV-6），需端点支持才显示。 |
-| BACKLOG-SESSION-HOVER-GLASS | Session 列表鼠标悬浮玻璃高亮效果 | 待验收 | P2 | `NewPiApp.swift` 的 `SessionRow` 已有 `onHover`、`thinMaterial` 与描边；不再作为缺失功能，剩余工作为确认视觉效果符合要求。 |
+| BACKLOG-SESSION-HOVER-GLASS | Session 列表鼠标悬浮玻璃高亮效果 | 待验收 | P2 | 第一批前的 `SessionRow` 曾使用 `onHover`、`thinMaterial` 与描边；第二批改为共用 `WorkbenchSidebarRowSurface` 的轻底 hover / 绿色选中态。保留 ID，待用户确认 A 风格及原生玻璃侧栏效果；现有不完整截图不能证明视觉验收通过。 |
 | BACKLOG-BUBBLE-BG | 输入/输出气泡背景色一致并可区分 | superseded by A | P2 | 2026-09-12 用户选择 A 文档工作台：assistant 无彩色底、user 左对齐中性底；旧按 turn 分色要求被取代，保留 ID，不再按彩色气泡验收。tint 数据通道保留不等于仍以彩色底板展示；见 [实施记录](dev-notes/2026-09-12-document-workbench-ui.md)。 |
 | BACKLOG-THINKING-COLLAPSE | 思考过程默认折叠，提供按钮手动展开查看 | done | P2 | 已实现并归并到 `BACKLOG-FOLD-THINKING-TOOL`；JS 卡片保留手动展开状态，不再重复排期。 |
 | BACKLOG-SESSION-AUTO-SELECT | 存档/删除 session 后自动切换到下一个 session | done | P2 | 已实现：`archiveSession` 归档当前会话后自动切到同项目列表中的下一条（优先下面一条，末条则回退到最新一条）；同项目无更多会话时保持空态。「下一个项目」暂未实现（App 是单项目模型，无项目列表概念）。 |

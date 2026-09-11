@@ -100,19 +100,19 @@ struct NewPiApp: App {
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("Settings…") {
+                Button("设置…") {
                     NewPiSettingsWindowController.show()
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(replacing: .newItem) {
-                Button("New Session") {
+                Button("新会话") {
                     NotificationCenter.default.post(name: .newPiNewSession, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(after: .help) {
-                Button("Debug Logs") {
+                Button("调试日志") {
                     NotificationCenter.default.post(name: .newPiShowLogs, object: nil)
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
@@ -162,69 +162,55 @@ private struct ChatRoomExportPayload: Codable {
     let exportedAt: Date
 }
 
-private struct SessionRow: View {
-    let summary: SessionSummary
-    let isActive: Bool
-
-    @State private var isHovering = false
-
-    /// 有效显示名：label 为空串时视为未命名（回落显示创建时间）。
-    private var displayLabel: String? {
-        guard let label = summary.label,
+private extension SessionSummary {
+    /// 标题与侧栏使用同一回退规则；用户自定义名称保持原文。
+    var workbenchLabel: String? {
+        guard let label,
               !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
         return label
     }
 
+    var workbenchTitle: String {
+        workbenchLabel ?? createdAt.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// 背景包住整行（包括调用方追加的阶段徽章），标签本身不承担按钮行为。
+private struct WorkbenchSidebarRowSurface: ViewModifier {
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.vertical, 10)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isSelected ? NewPiWorkbenchStyle.accentSoft
+                          : isHovering ? NewPiWorkbenchStyle.line.opacity(0.5) : Color.clear)
+            }
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+    }
+}
+
+private struct SessionRow: View {
+    let summary: SessionSummary
+    let isActive: Bool
+
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if isActive {
-                Image(systemName: "sparkles")
-                    .font(.caption)
-                    .foregroundStyle(.tint)
-                    .padding(.top, 1)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayLabel ?? summary.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.subheadline)
-                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
-                    .fontWeight(isActive ? .semibold : .regular)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    if displayLabel != nil {
-                        Text(summary.createdAt.formatted(date: .abbreviated, time: .shortened))
-                        Text("·")
-                    }
-                    Text("\(summary.messageCount) messages")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            // 高亮优先级：活跃会话 accent 色 > 悬浮毛玻璃（BACKLOG-SESSION-HOVER-GLASS）
-            if isActive {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.15))
-            } else if isHovering {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(.thinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.08))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
-                    )
-            }
-        }
-        .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
+        NewPiWorkbenchSidebarEntry(
+            title: summary.workbenchTitle,
+            subtitle: (summary.workbenchLabel != nil
+                ? summary.createdAt.formatted(date: .abbreviated, time: .shortened) + " · " : "")
+                + "\(summary.messageCount) 条消息",
+            systemImage: "bubble.left",
+            isSelected: isActive
+        )
+        .modifier(WorkbenchSidebarRowSurface(isSelected: isActive))
     }
 }
 
@@ -241,7 +227,7 @@ struct NewPiRootView: View {
     @State private var chatroomToEdit: ChatRoom?
     @State private var chatroomToDelete: ChatRoom?
     @State private var chatroomDeleteError: String?
-    /// Session 列表当前展示的条数（增量展开：每次点 Show all 多显示 5 条）。
+    /// 会话列表当前展示的条数（增量展开：每次点「显示更多」多显示 5 条）。
     @State private var sessionDisplayLimit = 5
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
@@ -250,19 +236,16 @@ struct NewPiRootView: View {
     private let recentSessionLimit = 5
     private let sessionDisplayIncrement = 5
 
-    /// Sessions sidebar section（原内联在 body；CHATROOM-FLAT-MD 加入聊天室 section 后
-    /// List 内容超出 SwiftUI 类型检查复杂度上限，抽出为独立计算属性）。
+    /// 紧凑会话列表；按钮保留键盘焦点与选中状态的可访问性。
     private var sessionsSection: some View {
-        Section("Sessions") {
-            Button("New Session") {
-                selectedChatroomID = nil
-                Task { await viewModel.startNewSession() }
-            }
-            .disabled(viewModel.projectURL == nil)
+        VStack(alignment: .leading, spacing: 4) {
+            sidebarSectionLabel("会话", count: viewModel.savedSessions.count)
 
             if viewModel.savedSessions.isEmpty {
-                Text("No saved sessions")
+                Text("暂无保存的会话")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .padding(10)
             } else {
                 ForEach(displayedSessions) { summary in
                     Button {
@@ -276,12 +259,13 @@ struct NewPiRootView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(summary.id == viewModel.activeSessionID && selectedChatroomID == nil ? .isSelected : [])
                     .contextMenu {
-                        Button("Rename Session") {
+                        Button("重命名会话") {
                             renameTarget = summary
                             renameText = summary.label ?? ""
                         }
-                        Button("Archive Session") {
+                        Button("归档会话") {
                             Task { await viewModel.archiveSession(summary) }
                         }
                     }
@@ -292,7 +276,7 @@ struct NewPiRootView: View {
                     HStack(spacing: 12) {
                         // 增量展开：每次点击多显示 5 条，直至全部显示。
                         if viewModel.savedSessions.count > sessionDisplayLimit {
-                            Button("Show all (\(viewModel.savedSessions.count))") {
+                            Button("显示更多（\(viewModel.savedSessions.count)）") {
                                 sessionDisplayLimit = min(
                                     sessionDisplayLimit + sessionDisplayIncrement,
                                     viewModel.savedSessions.count
@@ -300,7 +284,7 @@ struct NewPiRootView: View {
                             }
                         }
                         if sessionDisplayLimit > recentSessionLimit {
-                            Button("Show less") {
+                            Button("收起") {
                                 sessionDisplayLimit = recentSessionLimit
                             }
                         }
@@ -308,6 +292,8 @@ struct NewPiRootView: View {
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 6)
                 }
             }
         }
@@ -316,14 +302,22 @@ struct NewPiRootView: View {
         }
     }
 
-    /// 聊天室 sidebar section（CHATROOM-FLAT-MD Phase 1）：平铺模式，聊天室直接列在
-    /// sidebar，点击在 detail 区全尺寸展示，不再是嵌套 sheet。抽出为独立计算属性，
-    /// 避免 List 内容超出 SwiftUI 类型检查复杂度上限。
+    /// 显示短目录名，分组身份仍保留完整路径，避免同名文件夹混组。
     private var chatroomSection: some View {
-        Section("聊天室") {
-            Button("新建聊天室") {
+        VStack(alignment: .leading, spacing: 8) {
+            sidebarSectionLabel("聊天室", count: chatroomStore.chatrooms.count)
+            Button {
                 showingCreateChatroom = true
+            } label: {
+                Label("新建聊天室", systemImage: "plus")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            .help("新建独立工作目录的聊天室")
 
             ForEach(chatroomFolderIDs, id: \.self) { folder in
                 DisclosureGroup(isExpanded: Binding(
@@ -337,14 +331,32 @@ struct NewPiRootView: View {
                         chatroomRow(chatroom)
                     }
                 } label: {
-                    Label("\(folder) (\(chatroomsByFolder[folder]?.count ?? 0))", systemImage: "folder")
+                    Label("\(compactFolderName(folder))（\(chatroomsByFolder[folder]?.count ?? 0)）", systemImage: "folder")
                         .font(.caption)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(folder)
                 }
+                .padding(.horizontal, 4)
             }
         }
+    }
+
+    private func compactFolderName(_ path: String) -> String {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? path : name
+    }
+
+    private func sidebarSectionLabel(_ title: String, count: Int) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(count)").monospacedDigit()
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
     }
 
     private var chatroomsByFolder: [String: [ChatRoom]] {
@@ -364,6 +376,7 @@ struct NewPiRootView: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(chatroom.id == selectedChatroomID ? .isSelected : [])
         .contextMenu {
             Button {
                 chatroomToEdit = chatroom
@@ -483,29 +496,142 @@ struct NewPiRootView: View {
         Array(viewModel.savedSessions.prefix(max(sessionDisplayLimit, recentSessionLimit)))
     }
 
-    var body: some View {
-        NavigationSplitView {
-            List {
-                Section("Project") {
-                    if let project = viewModel.projectURL {
-                        Text(project.lastPathComponent)
-                            .font(.headline)
-                    } else {
-                        Text("No project selected")
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Open Project…") {
-                        viewModel.pickProject()
-                    }
-                }
+    private var selectedSessionTitle: String {
+        viewModel.savedSessions.first { $0.id == viewModel.activeSessionID }?.workbenchTitle
+            ?? (viewModel.activeSessionID == nil ? "未选择会话" : "新会话")
+    }
 
+    private var sidebar: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Text("n·")
+                            .font(.system(size: 25, weight: .bold, design: .rounded))
+                            .foregroundStyle(NewPiWorkbenchStyle.accent)
+                        Text("NewPi")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    Text("个人工作区")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                        .padding(.horizontal, 10)
+                    NewPiWorkbenchProjectCard(
+                        name: viewModel.projectURL?.lastPathComponent ?? "未选择项目",
+                        path: viewModel.projectURL?.path ?? "",
+                        action: { viewModel.pickProject() }
+                    )
+                    Button {
+                        selectedChatroomID = nil
+                        Task { await viewModel.startNewSession() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "plus")
+                            Text("新会话")
+                            Spacer(minLength: 4)
+                            Text("⇧⌘N")
+                                .font(.system(size: 10))
+                                .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(10)
+                        .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 7))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7)
+                                .strokeBorder(NewPiWorkbenchStyle.line, lineWidth: 1)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.projectURL == nil)
+                    .help(viewModel.projectURL == nil ? "请先选择项目" : "新建会话（⇧⌘N）")
+                    .padding(.horizontal, 4)
+                }
                 sessionsSection
-                
                 chatroomSection
             }
-            .navigationTitle("NewPi")
-        } detail: {
-            Group {
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+        }
+        .accessibilityLabel("工作区导航")
+    }
+
+    private var headerActions: some View {
+        HStack(spacing: 14) {
+            if let chatroom = selectedChatroom {
+                Menu {
+                    Button("导出 Markdown…") {
+                        exportChatroomToFile(chatroom, format: .markdown)
+                    }
+                    Button("导出文本…") {
+                        exportChatroomToFile(chatroom, format: .text)
+                    }
+                    Button("导出 JSON…") {
+                        exportChatroomToFile(chatroom, format: .json)
+                    }
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .disabled(
+                    !ChatRoomStore.shared.hasMessages(for: chatroom.id)
+                        || chatroomStore.isRunning(chatroomID: chatroom.id)
+                )
+                .help("导出当前聊天室")
+                .accessibilityLabel("导出当前聊天室")
+            } else {
+                Menu {
+                    Button("导出 Markdown…") {
+                        Task { await viewModel.exportSessionToFile(format: .markdown) }
+                    }
+                    Button("导出文本…") {
+                        Task { await viewModel.exportSessionToFile(format: .text) }
+                    }
+                    Button("导出 JSON…") {
+                        Task { await viewModel.exportSessionToFile(format: .json) }
+                    }
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .disabled(viewModel.transcript.isEmpty)
+                .help("导出当前会话")
+                .accessibilityLabel("导出当前会话")
+            }
+            Menu {
+                Button { showLogs = true } label: {
+                    Label("调试日志", systemImage: "list.bullet.rectangle")
+                }
+                Button { openWindow(id: "api-metrics") } label: {
+                    Label("API 监控", systemImage: "chart.bar")
+                }
+                Divider()
+                Button { NewPiSettingsWindowController.show() } label: {
+                    Label("设置…", systemImage: "gearshape")
+                }
+            } label: {
+                Label("更多", systemImage: "ellipsis")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+            }
+            .help("更多：调试日志、API 监控与设置")
+            .accessibilityLabel("更多操作")
+        }
+    }
+
+    var body: some View {
+        NewPiWorkbenchShell {
+            sidebar
+        } content: {
+            VStack(spacing: 0) {
+                NewPiWorkbenchHeader(
+                    mode: selectedChatroom == nil ? "会话" : "聊天室",
+                    title: selectedChatroom?.name ?? selectedSessionTitle,
+                    directory: selectedChatroom?.projectPath ?? viewModel.projectURL?.path ?? "未选择项目"
+                ) {
+                    headerActions
+                }
                 if let chatroom = selectedChatroom {
                     ChatRoomDetailView(
                         viewModel: viewModel,
@@ -521,81 +647,27 @@ struct NewPiRootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .automatic) {
-                    if let chatroom = selectedChatroom {
-                        Menu {
-                            Button("Export Markdown…") {
-                                exportChatroomToFile(chatroom, format: .markdown)
-                            }
-                            Button("Export Text…") {
-                                exportChatroomToFile(chatroom, format: .text)
-                            }
-                            Button("Export JSON…") {
-                                exportChatroomToFile(chatroom, format: .json)
-                            }
-                        } label: {
-                            Label("Export Chatroom", systemImage: "square.and.arrow.up")
-                        }
-                        .disabled(
-                            !ChatRoomStore.shared.hasMessages(for: chatroom.id)
-                                || chatroomStore.isRunning(chatroomID: chatroom.id)
-                        )
-                    } else {
-                        Menu {
-                            Button("Export Markdown…") {
-                                Task { await viewModel.exportSessionToFile(format: .markdown) }
-                            }
-                            Button("Export Text…") {
-                                Task { await viewModel.exportSessionToFile(format: .text) }
-                            }
-                            Button("Export JSON…") {
-                                Task { await viewModel.exportSessionToFile(format: .json) }
-                            }
-                        } label: {
-                            Label("Export Session", systemImage: "square.and.arrow.up")
-                        }
-                        .disabled(viewModel.transcript.isEmpty)
-                    }
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        showLogs = true
-                    } label: {
-                        Label("Logs", systemImage: "list.bullet.rectangle")
-                    }
-                    .help("Debug Logs")
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        openWindow(id: "api-metrics")
-                    } label: {
-                        Label("API 监控", systemImage: "chart.bar")
-                    }
-                    .help("API 性能监控（独立窗口，可边监控边使用）")
-                }
-            }
         }
         .sheet(isPresented: $showLogs) {
             NewPiLogsView(store: NewPiLogStore.shared)
         }
-        .alert("Rename Session", isPresented: Binding(
+        .alert("重命名会话", isPresented: Binding(
             get: { renameTarget != nil },
             set: { if !$0 { renameTarget = nil } }
         )) {
-            TextField("Name", text: $renameText)
-            Button("Save") {
+            TextField("名称", text: $renameText)
+            Button("保存") {
                 if let target = renameTarget {
                     let newLabel = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
                     Task { await viewModel.renameSession(target, to: newLabel) }
                 }
                 renameTarget = nil
             }
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 renameTarget = nil
             }
         } message: {
-            Text("Enter a new name for this session. Leave empty to reset to the default name.")
+            Text("输入会话名称，留空则恢复默认名称。")
         }
         .alert("导出失败", isPresented: Binding(
             get: { exportError != nil },
@@ -706,8 +778,6 @@ struct ChatRoomSidebarRow: View {
     let isActive: Bool
     var directoryIssue: ChatRoomWorkingDirectory.Issue? = nil
 
-    @State private var isHovering = false
-
     private var projectFolderName: String {
         let name = URL(fileURLWithPath: chatroom.projectPath).lastPathComponent
         return name.isEmpty ? chatroom.projectPath : name
@@ -715,34 +785,13 @@ struct ChatRoomSidebarRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            if isActive {
-                Image(systemName: "sparkles")
-                    .font(.caption)
-                    .foregroundStyle(.tint)
-                    .padding(.top, 1)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(chatroom.name)
-                    .font(.subheadline)
-                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
-                    .fontWeight(isActive ? .semibold : .regular)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Label(projectFolderName, systemImage: "folder")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(chatroom.projectPath)
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                    Text(chatroom.updatedAt.formatted(.relative(presentation: .named)))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer()
+            NewPiWorkbenchSidebarEntry(
+                title: chatroom.name,
+                subtitle: "\(projectFolderName) · \(chatroom.updatedAt.formatted(.relative(presentation: .named)))",
+                systemImage: "person.2",
+                isSelected: isActive
+            )
+            .help("\(chatroom.name)\n\(chatroom.projectPath)")
             if let directoryIssue {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -750,30 +799,9 @@ struct ChatRoomSidebarRow: View {
                     .accessibilityLabel("工作目录不可用")
             }
             PhaseBadge(phase: chatroom.currentPhase)
+                .fixedSize()
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            // 高亮样式与 SessionRow 对齐：选中 accent 色 > 悬浮毛玻璃
-            if isActive {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.15))
-            } else if isHovering {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(.thinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.08))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
-                    )
-            }
-        }
-        .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .modifier(WorkbenchSidebarRowSurface(isSelected: isActive))
     }
 }
 
@@ -796,16 +824,16 @@ struct PhaseBadge: View {
         case .discussion: "讨论"
         case .voting: "投票"
         case .execution: "执行"
-        case .review: "Review"
+        case .review: "评审"
         case .completed: "完成"
         }
     }
     
     private var phaseColor: Color {
         switch phase {
-        case .discussion: .blue
+        case .discussion: NewPiWorkbenchStyle.accent
         case .voting: .orange
-        case .execution: .green
+        case .execution: NewPiWorkbenchStyle.accent
         case .review: .purple
         case .completed: .gray
         }
@@ -1558,8 +1586,8 @@ struct ChatRoomDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 标题栏
-            headerBar
+            // 身份标题由 root 唯一提供；此处仅展示实时阶段、实际发言角色与流程操作。
+            roleBar
 
             // 轮数上限暂停提示
             if runtime.chatroom.pausedAtRoundLimit == true {
@@ -1641,50 +1669,41 @@ struct ChatRoomDetailView: View {
         )
     }
     
-    // MARK: - 标题栏
+    // MARK: - 阶段与角色栏
+
+    private var phaseTitle: String {
+        switch runtime.chatroom.currentPhase {
+        case .discussion: "讨论"
+        case .voting: "投票"
+        case .execution: "执行"
+        case .review: "评审"
+        case .completed: "已完成"
+        }
+    }
+
+    private var roundText: String? {
+        // 现有模型只持有执行／评审轮数，讨论阶段不虚构轮次。
+        switch runtime.chatroom.currentPhase {
+        case .execution, .review: "第 \(runtime.chatroom.reviewRoundCount) 轮"
+        default: nil
+        }
+    }
     
-    private var headerBar: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text("聊天室")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(runtime.chatroom.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                    PhaseBadge(phase: runtime.chatroom.currentPhase)
-                    if runtime.chatroom.currentPhase == .execution || runtime.chatroom.currentPhase == .review {
-                        Text("第 \(runtime.chatroom.reviewRoundCount) 轮")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+    private var roleBar: some View {
+        HStack(spacing: 12) {
+            NewPiWorkbenchRoleStrip(
+                phaseTitle: phaseTitle,
+                roundText: roundText,
+                roles: runtime.chatroom.configuredRoles.map { role in
+                    NewPiWorkbenchRole(
+                        id: role.id,
+                        name: role.name,
+                        systemImage: role.icon,
+                        // currentSpeaker 是轮转候选，不代表 @指定角色的实际发言人。
+                        isSpeaking: runtime.isRunning && runtime.speakingRoleID == role.id
+                    )
                 }
-                Label(runtime.chatroom.projectPath, systemImage: "folder")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help("聊天室独立工作目录：\(runtime.chatroom.projectPath)")
-            }
-            
-            Spacer()
-            
-            // 角色指示器
-            HStack(spacing: 8) {
-                ForEach(runtime.chatroom.configuredRoles) { role in
-                    Image(systemName: role.icon)
-                        .font(.caption)
-                        .padding(4)
-                        .background(
-                            runtime.currentSpeaker?.id == role.id
-                                ? NewPiWorkbenchStyle.accent.opacity(0.12)
-                                : Color.clear
-                        )
-                        .clipShape(Circle())
-                        .help(role.name)
-                }
-            }
+            )
             
             // 操作按钮
             Menu {
@@ -1707,11 +1726,18 @@ struct ChatRoomDetailView: View {
                 }
                 .disabled(runtime.chatroom.currentPhase == .completed)
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Label("聊天室操作", systemImage: "ellipsis")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("聊天室操作：编辑、授权与流程控制")
+            .accessibilityLabel("聊天室操作")
         }
         .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
-        .padding(.vertical, 12)
+        .padding(.vertical, 8)
         .background(NewPiWorkbenchStyle.surface)
         .overlay(alignment: .bottom) { Divider() }
     }
@@ -1884,7 +1910,7 @@ struct ChatRoomDetailView: View {
                 Button("进入执行") { advancePhase() }
                     .disabled(runtime.chatroom.selectedOptionID == nil)
             case .execution:
-                Button("进入 Review") { advancePhase() }
+                Button("进入评审") { advancePhase() }
                     .disabled(runtime.isRunning)
             case .review:
                 if runtime.chatroom.pausedAtRoundLimit == true {
@@ -1940,7 +1966,7 @@ struct ChatRoomDetailView: View {
         }
         if runtime.isRunning {
             let speaker = runtime.speakingRoleID.flatMap { runtime.chatroom.role(by: $0) }
-                ?? runtime.currentSpeaker
+            // 发言身份尚未发布时显示通用状态，不把下一轮候选误标为正在发言。
             if let speaker {
                 return NewPiAgentStatusPresentation(
                     systemImage: speaker.icon,
