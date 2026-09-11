@@ -23,10 +23,10 @@ start = source.index('enum NewPiToolState:')
 end = source.index('struct NewPiProviderListItem:')
 (tmp/'TranscriptTypes.swift').write_text('import Foundation\nimport NewPiCore\n'+source[start:end])
 bridge = (root/'NewPiApp/NewPiTranscriptDocumentView.swift').read_text()
-start = bridge.index('        private static func signature(')
+start = bridge.index('        struct Signature:')
 end = bridge.index('        private static func upsertOp(', start)
 signature = bridge[start:end].replace('private static func', 'static func', 1)
-(tmp/'Signature.swift').write_text('import Foundation\nstruct TranscriptSignatureProbe {\n'+signature+'}\n')
+(tmp/'Signature.swift').write_text('import Foundation\nimport NewPiCore\nstruct TranscriptSignatureProbe {\n'+signature+'}\n')
 PY
 xcrun swiftc -O -swift-version 6 -parse-as-library -I "$BIN/Modules" \
   "$TMP/TranscriptTypes.swift" "$TMP/Signature.swift" \

@@ -26,6 +26,8 @@ final class ChatRoomSpeechBuffer {
     private var thinking = ""
     private var lastFlush: ContinuousClock.Instant?
     private var task: Task<Void, Never>?
+    nonisolated let incoming = StreamingDeltaBuffer()
+    private var finished = false
 
     init(runtime: ChatRoomRuntime, speechID: String, interval: Duration = .milliseconds(120)) {
         self.runtime = runtime
@@ -66,6 +68,15 @@ final class ChatRoomSpeechBuffer {
     func flush() {
         task?.cancel()
         task = nil
+        let pending = incoming.drain()
+        if !pending.thinking.isEmpty {
+            if runtime.liveSpeech?.phase != .text { setPhase(.thinking) }
+            thinking += pending.thinking
+        }
+        if !pending.text.isEmpty {
+            setPhase(.text)
+            text += pending.text
+        }
         guard !text.isEmpty || !thinking.isEmpty else { return }
         let textChunk = text, thinkingChunk = thinking
         text = ""
@@ -84,6 +95,7 @@ final class ChatRoomSpeechBuffer {
 
     func finish() {
         flush()
+        finished = true
         if runtime.liveSpeech?.id == speechID { runtime.liveSpeech = nil }
         messageID = nil
     }
@@ -94,6 +106,7 @@ final class ChatRoomSpeechBuffer {
     }
 
     private func scheduleFlush() {
+        guard !finished else { return }
         let elapsed = lastFlush.map { $0.duration(to: .now) } ?? interval
         if elapsed >= interval { flush(); return }
         guard task == nil else { return }
@@ -101,6 +114,39 @@ final class ChatRoomSpeechBuffer {
         task = Task { [weak self] in
             do { try await Task.sleep(for: delay) } catch { return }
             self?.flush()
+        }
+    }
+
+    /// 原始 delta 在后台合并；边界才等待 MainActor，并先冲刷前序字符。
+    /// 取消要传递给消费任务并等它退出，避免结束后仍往下一段投递。
+    func consume(
+        _ stream: AsyncStream<AgentEvent>,
+        applyEvent: @escaping @MainActor @Sendable (AgentEvent) -> Void
+    ) async {
+        let worker = Task.detached { [self] in
+            for await event in stream {
+                switch event {
+                case .textDelta(let delta):
+                    if incoming.appendText(delta) {
+                        Task { @MainActor in scheduleFlush() }
+                    }
+                case .thinkingDelta(let delta):
+                    if incoming.appendThinking(delta) {
+                        Task { @MainActor in scheduleFlush() }
+                    }
+                default:
+                    await MainActor.run {
+                        flush()
+                        applyEvent(event)
+                    }
+                }
+            }
+            await MainActor.run { flush() }
+        }
+        await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
         }
     }
 }

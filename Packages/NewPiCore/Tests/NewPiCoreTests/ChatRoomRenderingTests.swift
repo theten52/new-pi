@@ -90,6 +90,103 @@ struct ChatRoomSpeechBufferTests {
         #expect(runtime.messages.map(\.content) == ["ab", "cd"])
         #expect(runtime.liveSpeech == nil)
     }
+
+    @Test("raw deltas keep draining while MainActor is blocked and boundaries see the full tail")
+    func blockedMainActor() async throws {
+        let (runtime, buffer, _) = fixture()
+        defer { buffer.finish() }
+        let (stream, continuation) = AsyncStream<AgentEvent>.makeStream()
+        var started = false
+        var boundaryText = ""
+        let task = Task {
+            await buffer.consume(stream) { event in
+                if case .turnStart = event { started = true }
+                if case .turnEnd = event { boundaryText = runtime.messages[0].content }
+            }
+        }
+        defer { continuation.finish(); task.cancel() }
+        continuation.yield(.turnStart)
+        for _ in 0..<100 where !started { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(started)
+        let drained = DispatchSemaphore(value: 0)
+        let incoming = buffer.incoming
+        let producer = Task.detached {
+            for _ in 0..<10_000 { continuation.yield(.textDelta("x")) }
+            for _ in 0..<200 {
+                if incoming.pendingCount == 10_000 { drained.signal(); return }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        // 短暂阻塞是受控测试条件；只检查后台消费进度，不模拟 GPU 呈现时间。
+        func blockMainActor() -> Bool { drained.wait(timeout: .now()+2) == .success }
+        #expect(blockMainActor())
+        try await producer.value
+        continuation.yield(.turnEnd)
+        continuation.finish()
+        await task.value
+        #expect(boundaryText == String(repeating: "x", count: 10_000))
+    }
+}
+
+@Suite("ChatRoom context token cache")
+@MainActor
+struct ChatRoomContextTokenCacheTests {
+    @Test("unchanged history scans zero characters and editing one message estimates only that message")
+    func incrementalEstimates() {
+        let room = ChatRoom(name: "cache", roles: [], projectPath: "/tmp")
+        var history = (0..<500).map { index in
+            ChatRoomMessage(chatroomID: room.id, roleID: "agent", content: "\(index) 长会话文本", phase: .discussion)
+        }
+        var cache = ChatRoomContextTokenCache()
+        var calls = 0
+        let estimate: (String) -> Int = { text in
+            calls += 1
+            return ContextTokenEstimator.estimate(text: text)
+        }
+        let first = cache.estimatedTokens(room: room, history: history, estimate: estimate)
+        #expect(calls == 500)
+        #expect(cache.estimatedTokens(room: room, history: history, estimate: estimate) == first)
+        #expect(calls == 500)
+        history[499].content += " tail"
+        let changed = cache.estimatedTokens(room: room, history: history, estimate: estimate)
+        #expect(calls == 501)
+        #expect(changed == 400 + history.reduce(0) { $0 + ContextTokenEstimator.estimate(text: $1.content) + 8 })
+    }
+
+    @Test("runtime budget invalidates for checkpoint, summary, role, termination, edits and deletion")
+    func invalidation() {
+        let room = ChatRoom(name: "cache", roles: [], projectPath: "/tmp")
+        let runtime = ChatRoomRuntime(chatroom: room)
+        runtime.messages = ["你好", "abcd", "🙂 tail"].map {
+            ChatRoomMessage(chatroomID: room.id, roleID: "agent", content: $0, phase: .discussion)
+        }
+        func verify() {
+            var expected = 400
+            if let summary = runtime.chatroom.compactionSummary, !summary.isEmpty {
+                expected += ContextTokenEstimator.estimate(text: summary) + 16
+            }
+            for message in ChatRoomContextBuilder.effectiveHistory(room: runtime.chatroom, history: runtime.messages)
+                where message.roleID != ChatRoomContextBuilder.systemRoleID {
+                expected += ContextTokenEstimator.estimate(text: message.content + (message.termination?.notice ?? "")) + 8
+            }
+            #expect(runtime.estimatedContextTokens == expected)
+            #expect(runtime.estimatedContextTokens == expected)
+        }
+        verify()
+        runtime.messages[0].content = "中文完整替换"; verify()
+        runtime.messages[1].termination = .cancelled; verify()
+        runtime.messages[1].termination = .failed; verify()
+        runtime.chatroom.compactionSummary = "压缩摘要"; verify()
+        runtime.chatroom.compactedUpToMessageID = runtime.messages[0].id; verify()
+        runtime.chatroom.compactionSummary = "修改过的摘要"; verify()
+        runtime.messages[2].roleID = ChatRoomContextBuilder.systemRoleID; verify()
+        runtime.messages.swapAt(0, 2); verify()
+        runtime.messages.removeLast(); verify()
+        runtime.chatroom.compactedUpToMessageID = "missing"; verify()
+        runtime.chatroom.compactionSummary = ""; verify()
+        runtime.messages.removeAll(); verify()
+        #expect(runtime.estimatedContextTokens == 400)
+    }
 }
 
 /// 手动生产事件，不访问网络；测试可以精确停在正文/工具/审批边界。

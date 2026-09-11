@@ -3,8 +3,22 @@ import Foundation
 /// 聊天室运行状态
 @MainActor
 public final class ChatRoomRuntime: ObservableObject {
-    @Published public var chatroom: ChatRoom
-    @Published public var messages: [ChatRoomMessage] = []
+    @Published public var chatroom: ChatRoom {
+        didSet { cachedContextEstimate = nil }
+    }
+    @Published public var messages: [ChatRoomMessage] = [] {
+        didSet { cachedContextEstimate = nil }
+    }
+    private var contextTokenCache = ChatRoomContextTokenCache()
+    private var cachedContextEstimate: Int?
+
+    /// 同一历史版本供状态栏、告警和压缩检查共用；增量修改只重算变化消息的字符。
+    public var estimatedContextTokens: Int {
+        if let cachedContextEstimate { return cachedContextEstimate }
+        let estimate = contextTokenCache.estimatedTokens(room: chatroom, history: messages)
+        cachedContextEstimate = estimate
+        return estimate
+    }
     @Published public var isRunning = false
     /// 当前角色发言/分段/输出阶段，不依赖 messages.last（用户可随时插话）。
     @Published public var liveSpeech: ChatRoomLiveSpeech?
@@ -328,7 +342,7 @@ public final class ChatRoomLoop {
         providerMaker: () throws -> any ChatRoomLLMProvider
     ) async {
         guard let budget = contextBudgetTokens?(runtime.chatroom), budget > 0 else { return }
-        let estimate = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
+        let estimate = runtime.estimatedContextTokens
         guard estimate >= Int(Double(budget) * 0.8) else { return }
 
         let keepRecent = 8
@@ -513,7 +527,7 @@ public final class ChatRoomLoop {
             }
         }
 
-        func applyAgentEvent(_ event: AgentEvent) throws {
+        @MainActor func applyAgentEvent(_ event: AgentEvent) {
             // 所有非增量事件都是显示边界；尤其审批可能长时间等待，不能把尾字留在缓冲。
             switch event {
             case .textDelta, .thinkingDelta: break
@@ -616,9 +630,7 @@ public final class ChatRoomLoop {
                 steeringProvider: { [weak self] in await self?.dequeueSteering() }
             )
 
-            for try await event in stream {
-                try applyAgentEvent(event)
-            }
+            await buffer.consume(stream, applyEvent: applyAgentEvent)
         } catch {
             buffer.completeMessage()
             let cancelled = Task.isCancelled || error is CancellationError || (error as? AgentError) == .aborted
@@ -848,15 +860,8 @@ public enum ChatRoomContextBuilder {
     /// 估算构建上下文的 token 占用（含摘要、检查点后的历史、systemPrompt 近似开销）。
     /// 工具结果不跨发言重放，故不计入（与实际 API 载荷一致）。
     public static func estimatedTokens(room: ChatRoom, history: [ChatRoomMessage]) -> Int {
-        // 角色 systemPrompt + 阶段提示 + 触发消息的近似开销
-        var total = 400
-        if let summary = room.compactionSummary, !summary.isEmpty {
-            total += ContextTokenEstimator.estimate(text: summary) + 16
-        }
-        for message in effectiveHistory(room: room, history: history) where message.roleID != systemRoleID {
-            total += ContextTokenEstimator.estimate(text: message.content + (message.termination?.notice ?? "")) + 8
-        }
-        return total
+        var cache = ChatRoomContextTokenCache()
+        return cache.estimatedTokens(room: room, history: history)
     }
 
     static func systemPrompt(

@@ -254,55 +254,6 @@ final class SessionRuntime: ObservableObject {
     }
 }
 
-/// 流式增量合并缓冲（STALL-FIX）：锁保护、Sendable，后台事件循环直接写入。
-/// 正文与思考分通道；drain 一次性取走并清脏标记。脏标记 false→true 才需要
-/// poke MainActor 调度 flush——绝大多数 delta 零 MainActor hop。
-final class StreamingDeltaBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var text = ""
-    private var thinking = ""
-    private var dirty = false
-
-    /// 追加正文增量；返回 true 表示脏标记发生 false→true（调用方需调度一次 flush）。
-    func appendText(_ delta: String) -> Bool {
-        lock.lock()
-        let needsSchedule = !dirty
-        text += delta
-        dirty = true
-        lock.unlock()
-        return needsSchedule
-    }
-
-    /// 追加思考增量；语义同 appendText。
-    func appendThinking(_ delta: String) -> Bool {
-        lock.lock()
-        let needsSchedule = !dirty
-        thinking += delta
-        dirty = true
-        lock.unlock()
-        return needsSchedule
-    }
-
-    /// 一次性取走全部累积并清脏标记（MainActor flush / 边界事件前对齐用）。
-    func drain() -> (text: String, thinking: String) {
-        lock.lock()
-        let t = text
-        let k = thinking
-        text = ""
-        thinking = ""
-        dirty = false
-        lock.unlock()
-        return (t, k)
-    }
-
-    /// 当前积压字符数（自适应节流用）。
-    var pendingCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return text.count + thinking.count
-    }
-}
-
 /// 后台构建一个全新 Session 的结果（在 `Task.detached` 中生成，主线程组装）。
 private struct BuiltSessionPayload: Sendable {
     let session: AgentSession
@@ -520,6 +471,7 @@ final class NewPiViewModel: ObservableObject {
     /// 会话切换序号：同项目内连续切换时，只有「最后发起的那次」才算数（GLM review 意见2 竞态防护）。
     /// 防止"冷 A 慢构建 → 热 B 先切 → A 就绪后覆盖 B"把用户拽回未选择的会话。复用分支同样取号。
     private var sessionSwitchGeneration = 0
+    private var providerStateGeneration = 0
 
     private var runtimes: [String: SessionRuntime] = [:]
     private var activeRuntime: SessionRuntime? {
@@ -747,6 +699,8 @@ final class NewPiViewModel: ObservableObject {
 
     /// 停止并清空所有后台的 AgentSession（在切换项目等场景下调用）。
     private func stopAllLiveSessions() async {
+        sessionSwitchGeneration += 1
+        isSwitchingSession = false
         for runtime in runtimes.values {
             runtime.eventTask?.cancel()
             await runtime.session.shutdown()
@@ -1047,15 +1001,29 @@ final class NewPiViewModel: ObservableObject {
     }
 
     func resumeSession(_ summary: SessionSummary) async {
-        guard summary.fileURL != currentSessionFileURL else { return }
-
+        guard let projectURL else { return }
+        sessionSwitchGeneration += 1
+        let generation = sessionSwitchGeneration
+        isSwitchingSession = true
+        defer {
+            if generation == sessionSwitchGeneration { isSwitchingSession = false }
+        }
+        let fileURL = summary.fileURL
+        // 点击当前会话也取号，取消之前仍在加载的其它会话；热命中不依赖磁盘。
+        // 但不重置当前会话的临时思考档位，也不重复激活已在前台的 runtime。
+        guard fileURL != currentSessionFileURL else { return }
+        if runtimes[fileURL.path] != nil {
+            await beginSession(restoredContext: nil, fileURL: fileURL, requestGeneration: generation)
+            return
+        }
         do {
-            let fileURL = summary.fileURL
             let context = try await Task.detached(priority: .userInitiated) {
                 try JSONLSessionStore().load(from: fileURL)
             }.value
-            await beginSession(restoredContext: context, fileURL: fileURL)
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
+            await beginSession(restoredContext: context, fileURL: fileURL, requestGeneration: generation)
         } catch {
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             appendTranscript(kind: .error, body: error.localizedDescription)
         }
     }
@@ -1103,6 +1071,8 @@ final class NewPiViewModel: ObservableObject {
     /// 结束当前活跃会话：停掉事件循环、移除 runtime、清空活跃状态。
     /// 之后用户需手动点击 New Session 或从历史列表恢复会话。
     private func closeActiveSession() async {
+        sessionSwitchGeneration += 1
+        isSwitchingSession = false
         guard let runtime = activeRuntime else { return }
         runtime.eventTask?.cancel()
         runtimes.removeValue(forKey: runtime.fileURL.path)
@@ -1239,44 +1209,43 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
-    private func beginSession(restoredContext: SessionContext?, fileURL: URL?) async {
+    private func beginSession(restoredContext: SessionContext?, fileURL: URL?, requestGeneration: Int? = nil) async {
         guard let projectURL else { return }
+        let generation: Int
+        if let requestGeneration {
+            guard requestGeneration == sessionSwitchGeneration else { return }
+            generation = requestGeneration
+        } else {
+            sessionSwitchGeneration += 1
+            generation = sessionSwitchGeneration
+        }
         isSwitchingSession = true
         // 会话级思考档位覆盖只在单次会话期间有效：切换会话即回到各 provider 的默认档位。
         thinkingLevelOverride = nil
-        defer { isSwitchingSession = false }
-
-        // 切换序号（GLM review 意见2）：每次发起取号，冷恢复 await 后校验，防同项目连点竞态。
-        let generation = sessionSwitchGeneration + 1
-        sessionSwitchGeneration = generation
+        defer {
+            if generation == sessionSwitchGeneration { isSwitchingSession = false }
+        }
 
         let profile: ProviderProfile
         do {
+            // 先读取缓存 runtime 自己的 header，而不是先解析无关的默认 provider。
+            if let fileURL, let existing = runtimes[fileURL.path] {
+                let header = await existing.session.attachedSessionHeader
+                guard generation == sessionSwitchGeneration, self.projectURL == projectURL,
+                      runtimes[fileURL.path] === existing else { return }
+                let sessionProfile = try resolveProfile(for: header)
+                existing.lastUsedAt = Date()
+                activeRuntime = existing
+                activeSessionID = existing.sessionID
+                rememberActiveSession(fileURL: fileURL)
+                await setActiveProviderState(sessionProfile)
+                NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
+                return
+            }
             profile = try resolveProfile(for: restoredContext?.header)
         } catch {
             appendTranscript(kind: .error, body: error.localizedDescription)
             activeProviderReady = false
-            return
-        }
-
-        // 复用已有的 runtime：不重建 agent / 不读文件 / 不加载 MCP，直接轻量切换并反映当前状态。
-        if let fileURL, let existing = runtimes[fileURL.path] {
-            NewPiLogger.info(category: "app", message: "Resumed live agent session", details: fileURL.path)
-            if let header = await existing.session.attachedSessionHeader {
-                activeSessionID = header.id
-                // 显示该会话自己选择的 provider（而不是默认 provider）：
-                // 会话内的 provider 切换记进了 header，切回时要原样反映。
-                let sessionProfile = (try? resolveProfile(for: header)) ?? profile
-                existing.lastUsedAt = Date()
-                activeRuntime = existing
-                rememberActiveSession(fileURL: fileURL)
-                await setActiveProviderState(sessionProfile)
-                return
-            }
-            existing.lastUsedAt = Date()
-            activeRuntime = existing
-            rememberActiveSession(fileURL: fileURL)
-            await setActiveProviderState(profile)
             return
         }
 
@@ -1287,6 +1256,7 @@ final class NewPiViewModel: ObservableObject {
         // 后台线程，主线程只做最终状态切换，避免切换卡顿、对话加载慢。
         do {
             let mcpTools = await loadMCPTools()
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             let resolver = providerCredentialResolver
 
             let payload = try await Task.detached(priority: .userInitiated) { () throws -> BuiltSessionPayload in
@@ -1304,7 +1274,11 @@ final class NewPiViewModel: ObservableObject {
                         contextWindow: profile.contextWindow(for: profile.modelID)
                     )
                     let h = restoredHeader ?? SessionHeader(workingDirectory: projectURL)
-                    await built.attachPersistence(fileURL: fileURL, header: h)
+                    if let restoredContext {
+                        await built.attachPersistence(fileURL: fileURL, context: restoredContext)
+                    } else {
+                        await built.attachPersistence(fileURL: fileURL, header: h)
+                    }
                     session = built
                     header = h
                     sessionFileURL = fileURL
@@ -1321,7 +1295,7 @@ final class NewPiViewModel: ObservableObject {
                         additionalTools: mcpTools,
                         contextWindow: profile.contextWindow(for: profile.modelID)
                     )
-                    await built.attachPersistence(fileURL: created.fileURL, header: created.context.header)
+                    await built.attachPersistence(fileURL: created.fileURL, context: created.context)
                     session = built
                     header = created.context.header
                     sessionFileURL = created.fileURL
@@ -1346,13 +1320,13 @@ final class NewPiViewModel: ObservableObject {
 
             // 竞态防护：构建期间（MCP 启动可能耗时数秒）用户可能已切换项目，
             // 此时旧项目的 runtime 不得注册为活跃会话，直接丢弃。
-            guard self.projectURL == projectURL else {
+            guard self.projectURL == projectURL, generation == self.sessionSwitchGeneration else {
                 NewPiLogger.info(
                     category: "app",
-                    message: "Discarding session built for previous project",
+                    message: "Discarding superseded session build",
                     details: "sessionFile=\(payload.fileURL.path)"
                 )
-                await payload.session.shutdown()
+                // 尚未启动事件循环或 prompt；直接释放，不能让旧上下文在 shutdown 时回写文件。
                 return
             }
 
@@ -1408,6 +1382,7 @@ final class NewPiViewModel: ObservableObject {
                 """
             )
         } catch {
+            guard generation == sessionSwitchGeneration, self.projectURL == projectURL else { return }
             NewPiLogger.error(
                 category: "app",
                 message: "Failed to begin session",
@@ -1420,10 +1395,18 @@ final class NewPiViewModel: ObservableObject {
 
     /// 把当前 provider 状态同步到 @Published（供两个分支复用）。
     private func setActiveProviderState(_ profile: ProviderProfile) async {
+        providerStateGeneration += 1
+        let request = providerStateGeneration
+        let project = projectURL
+        let runtime = activeRuntime
         activeProviderID = profile.id
         activeProviderName = profile.name
         activeProviderModel = profile.modelID
-        activeProviderReady = await providerCredentialResolver.hasAPIKey(for: profile)
+        activeProviderReady = false
+        let ready = await providerCredentialResolver.hasAPIKey(for: profile)
+        guard request == providerStateGeneration,
+              project == projectURL, runtime === activeRuntime else { return }
+        activeProviderReady = ready
     }
 
     @discardableResult
@@ -2341,7 +2324,7 @@ final class NewPiViewModel: ObservableObject {
         runtime.streamingFlushTask?.cancel()
         runtime.streamingFlushTask = nil
         let liveDriven = runtime.docController != nil
-        var items = liveDriven ? (runtime.liveTranscript ?? runtime.transcript) : runtime.transcript
+        var items = runtime.liveTranscript ?? runtime.transcript
         var mutated = false
         let drained = runtime.streamBuffer.drain()
         // 思考增量先于正文 flush：时序上 thinkingDelta 总是先于同轮 textDelta 到达。
@@ -2355,10 +2338,10 @@ final class NewPiViewModel: ObservableObject {
             return
         }
         // 原 handle(.textDelta) 里的逐事件状态迁移，STALL-FIX 后按 flush 节奏统一执行
-        //（@Published 同值不重复发布，SwiftUI 无额外刷新）。
-        runtime.agentActivity = .writing
-        runtime.streamingBubbleComplete = false
-        runtime.finalAnswerComplete = false
+        // @Published 不会自动去重，纯正文刷新不能让整个面板再次失效。
+        if runtime.agentActivity != .writing { runtime.agentActivity = .writing }
+        if runtime.streamingBubbleComplete { runtime.streamingBubbleComplete = false }
+        if runtime.finalAnswerComplete { runtime.finalAnswerComplete = false }
         runtime.tokenRateTracker.record(delta: drained.text)
         if runtime === activeRuntime, agentActivity != .writing {
             agentActivity = .writing
@@ -2390,6 +2373,7 @@ final class NewPiViewModel: ObservableObject {
     /// flush 结果落地：直连模式存影子 + 投递 WebView；否则发布 @Published（旧路径）。
     private func storeFlushTarget(_ items: [NewPiTranscriptItem], live: Bool, on runtime: SessionRuntime) {
         guard live else {
+            runtime.liveTranscript = nil
             runtime.transcript = items
             return
         }

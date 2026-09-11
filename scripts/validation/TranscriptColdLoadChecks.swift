@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import NewPiCore
 import WebKit
@@ -98,6 +99,7 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: name)
         }
         webView.navigationDelegate = nil
+        coordinator.detach()
         window.orderOut(nil)
         window.contentView = nil
     }
@@ -197,6 +199,128 @@ struct TranscriptColdLoadChecks {
             page.coordinator.apply(transcript: items, isStreaming: false, streamingBubbleComplete: true, tintHues: hues)
             try await Task.sleep(for: .milliseconds(50))
             precondition(page.applyCount == 1)
+            if name == "session-first" {
+                try await checkLifecycle(page, items: items, hues: hues)
+            }
         }
+    }
+
+    @MainActor
+    private static func checkLifecycle(_ page: ColdPage, items: [NewPiTranscriptItem], hues: [UUID: Int]) async throws {
+        var notifications = 0
+        let observation = page.controller.objectWillChange.sink {
+            MainActor.assumeIsolated { notifications += 1 }
+        }
+        defer { observation.cancel() }
+        let nearBottom = page.controller.isNearBottom
+        _ = try await page.webView.callAsyncJavaScript("""
+            for(let i=0;i<100;i++) {
+              window.webkit.messageHandlers.scrollState.postMessage({nearBottom,scrollTop:i});
+              window.webkit.messageHandlers.turnOffsets.postMessage({positions:[]});
+            }
+            return true;
+            """, arguments: ["nearBottom":nearBottom], in: nil, contentWorld: .page)
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(notifications == 0, "Equal UI state must not publish, even when scrollTop changes")
+
+        _ = try await page.webView.evaluateJavaScript("""
+            window.orderOps=0;
+            const originalApply=window.transcriptDoc.apply;
+            window.transcriptDoc.apply=json=>{
+              window.orderOps+=JSON.parse(json).filter(op=>op.op==='order').length;
+              return originalApply(json);
+            };
+            true;
+            """)
+        var latest = items
+        let beforeBurst = page.applyCount
+        for i in 0..<100 {
+            latest[latest.count-1] = NewPiTranscriptItem(id: items.last!.id, kind: .assistant, body: "Latest streaming \(i)")
+            page.coordinator.applyLive(transcript: latest, isStreaming: true,
+                streamingBubbleComplete: false, tintHues: hues)
+        }
+        // 陈旧 SwiftUI 快照不得替换直连流式态。
+        page.coordinator.apply(transcript: items, isStreaming: false, streamingBubbleComplete: true, tintHues: hues)
+        try await wait { page.applyCount >= beforeBurst+1 }
+        try await Task.sleep(for: .milliseconds(100))
+        precondition(page.applyCount-beforeBurst <= 2, "One in-flight batch plus one latest snapshot, not 100 queued frames")
+        let body = try await page.webView.evaluateJavaScript("document.querySelector('main').lastElementChild.textContent") as? String
+        precondition(body?.contains("Latest streaming 99") == true, "Latest live text must win")
+
+        page.controller.setVisible(false)
+        let beforeHidden = page.applyCount
+        for i in 0..<100 {
+            latest[latest.count-1] = NewPiTranscriptItem(id: items.last!.id, kind: .assistant, body: "Hidden final \(i)")
+            page.coordinator.applyLive(transcript: latest, isStreaming: false,
+                streamingBubbleComplete: true, tintHues: hues)
+        }
+        page.coordinator.endLiveApply()
+        try await Task.sleep(for: .milliseconds(100))
+        precondition(page.applyCount == beforeHidden, "Hidden document must not receive content batches")
+        page.controller.setVisible(true)
+        try await wait { page.applyCount == beforeHidden+1 }
+        let resumed = try await page.webView.evaluateJavaScript("document.querySelector('main').lastElementChild.textContent") as? String
+        precondition(resumed?.contains("Hidden final 99") == true, "Showing a completed background turn must replay the latest snapshot")
+
+        let added = NewPiTranscriptItem(kind: .user, body: "Appended user", messageIndex: 20)
+        latest.append(added)
+        page.coordinator.apply(transcript: latest, isStreaming: false, streamingBubbleComplete: true, tintHues: hues)
+        try await wait { page.applyCount == beforeHidden+2 }
+        let orderOps = try await page.webView.evaluateJavaScript("window.orderOps") as? Int
+        precondition(orderOps == 0, "Normal append must not reorder every existing node")
+        latest.swapAt(0, latest.count-1)
+        page.coordinator.apply(transcript: latest, isStreaming: false, streamingBubbleComplete: true, tintHues: hues)
+        try await wait { page.applyCount == beforeHidden+3 }
+        let firstID = try await page.webView.evaluateJavaScript("document.querySelector('main').firstElementChild.dataset.iid") as? String
+        precondition(firstID == added.id.uuidString, "Actual reorder must still be applied")
+        latest[0] = NewPiTranscriptItem(id: added.id, kind: .user, body: added.body, messageIndex: 21)
+        page.coordinator.apply(transcript: latest, isStreaming: false, streamingBubbleComplete: true, tintHues: hues)
+        try await wait { page.applyCount == beforeHidden+4 }
+        let forkIndex = try await page.webView.evaluateJavaScript("document.querySelector('.ti-action-fork').dataset.forkIndex") as? String
+        precondition(forkIndex == "21", "Metadata-only changes must invalidate the signature")
+
+        // 只调用真实恢复回调，不终止任何系统进程，也不靠新的 SwiftUI apply 掩盖快照丢失。
+        page.loaded = false
+        let beforeRecovery = page.applyCount
+        page.coordinator.webViewWebContentProcessDidTerminate(page.webView)
+        try await wait { page.loaded && page.applyCount == beforeRecovery+1 }
+        let recovered = try await page.webView.callAsyncJavaScript("""
+            return {rows:document.querySelectorAll('.ti').length,text:document.querySelector('main').textContent};
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String:Any]
+        precondition(recovered?["rows"] as? Int == latest.count)
+        precondition((recovered?["text"] as? String)?.contains("Hidden final 99") == true)
+
+        page.controller.setVisible(false)
+        latest[latest.count-1] = NewPiTranscriptItem(id: latest.last!.id, kind: .assistant,
+            body: "Live recovery </script> \"quoted\" 中文")
+        page.coordinator.applyLive(transcript: latest, isStreaming: true,
+            streamingBubbleComplete: false, tintHues: hues)
+        page.loaded = false
+        let beforeHiddenRecovery = page.applyCount
+        page.coordinator.webViewWebContentProcessDidTerminate(page.webView)
+        try await wait { page.loaded }
+        try await Task.sleep(for: .milliseconds(100))
+        precondition(page.applyCount == beforeHiddenRecovery, "Hidden recovery must defer content replay")
+        page.controller.setVisible(true)
+        try await wait { page.applyCount == beforeHiddenRecovery+1 }
+        let liveRecovery = try await page.webView.callAsyncJavaScript("""
+            return {text:document.querySelector('main').lastElementChild.textContent,
+              locked:document.querySelector('.ti-action-fork').disabled};
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String:Any]
+        // typographer 会把正文里的 ASCII 引号变成弯引号；这里只验证传输没有截断或执行 HTML。
+        let liveText = liveRecovery?["text"] as? String ?? ""
+        precondition(liveText.contains("Live recovery </script>") && liveText.contains("quoted") && liveText.contains("中文"),
+            "Live snapshot must survive JSON escaping and Markdown typography")
+        precondition(liveRecovery?["locked"] as? Bool == true, "Process replay must retain live fork lock")
+        print("PASS: deduplicated UI notifications; single-flight/latest-only content; hidden catch-up; append/reorder/metadata; static and hidden-live process recovery")
+    }
+
+    @MainActor
+    private static func wait(_ condition: () -> Bool) async throws {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        preconditionFailure("Timed out waiting for document lifecycle")
     }
 }

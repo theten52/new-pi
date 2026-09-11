@@ -255,6 +255,14 @@ public actor AgentSession {
         }
     }
 
+    /// 冷恢复已解码的上下文直接复用，保留分支 leaf/条目身份，避免再次读取整个 JSONL。
+    public func attachPersistence(fileURL: URL, context: SessionContext) {
+        persistenceFileURL = fileURL
+        persistenceHeader = context.header
+        persistenceContext = context
+        persistenceLeafID = context.leafID
+    }
+
     public var attachedSessionHeader: SessionHeader? {
         persistenceHeader
     }

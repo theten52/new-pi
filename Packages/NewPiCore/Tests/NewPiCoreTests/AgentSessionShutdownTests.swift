@@ -64,6 +64,33 @@ actor StreamGate {
 @Suite("AgentSessionShutdown")
 struct AgentSessionShutdownTests {
 
+    @Test("attaching decoded context retains branches and leaf without reading a file")
+    func attachDecodedContext() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("session.jsonl")
+        var restored = SessionContext(header: SessionHeader(workingDirectory: directory))
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let root = SessionManager.appendMessage(.user(UserMessage(content: "root", timestamp: timestamp)), to: &restored, parentID: nil)
+        _ = SessionManager.appendMessage(.user(UserMessage(content: "other branch", timestamp: timestamp)), to: &restored, parentID: root.id)
+        let leaf = SessionManager.appendMessage(.user(UserMessage(content: "active branch", timestamp: timestamp)), to: &restored, parentID: root.id)
+        let session = AgentSession(
+            context: AgentContext(systemPrompt: "test", messages: SessionManager.messages(from: restored), workingDirectory: directory),
+            config: AgentLoopConfig(model: AgentLoopTestSupport.defaultModel, llm: MockLLMProviderBox(scripts: []))
+        )
+        await session.attachPersistence(fileURL: file, context: restored)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(await session.branchEntryIDs() == [root.id, leaf.id])
+        #expect(await session.attachedSessionHeader?.id == restored.header.id)
+        await session.setSessionLabel("restored")
+        let saved = try JSONLSessionStore().load(from: file)
+        #expect(saved.entries.map(\.id) == restored.entries.map(\.id))
+        #expect(saved.leafID == leaf.id)
+        #expect(saved.header.label == "restored")
+        #expect(SessionManager.messages(from: saved) == SessionManager.messages(from: restored))
+    }
+
     @Test("shutdown during a streaming run stops it and persists the partial assistant text")
     func shutdownPersistsPartialOutput() async throws {
         let gate = StreamGate()

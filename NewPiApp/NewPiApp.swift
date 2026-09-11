@@ -1961,7 +1961,7 @@ struct ChatRoomDetailView: View {
         guard let cap = limit, cap > 0 else { return nil }
 
         // 与自动压缩共用核心估算器（摘要检查点 + 检查点后消息，与实际 API 载荷一致）
-        let usedTokens = ChatRoomContextBuilder.estimatedTokens(room: runtime.chatroom, history: runtime.messages)
+        let usedTokens = runtime.estimatedContextTokens
         return ContextBudget(usedTokens: usedTokens, limitTokens: cap)
     }
 

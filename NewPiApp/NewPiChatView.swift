@@ -72,6 +72,7 @@ struct NewPiSessionPanel: View {
                         streamingBubbleComplete: runtime.streamingBubbleComplete,
                         storeKey: runtime.sessionID,
                         controller: docController,
+                        isVisible: viewModel.isActiveRuntime(runtime),
                         tintHues: NewPiViewModel.transcriptTintHues(for: runtime.transcript),
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；
                         // 无记录则落底。文档内同步锚定，无「高度未回」中间态。
@@ -129,6 +130,17 @@ struct NewPiSessionPanel: View {
             // 流式直连通道（STREAMING-LAYOUT-ISOLATION）：runtime ↔ 本面板控制器结对。
             // keep-alive 常驻挂载 → 绑定全程有效；面板淘汰时 webview 同亡，弱引用自动清零。
             runtime.docController = docController
+        }
+        .onDisappear {
+            docController.setVisible(false)
+            docController.endLiveApply()
+            if runtime.docController === docController {
+                if let live = runtime.liveTranscript {
+                    runtime.transcript = live
+                    runtime.liveTranscript = nil
+                }
+                runtime.docController = nil
+            }
         }
         .onChange(of: runtime.finalAnswerComplete) { oldValue, newValue in
             // 礼花表达“任务完成”，而不是“请求刚开始”。只有最终答复（无后续工具调用）

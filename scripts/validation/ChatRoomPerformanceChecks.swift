@@ -40,7 +40,7 @@ struct ChatRoomPerformanceChecks {
             controller.runtime.isRunning = true
             controller.runtime.liveSpeech = ChatRoomLiveSpeech(id: liveID, messageID: liveID, phase: .text)
             let warm = controller.transcriptSnapshot()
-            var signatures: [UUID: String] = [:]
+            var signatures: [UUID: TranscriptSignatureProbe.Signature] = [:]
             for item in warm.items {
                 signatures[item.id] = signature(item, lastID: warm.items.last?.id, tint: warm.tintHues[item.id])
             }
@@ -53,7 +53,7 @@ struct ChatRoomPerformanceChecks {
                 let start = ContinuousClock.now
                 let snapshot = controller.transcriptSnapshot()
                 let adapted = ContinuousClock.now
-                var next: [UUID: String] = [:]
+                var next: [UUID: TranscriptSignatureProbe.Signature] = [:]
                 for item in snapshot.items {
                     let value = signature(item, lastID: snapshot.items.last?.id, tint: snapshot.tintHues[item.id])
                     if signatures[item.id] != value { changed += 1 }
@@ -77,7 +77,7 @@ struct ChatRoomPerformanceChecks {
         }
     }
 
-    private static func signature(_ item: NewPiTranscriptItem, lastID: UUID?, tint: Int?) -> String {
+    private static func signature(_ item: NewPiTranscriptItem, lastID: UUID?, tint: Int?) -> TranscriptSignatureProbe.Signature {
         TranscriptSignatureProbe.signature(of: item,
             streaming: item.isStreaming(isRunning: true, bubbleComplete: false, lastItemID: lastID), tint: tint)
     }
