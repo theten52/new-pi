@@ -2061,7 +2061,7 @@ struct ChatRoomDetailView: View {
     private func sendUserMessage() {
         let content = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
-        controller.userSpeak(content: content)
+        guard controller.userSpeak(content: content) else { return }
         draft.text = ""
         // 发送 = 明确要看最新内容的意图（与 Session 面板 sendComposerInput 对齐，
         // PIN-FIX）：显式钉底。否则用户停在中部时讨论输出按保锚纪律不跟随，

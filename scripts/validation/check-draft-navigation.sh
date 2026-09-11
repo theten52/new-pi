@@ -35,6 +35,8 @@ room_binding = re.search(r'NewPiComposerTextView\(\s*text:\s*([^,]+),', app[star
 attachments = re.search(r'NewPiDraftAttachmentStrip\(drafts:\s*([^\)]+)\)', chat).group(1).strip()
 send_start = chat.index('    private func sendComposerInput()')
 send = chat[send_start:chat.index('    // MARK: - 图片附件采集', send_start)]
+room_send_start = app.index('    private func sendUserMessage()', start)
+room_send = app[room_send_start:app.index('    private func endDiscussion(', room_send_start)]
 def body(binding, attachment_binding, submit):
     return f'''    var body: some View {{
         NewPiComposerTextView(text: {binding}, onSubmit: {submit})
@@ -45,7 +47,7 @@ def body(binding, attachment_binding, submit):
             }}
     }}
 '''
-(tmp/'Fixtures.swift').write_text('import SwiftUI\nimport NewPiCore\n'+session+body(session_binding, attachments, 'sendComposerInput')+send+'}\n'+room+body(room_binding, 'nil', '{}')+'}\n')
+(tmp/'Fixtures.swift').write_text('import SwiftUI\nimport NewPiCore\n'+session+body(session_binding, attachments, 'sendComposerInput')+send+'}\n'+room+'    @StateObject private var docController = TranscriptDocumentController()\n'+body(room_binding, 'nil', 'sendUserMessage')+room_send+'}\n')
 print('DRAFT SOURCE:', revision or 'working tree')
 PY
 xcrun swiftc -swift-version 6 -parse-as-library -I "$BIN/Modules" \

@@ -49,5 +49,34 @@
 1. 仅保证持有者仍在内存期间保留草稿。Session LRU 淘汰、切项目、关闭运行时，聊天室删除或退出 App 后不保留。
    若需跨这些边界保留，应另行设计轻量草稿存储，不能简单无限保活所有 WebView。
 2. 保存已提交到 Binding 的文本；未提交 marked text、光标/选区、撤销栈及尚未完成的异步图片采集不保证跨重建保留。
-3. 聊天室 `userSpeak` 吞下持久化错误后 UI 仍清稿是既有问题，本次未改；需要单独设计发送接受反馈及失败重试语义。
+3. 草稿生命周期这批未修改聊天室 `userSpeak` 失败清稿问题；后续修复记录见下一节。
 4. 纯 Session 热切换、实际聊天室阶段/审批、磁盘冷恢复和滚动位置的整窗组合验收仍未完成。
+
+## 后续：聊天室发送接受边界
+
+后续发现并复现两个相连的问题：`ChatRoomLoop.userSpeak` 先修改内存，再调用 `appendMessage`；
+后者抛错时 controller 只展示错误、返回 Void，UI 无条件清空草稿并落底。
+结果为输入丢失、内存出现未保存消息；用户重新输入重试后，内存历史比磁盘多一条。
+
+修复只调整接受链路：
+
+1. `appendMessage` 成功返回后才追加 `runtime.messages`，运行中再加入 steering 队列。
+2. `ChatRoomFlowController.userSpeak` 用 `@discardableResult -> Bool` 反馈接受状态，失败仍走原 `flowError` 提示。
+3. `sendUserMessage` 仅成功后清稿/落底；失败保留未经 trim 的完整草稿（成功发送内容仍沿用原 trim 规则）。
+4. `updatedAt` 配置保存仍为 best-effort；消息已经保存就不能因排序元数据失败提示重发。
+
+验证：
+- 修改生产前，扩展的 `check-draft-navigation.sh` 在「聊天室发送失败保留原始草稿」处失败；
+  新增 Core `ChatRoomUserSendTests` 在空闲/运行中两组的历史 ID、条数及磁盘一致性断言失败（共 6 个 issue）。
+- 修复后同一 UI/Controller/Core 路径在随机临时目录上通过：失败提示、原样保稿、不增加内存消息、不落底；
+  排除路径障碍后重试仅保存一次、清稿、落底，内存和磁盘 ID 一致；空稿重复提交无副作用。
+- Core 另验消息已保存但配置路径不可写时不拒绝；`swift test --filter ChatRoom` 共 85 tests / 19 suites 通过，
+  `check-chatroom-controller.sh` 和完整 NewPi Debug build 通过。
+
+扩展测试提取真实聊天室提交方法，调用真实 controller/loop/store；只替换转录渲染，记录落底意图次数。
+运行中 UI 分支用 `runtime.isRunning` fixture，未调用真实模型，不能据此宣称完整实时 steering 端到端验收；
+既有引擎插话测试在上述 85 项回归中通过。消息和故障目录全部为临时 fixture，不动用户会话。
+
+存储层本轮未改：现有追加使用 FileHandle，未提供部分写入回滚、断电持久保证或跨进程原子事务；
+本次注入的是目标路径被目录占用、在追加前抛错的情况，不涵盖所有磁盘失败，更不是通用 exactly-once。
+未重启正在运行的 App、未更新 `dist`；实际产品故障环境下的人工验收仍需另做。

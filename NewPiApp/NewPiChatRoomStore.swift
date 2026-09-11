@@ -187,8 +187,16 @@ final class ChatRoomFlowController: ObservableObject {
         transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles, liveSpeech: runtime.liveSpeech)
     }
 
-    func userSpeak(content: String) {
-        do { try loop.userSpeak(content: content, runtime: runtime) } catch { flowError = error.localizedDescription }
+    /// 返回消息是否已落盘并被接受；UI 只有在 true 时才清稿和落底。
+    @discardableResult
+    func userSpeak(content: String) -> Bool {
+        do {
+            try loop.userSpeak(content: content, runtime: runtime)
+            return true
+        } catch {
+            flowError = error.localizedDescription
+            return false
+        }
     }
 
     func userVote(optionID: String) {

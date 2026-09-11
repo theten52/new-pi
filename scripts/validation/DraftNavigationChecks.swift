@@ -4,7 +4,10 @@ import NewPiCore
 import SwiftUI
 
 // 仅替换不在本检查范围的渲染和发送后端。草稿归属、视图声明/绑定及 NSTextView 来自生产源码。
-@MainActor final class TranscriptDocumentController: ObservableObject { func scrollToBottom() {} }
+@MainActor final class TranscriptDocumentController: ObservableObject {
+    static var scrollRequests = 0
+    func scrollToBottom() { Self.scrollRequests += 1 }
+}
 @MainActor final class NewPiViewModel: ObservableObject {
     var acceptsSend = false
     var accepted = 0
@@ -146,6 +149,42 @@ private struct DraftRoot: View {
         try require(try editor().string == "Session B 草稿", "清 A 不影响 B")
         try await select(2)
         try require(try editor().string == "Room A 草稿", "Room→Session→Room 草稿保留")
+        // 调用真实聊天室提交方法 + 控制器 + Core 存储，故障只发生在随机临时路径。
+        let room = rooms[0]
+        let blocked = directory.appendingPathComponent("rooms").appendingPathComponent(room.runtime.chatroom.id)
+            .appendingPathComponent("messages.jsonl")
+        for running in [false, true] {
+            let prior = room.runtime.messages.map(\.id)
+            let oldScrolls = TranscriptDocumentController.scrollRequests
+            room.runtime.isRunning = running
+            try await type("  发送失败后重试 \(running)  \n")
+            let originalDraft = try editor().string
+            // 临时历史仍在 runtime 中；故障解除后恢复到测试磁盘。避免 chmod 的权限差异。
+            if FileManager.default.fileExists(atPath: blocked.path) { try FileManager.default.removeItem(at: blocked) }
+            try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+            try editor().onSubmit?()
+            try await settle()
+            try require(room.flowError != nil, "聊天室磁盘错误向 UI 报告")
+            try require(try editor().string == originalDraft, "聊天室发送失败保留原始草稿（含空白）")
+            try require(room.runtime.messages.map(\.id) == prior, "失败不产生仅存在内存的消息")
+            try require(TranscriptDocumentController.scrollRequests == oldScrolls, "失败不发起落底意图")
+            room.flowError = nil // 等价于用户关闭错误提示。
+            try FileManager.default.removeItem(at: blocked)
+            try disk.saveMessages(room.runtime.messages, for: room.runtime.chatroom.id)
+            try editor().onSubmit?()
+            try await settle()
+            try require(try editor().string.isEmpty && room.runtime.messages.count == prior.count + 1,
+                        "聊天室恢复后重试接受一次并清稿（running=\(running)）")
+            try require(try disk.loadMessages(for: room.runtime.chatroom.id).map(\.id) == room.runtime.messages.map(\.id),
+                        "重试后内存与磁盘消息 ID 一致，无重复")
+            try require(TranscriptDocumentController.scrollRequests == oldScrolls + 1, "成功后才发起一次落底")
+            try editor().onSubmit?()
+            try await settle()
+            try require(room.runtime.messages.count == prior.count + 1
+                        && TranscriptDocumentController.scrollRequests == oldScrolls + 1,
+                        "清稿后再次提交不重复发送或落底")
+        }
+        room.runtime.isRunning = false
         print("PASS: 生产草稿声明/绑定 + 实际 SessionRuntime/聊天室控制器 + 真实输入框重建；无网络、无用户数据")
     }
 }

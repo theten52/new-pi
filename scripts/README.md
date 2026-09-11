@@ -260,6 +260,11 @@ Session 不启动事件循环，聊天室用临时存储及空角色配置，不
 会在 Room A→B→A 保留断言失败；不切分支、不覆盖工作区。仅用于相容版本的失败对照，非任意版本完整构建。
 生命周期边界见[修复记录](../docs/dev-notes/2026-09-12-navigation-draft-lifetime.md)。
 
+后续同一脚本还提取聊天室 `sendUserMessage`，走真实 controller/loop/store，验证临时消息路径不可写时
+草稿与内存历史保持、不落底；修复路径后空闲/运行中均只接受一次，并核对磁盘 ID 和空稿重复提交。
+Session 发送后端仍为替身，聊天室发送改用临时磁盘；不模拟部分写入/断电或真实网络。
+Core 定向入口：在 `Packages/NewPiCore/` 下执行 `swift test --filter ChatRoomUserSendTests`。
+
 ### 流式刷新与输入法组词
 
 `NEWPI_EXPECT_DRAFT_FIX=1 bash scripts/validation/check-composer-streaming.sh` 用真实 SwiftUI `@State`、共用输入框和 AppKit NSTextInputClient 组词 API 模拟持续输出时的输入。

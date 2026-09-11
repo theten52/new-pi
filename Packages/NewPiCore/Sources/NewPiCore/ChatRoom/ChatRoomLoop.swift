@@ -287,8 +287,10 @@ public final class ChatRoomLoop {
             content: content,
             phase: runtime.chatroom.currentPhase
         )
-        runtime.messages.append(message)
         try store.appendMessage(message, to: runtime.chatroom.id)
+
+        // 落盘成功才接受消息。否则 UI 保留草稿重试时，会重复追加内存中未保存的消息。
+        runtime.messages.append(message)
 
         // 发言进行中：同时进入 steering 队列，正在发言的模型在工具批次间即时看到
         if runtime.isRunning {
