@@ -878,12 +878,8 @@ struct WorkbenchUIChecks {
     private static func checkSidebarClick(_ model: WorkbenchModel, host: NSView, window: NSWindow,
                                           web: WKWebView, editor: NewPiComposerInnerTextView) async throws {
         func toggleButton() -> NSView? {
-            var pending: [NSView] = [window.contentView?.superview ?? host]
-            while let view = pending.popLast() {
-                if view is NSButton && publicTexts(view).contains("显示或隐藏侧栏") { return view }
-                pending.append(contentsOf: view.subviews)
-            }
-            return nil
+            // 按系统 toolbar item 定位，不要求产品为探针添加自定义按钮或中文标签。
+            window.toolbar?.items.first { $0.itemIdentifier == .toggleSidebar }?.view
         }
         guard let button = toggleButton() else {
             print("SKIP: 原生窗口未暴露侧栏 toolbar 按钮，不能据此认定产品按钮缺失")

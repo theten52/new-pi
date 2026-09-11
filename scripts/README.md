@@ -190,7 +190,7 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 全窗口产物为同目录下 `shell-{1200,900}-{light,dark}-{session,room}.png`，但**完整截图 UNVERIFIED**：
 根 NSView `cacheDisplay` + WK snapshot 在 macOS Tahoe 的玻璃侧栏区域空白，即使尝试实际 `NSSplitView` 子视图缓存仍无有效像素。
 生成 PNG 或退出码 0 不等于完整视觉捕获，未完成与原型同内容对照验收；玻璃缺口计入 SKIP/PARTIAL，strict 会因此失败。
-本机无录屏权限，不请求权限、不抓桌面；独立 component 模式的按钮/popover **9 项 AX SKIP** 仍需单独解决。
+该轮无录屏权限，probe 本身不请求权限、不抓桌面；独立 component 模式的按钮/popover **9 项 AX SKIP** 仍需单独解决。
 
 第一批 WK/Debug 复跑及 cold/performance 数据已记录，不能当作第二批性能重跑；
 显式 toolbar 侧栏按钮后的完整 Debug build 和聊天室 controller 守卫最终复跑已通过。
@@ -205,6 +205,20 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 
 完整窗口的侧栏 toolbar 按钮在独立宿主中仍无法定位，明确 SKIP；加 `NEWPI_WORKBENCH_UI_STRICT=1` 时因此失败。
 鼠标检查通过不等于旧 AX 按压检查或 VoiceOver 已通过，也不包括真实会话网络调用、聊天室阶段业务及全部外观组合。
+
+### 正式 App 系统侧栏开关验证
+
+`scripts/validation/NativeSidebarChecks.swift` 检查真正 WindowGroup 中系统提供的侧栏按钮。
+需手动授权执行宿主辅助功能，并提前打开指定版本的 NewPi 普通会话、展开侧栏；不自动启动/退出应用，不请求权限，不截图。
+
+- 编译：`swiftc -parse-as-library scripts/validation/NativeSidebarChecks.swift -o /private/tmp/newpi-native-sidebar-checks`
+- 只读定位：`/private/tmp/newpi-native-sidebar-checks "$PWD/build/derived/Build/Products/Debug/NewPi.app" inspect`
+- 往返验收：`/private/tmp/newpi-native-sidebar-checks "$PWD/build/derived/Build/Products/Debug/NewPi.app" check`
+
+检查无旧自定义标识、仅一个系统开关，AXPress 收起/展开后恢复输入区布局与 AX 身份，现有文本保持。
+只识别 toolbar 内公开标识/英文或中文侧栏描述，未能唯一定位则失败，不猜坐标点击。
+不写草稿、调用模型或遍历 Web 正文；不验证动画帧率和 VoiceOver。系统收展可能正常更新窗口或滚动状态。
+源码保持在工作区内，临时目录只存编译产物，避免工作区外源码编辑授权。
 
 ## 共用审批 UI 验证
 

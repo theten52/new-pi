@@ -2,7 +2,7 @@
 
 > 用户已选择 **A · 文档工作台**：第一批阅读面/输入区、第二批生产外壳/侧栏/身份栏/角色栏已接入；HTML 原型不进入生产。
 > 当前分支 `feat/document-workbench-ui`；第一批 checkpoint `eb95816`、ignore 调整 `db37b18`、第二批外壳 `1715150` 已提交。
-> 第二批整窗布局、聊天室守卫和完整 Debug 构建已通过；布局检查不等于完整截图或全量交互验收，玻璃侧栏截图仍为 **UNVERIFIED**。第一批性能数据保留历史边界。
+> 第二批整窗布局、聊天室守卫和完整 Debug 构建已通过；后续授权实机验收已取得深色普通会话的完整玻璃侧栏截图，并修复重复侧栏按钮。独立 probe 的截图限制仍存在，不代表全量交互或原型同内容验收完成。第一批性能数据保留历史边界。
 
 ## 1. 选择与范围
 
@@ -29,7 +29,7 @@
 | 对照项 | 生产接入与边界 |
 |---|---|
 | 1. 根级分栏与宽度 | `NewPiWorkbenchShell` 仅在 root 使用一个 `NavigationSplitView`；侧栏 min/ideal 226、max 250pt。host 实测 detail 左边界约 234pt，包含 macOS 容器边距，不能把它当作纯侧栏内容宽度或玻璃像素证据。 |
-| 2. 原生窗口与侧栏开关 | 默认 `.all`，保留系统标题栏、红绿灯与分栏拖动；移除自动 sidebar toggle，改为显式原生 toolbar 按钮切换 `.all` / `.detailOnly`。保留显示/隐藏能力，不宣称新按钮已实机按压验收。 |
+| 2. 原生窗口与侧栏开关 | 默认 `.all`，保留系统标题栏、红绿灯与分栏拖动；最终恢复 NavigationSplitView 自动提供的系统 sidebar toggle，不屏蔽系统按钮、不另加手动状态切换。系统负责收展过渡，正式 App 的 AXPress 往返已通过，见末节记录。 |
 | 3. 项目卡片 | 自定义 `ScrollView` 侧栏复用 `NewPiWorkbenchProjectCard`；整卡可点击，沿用 `pickProject` → 打开项目流程，不自动创建会话。 |
 | 4. 会话/聊天室条目 | 共用 `NewPiWorkbenchSidebarEntry`，默认入口与按钮中文化、轻底及绿色选中态统一；重命名/归档、编辑/删除、每次多显示 5 条及收起行为保留。目录只显示短名，分组/折叠身份仍用完整路径，完整路径提示保留，不合并同名文件夹。 |
 | 5. 唯一身份 header | root 的 `NewPiWorkbenchHeader` 展示实际 session label/title（缺省回退）或聊天室名称及对应目录；删除旧 `Chat (branch)` navigationTitle、Session 额外目录行与聊天室重复身份栏。 |
@@ -106,7 +106,7 @@ fixture 读取可能命中页缓存，不能视为真实磁盘冷读性能。
 - host 实测 detail 左边界约 234pt；这只证明布局读数。独立 component 模式的按钮/popover **9 项 AX SKIP** 仍存在，FULL_WINDOW 不补齐它们。
 - 产物命名为 `/private/tmp/newpi-ui/shell-{1200,900}-{light,dark}-{session,room}.png`。根视图 `cacheDisplay` 加同坐标 WK snapshot 合成时，**macOS Tahoe 玻璃侧栏区域空白**；尝试缓存实际 `NSSplitView` 侧栏子视图后仍无有效像素。
 - 因此完整窗口视觉捕获明确为 **UNVERIFIED / 不完整截图**。PNG 文件生成、正文非空检查或布局 PASS，都不等于玻璃侧栏截图正确；未完成与原型同内容对照验收，不宣称“完全还原”。该缺口记录为 SKIP，并汇总为 PARTIAL；严格模式下不完整截图会非零退出。
-- 本机无屏幕录制权限；不请求权限、不抓桌面或其他窗口，不以 HTML 重绘替代原生截图。
+- 当时本机无屏幕录制权限；该 probe 不请求权限、不抓桌面或其他窗口，不以 HTML 重绘替代原生截图。后续用户主动授权的正式 App 验收见下节。
 - 显式 toolbar 侧栏按钮接入后，完整 `NewPi` scheme Debug 构建最终通过（`BUILD SUCCEEDED`）；`check-chatroom-controller.sh` 通过通知隔离、目录传播、运行/审批/取消与删除守卫、订阅清理检查。未启动生产会话，未替换 `dist`，没有重新宣称第二批性能提升。
 
 ### 后续：窗口内鼠标事件验证
@@ -128,16 +128,71 @@ fixture 读取可能命中页缓存，不能视为真实磁盘冷读性能。
 也不证明系统工具栏、完整 VoiceOver、所有宽度/外观组合的鼠标交互或真实聊天室 steering 已通过。
 本轮没有生产代码改动，没有访问真实会话、执行模型或修改系统权限。
 
+### 授权后的正式 App 验收（05:42–05:48）
+
+用户手动授予执行宿主辅助功能及屏幕录制权限后，两项系统查询均为 true。
+启动的是 `build/derived/Build/Products/Debug/NewPi.app`，不是 `dist`，不再使用内存 fixture 代替正式 WindowGroup。
+临时验收程序位于 `/private/tmp/newpi-ui/ActualAppChecks.swift`，编译产物为同目录 `actual-app-checks`，
+通过公开 AX 接口定位控件、执行 AXPress；截图使用限定 NewPi window ID 的 `screencapture`，不抓桌面。
+这是本机手动授权后的验收辅助程序，不是仓库内的 CI 入口，临时文件清理后不可直接重跑。
+
+**发现并修复：重复侧栏按钮。** 最初截图同时出现系统默认和显式按钮。
+`NewPiWorkbenchShell` 的 `.toolbar(removing: .sidebarToggle)` 原来放在 NavigationSplitView 外层，
+移到 sidebar 列内后重建、正常重启正式 App；截图确认只剩一个按钮，toolbar AX 树也只列出
+`workbench.sidebar.toggle`。这是中间修正；用户随后指出手动开关过渡生硬，最终改为恢复系统按钮，见下一节。
+
+已完成的范围（当前系统深色、普通会话，非全量验收）：
+
+- 正式按钮 AXPress 收起/展开通过，detail 布局恢复；输入框 AX 身份和现有输入内容不变。
+	本次输入为空，未植入测试草稿，不能据此声称正式 App 的非空草稿或 IME 已验收。
+- 用量弹窗实际打开/关闭，AX 暴露全部五项标题；截图显示历史累计/最近一轮/缓存/上下文值，输出速率缺省显示“暂无数据”。
+	未发起新请求，不能验证 provider 计量准确性、流式更新或所有字段全部为空的正式会话场景。
+- 原窗口 1539×839pt；1200/900pt 两档检查用量、模型菜单、发送、更多及侧栏按钮不超出窗口，
+	输入视口高 78pt、宽大于 400pt，模型菜单与发送按钮无碰撞；随后恢复原尺寸。
+- 完整玻璃侧栏截图已取得并查看，正文/身份栏/输入区在当前深色宽窄窗口可见；不是与原型同内容的像素级对照。
+- 修正后完整 Debug build 为 `BUILD SUCCEEDED`；共享组件
+	`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_INTERACTION=1 NEWPI_WORKBENCH_UI_STRICT=1` 回归通过。
+
+截图在 `/private/tmp/newpi-ui/actual-{initial,sidebar-hidden,sidebar-restored,usage,width-1200,width-900}.png`。
+含用户现有界面内容，**不纳入 Git、不上传远程**。未发送消息、调用模型、执行工具或修改会话正文/模型配置；
+应用正常启动/退出可能更新既有窗口偏好、滚动状态与诊断日志，不声称磁盘零写入。
+正式 App 保持打开，原窗口尺寸已恢复，`dist` 未替换。
+
+尚未覆盖：真实 Session/聊天室切换和非空草稿、聊天室角色/阶段业务、真实发送/取消、附件/IME、
+浅色与系统高对比、VoiceOver 朗读及完整焦点路线。前述独立 probe 的 AX/SKIP 结果保留历史边界。
+
+### 最终恢复系统侧栏开关（05:54–05:56）
+
+用户要求保留原系统按钮的平滑过渡。删除手动 ToolbarItem、`workbench.sidebar.toggle` 标识以及
+`.toolbar(removing: .sidebarToggle)`；保留 `.all` 初始状态、既有侧栏宽度与外观。
+不为测试标识替换系统 UI，也不另设动画时间覆盖 macOS 的过渡与辅助功能策略。
+
+- 完整 Debug 构建通过，确认当前输入为空后正常重启正式 App。
+- 新增工作区内 `scripts/validation/NativeSidebarChecks.swift`：显式指定已运行的 App，
+	通过公开 AX 检查 toolbar 仅一个系统开关（本机描述为 `Hide Sidebar`），且无旧自定义标识；
+	收起/展开、恢复输入区位置与宽度、输入框 AX 身份及现有输入内容保持均通过。
+	本检查不写测试草稿、不发送消息、不测量动画帧率，也不冒充 VoiceOver 验收。
+- `WorkbenchUIChecks` 的可选侧栏检查改为定位系统 `NSToolbarItem.Identifier.toggleSidebar`，
+	不再依赖自定义中文标签。独立宿主若未暴露系统 toolbar 仍如实 SKIP。
+- 本次共享组件鼠标 strict 回归两次均在「鼠标探针窗口获得焦点」5s 超时处中止；
+	编译和前置 Markdown/详情检查通过，但本轮鼠标交互未执行，不能沿用上一轮 PASS 冒充本轮通过。
+	未放宽断言或反复修改生产 UI 规避焦点限制。
+
+新的源文件放在工作区内，避免工作区外编辑授权；旧临时 `ActualAppChecks` 的自定义按钮测试已过时，
+不要再用其中 sidebar/resize 模式验收最终系统按钮。新入口见 [脚本文档](../../scripts/README.md#正式-app-系统侧栏开关验证)。
+
 ## 4. 尚需人工验收与结果回填
 
 - [x] 回填第一批统一横向 24 后的最终 WKWebView 复跑及完整 Debug 构建结果，保留无页面焦点的 SKIP。
 - [x] 回填第一批冷加载与呈现回归的命令、数值和限制，不覆盖旧修复记录，不声称第二批性能重跑或严格性能对照。
 - [x] 回填第二批显式 toolbar 后的最终 Debug build/controller 结果；整窗布局复跑仍通过。
 - [x] 独立与整窗探针的真实鼠标送停、草稿保留、用量开关和有值/无值展示通过；系统 toolbar 定位仍 SKIP。
-- [ ] 用户实机验收第二批外壳/侧栏/唯一 header/角色栏、原生侧栏显示/隐藏与玻璃材质；完成原型同内容视觉对照，现有不完整截图不能替代。
+- [x] 授权后正式 App 深色普通会话的侧栏往返、空输入保持、用量开关、宽窄布局和完整玻璃截图通过；重复按钮已修复并复验。
+- [x] 按用户反馈恢复系统侧栏按钮，完整构建及正式 App 系统开关往返通过；本轮独立鼠标探针焦点超时单独保留。
+- [ ] 完成浅色/聊天室外壳与角色栏实机验收及原型同内容视觉对照；当前深色普通会话截图不能替代全部场景。
 - [ ] 实际 App 侧边栏切换 Session/聊天室、草稿与滚动恢复；宽窄窗口目录 header 与全部阶段操作可达。
 - [ ] 实际聊天室手动推进/指定角色/讨论/投票/执行/Review/暂停收尾，运行中 Return 与显式插话、停止互不混淆。
-- [ ] 实际用量 popover 开关、五项真实/缺省数据，发送/停止可用性、模型与思考级别菜单及运行中禁用状态。
+- [ ] 实际用量动态更新/全部缺省数据、发送/停止可用性、模型与思考级别菜单及运行中禁用状态（当前历史会话 popover 开关及五项展示已通过）。
 - [ ] 实际附件选择/拖拽/粘贴/移除/预览，中文输入法确认、键盘焦点与弹层关闭后的焦点恢复。
 - [ ] 系统高对比（尤其 Web 正文）、VoiceOver、深浅外观与不同缩放的可读性。
 

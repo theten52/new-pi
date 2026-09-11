@@ -53,7 +53,7 @@ enum NewPiWorkbenchStyle {
 }
 
 /// 唯一的原生分栏外壳；不持有运行时，也不修改窗口 frame 或系统保存的窗口配置。
-/// 保留系统标题栏、红绿灯、分栏拖动与 sidebar toggle，生产页和独立探针共用。
+/// 侧栏按钮及收展过渡由系统提供，不用手动切换状态的按钮替代；生产页和独立探针共用。
 struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
     private let sidebar: Sidebar
     private let content: Content
@@ -77,19 +77,6 @@ struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle("")
-        .toolbar(removing: .sidebarToggle)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-                } label: {
-                    Label("显示或隐藏侧栏", systemImage: "sidebar.left")
-                        .labelStyle(.iconOnly)
-                }
-                .help("显示或隐藏侧栏")
-                .accessibilityIdentifier("workbench.sidebar.toggle")
-            }
-        }
         .toolbarBackground(NewPiWorkbenchStyle.surface, for: .windowToolbar)
         .tint(NewPiWorkbenchStyle.accent)
     }
