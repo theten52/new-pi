@@ -6,6 +6,13 @@
 > 目标：为聊天增加图片（vision）输入 —— 采集、持久化、provider 序列化、UI 展示全链路。
 > 依据：`CLAUDE.md` 的 UI 渲染架构（单文档 transcript）+ `AgentMessage` / provider 现状。
 
+> **状态复核（2026-09-12，仅源码核对）**：图片 MVP 已接入普通 Session 的采集、附件落盘、
+> 三种 provider 编码、`pi-att://` 缩略图与点击预览；`AttachmentPreviewWindow.swift`
+> 是已接通的独立原生预览窗（`attachmentTap` → `AttachmentPreviewWindowController`），**不是 Quick Look**。
+> §2 是改动前快照；§3–6 保留设计推理与原始改动清单，不能视为全部尚未实现。
+> §7 的既有勾选/实测说明是历史记录，本次未复测；Anthropic 带图端到端、重开会话后的附件
+> 显示及回传仍保留待验证，HEIC 转换、Quick Look 等仍不据 MVP 状态判定完成。
+
 ## 1. 一句话结论
 
 为 `UserMessage` 增加结构化附件 `attachments`，图片以**本地文件路径引用**持久化；
@@ -13,9 +20,9 @@ provider 序列化（Anthropic / OpenAI / Responses 三处）把用户 content �
 「text + image」块数组；provider 模型以**并行 `imageCapableModels` 集合**标注是否支持图片；
 UI 在用户气泡内以缩略图展示，并通过受控本地读取通道加载。
 
-## 2. 现状（改动前必读）
+## 2. 改动前快照（历史，非当前状态）
 
-当前聊天链路**完全没有图片概念**，整条链路都是纯文本：
+图片 MVP 实施前，聊天链路**完全没有图片概念**，整条链路都是纯文本；以下是当时的基线：
 
 | 层 | 现状 |
 |---|---|
@@ -44,7 +51,7 @@ UI 在用户气泡内以缩略图展示，并通过受控本地读取通道加�
 | 格式 / 大小 | 常见格式（PNG / JPEG / GIF / WebP），单张 ≤ 5MB |
 | provider 能力 | 由用户在**新增 provider / 模型时手工指定**是否支持图片；不支持时提示用户 |
 | 持久化 / 重放 | **图片存本地附件文件夹，用本地文件路径引用** |
-| UI | 收发图片缩略图展示；点击放大为二期 |
+| UI | 原需求为图片缩略图展示、点击放大列为二期；当前已实现用户附件缩略图及独立原生放大预览，不代表模型输出图片支持 |
 | 范围 | **MVP**：当前模型（Claude 类）已支持 vision |
 
 ## 4. 三个核心设计决策
@@ -109,7 +116,7 @@ public var imageCapableModels: Set<String> = []
 **preset 预填：** 已知 vision 模型（如 `deepseek-v4-flash-vision-exp`、`claude-*-4-*`、
 `gpt-4o*` 等）在 `ProviderPresetCatalog` 定义时预填进默认 `imageCapableModels`。
 
-## 5. 分层改动清单
+## 5. 分层改动清单（保留原设计；MVP 已落地）
 
 ### 5.1 Core 层（`Packages/NewPiCore/`）
 
@@ -152,20 +159,21 @@ public var imageCapableModels: Set<String> = []
 
 ### 5.4 UI 展示层（`transcript-document.js` + 原生桥）
 
-用户气泡显示图片缩略图。当前 `renderUser`（`transcript-document.js:613`）只设 `bubble.textContent`。
+用户气泡显示图片缩略图。改动前 `renderUser`（历史位置 `transcript-document.js:613`）只设 `bubble.textContent`；
+以下三项现已接通，路径边界由 `AttachmentSchemeHandler` 与 `SessionAttachments.resolve` 承担。
 
 1. **JS**：`renderUser` 里若 `op.attachments` 非空，额外创建附件横排容器 + `<img>`。
 2. **原生桥**：`NewPiTranscriptItem` 增加 `attachments: [MessageAttachment]`；
    diff → ops 时把附件传进 `op`，相对路径解析为可加载的本地 URL。
-3. **受控本地读取通道**：当前渲染器 CSP 禁掉 image、禁 raw HTML（离线 + 隐私 + 安全）。
-   附件图需单独开一条受控通道：只允许从附件根目录读取，路径经过校验，禁止任意本地文件读取。
+3. **受控本地读取通道**：改动前渲染器 CSP 禁掉 image、禁 raw HTML（离线 + 隐私 + 安全）。
+   当前附件图已通过 `pi-att://` 受控通道加载：只允许从附件根目录读取，路径经过校验，禁止任意本地文件读取。
 
-### 5.5 二期（暂不做）
+### 5.5 二期（剩余范围与已落地项分列）
 
 - HEIC 自动转 JPEG、GIF 动画帧支持
 - 截屏工具（框选区域）
 - 图片入库去重 / 会话删除时回收附件
-- 点击图片放大 + Quick Look 预览
+- 点击图片放大：**已实现**（`NewPiApp/AttachmentPreviewWindow.swift` 独立原生窗）；Quick Look 集成仍待办
 - 模型图片能力自动探测（查 `/models` 或硬编码能力表）
 
 ## 6. 风险与对策
@@ -196,6 +204,8 @@ scheme 只解析附件目录内路径，或 `loadFileURL:allowingReadAccessTo:` 
 
 ## 7. 验收清单（MVP）
 
+> 保留历史完成记录，不代表本次重新验收；未验证项维持未勾选，外部 API 实测结论不由源码核对替代。
+
 - [x] 新增 / 编辑 model 时能勾选「支持图片识别」，配置可持久化（模型行 photo 图标开关，Save 随 profile 落盘）
 - [x] 点附件按钮选择多张图片，composer 上方显示草稿缩略图 + 可移除
 - [x] 拖拽图片文件到 composer 能加入草稿；粘贴图片（或 cmd+V 截图）能加入草稿
@@ -204,7 +214,8 @@ scheme 只解析附件目录内路径，或 `loadFileURL:allowingReadAccessTo:` 
 - [x] 模型不支持图片时带图发送被拦截并提示（`NewPiViewModel.send`）
 - [ ] 会话重开 / 继续对话时 JSONL 重放附件正确（含图片显示 + 回传给模型）（rebuild 已携带 attachments，未端到端实测）
 - [x] 旧会话（无附件字段）正常回放，不报错（decode 缺省 `[]`）
-- [x] 图片 > 5MB 或不可解码时给出明确报错且不发送
+- [x] 图片处理后仍超 base64 5MB 预算时拦截并提示（原图超预算会先尝试缩放/重编码）
+- [ ] 不可解码图片的明确错误文案与多选部分失败提示（当前采集路径主要为过滤失败项 / beep，未确认完整体验）
 - [x] 缩略图加载走受控本地通道，不借 CDN、不开任意本地文件读取（`pi-att://` scheme handler + `SessionAttachments.resolve` 唯一边界）
 - [x] 点击缩略图放大预览（原生浮层窗：Esc / 点击背景关闭；路径同样经 `SessionAttachments.resolve` 受控解析）
 

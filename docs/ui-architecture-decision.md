@@ -19,7 +19,38 @@
 
 ## 1. 结论
 
-**有条件采纳单文档 Transcript 目标架构，以 Phase 0 spike 作为 go/no-go 闸门；闸门通过前不做任何生产路径迁移。**
+**当前决策：单文档 Transcript 已采纳并成为唯一生产渲染路径；不再执行旧高度表方案或 NO-GO fallback。**
+
+### 当前源码入口与阅读边界
+
+本文是当前渲染决策入口；文档导航见 [`README.md`](./README.md)。以下入口按当前源码核对，
+历史行号不应直接用于定位现行实现：
+
+| 入口 | 当前职责 |
+|---|---|
+| [`NewPiChatView.swift`](../NewPiApp/NewPiChatView.swift) / [`NewPiApp.swift`](../NewPiApp/NewPiApp.swift) | 普通会话 / 聊天室接入同一单文档宿主 |
+| [`NewPiTranscriptDocumentView.swift`](../NewPiApp/NewPiTranscriptDocumentView.swift) | `TranscriptDocumentController`、快照 diff → ops、流式 `applyLive`、锚点持久化与内容进程重建 |
+| [`NewPiMarkdownWebRenderer.swift`](../NewPiApp/NewPiMarkdownWebRenderer.swift) | `NewPiMarkdownWebDocument` 本地 HTML 外壳；不再包含旧宿主、缓存或 `engineFingerprint` |
+| [`markdown-renderer.js`](../NewPiApp/MarkdownRenderer/markdown-renderer.js) | `createMarkdownRenderer` per-root 实例、块级增量与尾部规范化 |
+| [`transcript-document.js`](../NewPiApp/MarkdownRenderer/transcript-document.js) / [`transcript-document.css`](../NewPiApp/MarkdownRenderer/transcript-document.css) | 条目 DOM、文档内滚动意图、CV 占位与布局校正 |
+| [`NewPiUserMessageRail.swift`](../NewPiApp/NewPiUserMessageRail.swift) / [`NewPiChatScrollHelper.swift`](../NewPiApp/NewPiChatScrollHelper.swift) | JS 实测比例驱动的 minimap / `ScrollPositionStore` 锚点存储 |
+
+- 原生不以内容高度驱动布局；`scrollState.docHeight` 仅用于诊断日志，不是旧高度桥。
+- 已删除的是**原生** preheater、布局高度表、每消息 WebView 生产路径及持久 HTML replay 缓存。
+  **JS Warmer / Poller 仍在使用**：前者固化文档内 CV 占位高，后者在 Scroll 意图允许时补偿几何变化
+  （内部直接调用 `scrollBy`）；“唯一 writer”指文档侧统一滚动纪律，不表示只有一个函数写位置。
+- JS 仍保留 `renderMarkdown` / `replayRendered` 等兼容入口；生产宿主使用 per-root 实例，
+  `reportHeight` / `postSnapshot` 均关闭。这不构成旧原生路径仍在运行的证据。
+- 单文档为跨消息文本选择、全文查找提供基础条件，**不等于复制边界、Cmd+F 搜索及跳转已完整验收**。
+
+**历史段落定位**：本节下方与 §2–§3 为迁移前决策依据；§4.1–§4.2 为已结束的准备与 spike，
+§4.3 按时间保留实施/回归记录，§4.4 为未启用的 NO-GO 退路；§6 保留原决策摘要，
+§7 为迁移前排期讨论。上述旧待办不属于当前 backlog；历史测量只对记录的场景负责，
+后续性能限制见 [长会话性能复核](./dev-notes/2026-09-11-long-session-rendering-review.md)。
+
+### 原始决策（历史）
+
+**当时有条件采纳单文档 Transcript 目标架构，以 Phase 0 spike 作为 go/no-go 闸门；闸门通过前不做任何生产路径迁移。**
 
 同时在 spike 启动**之前**先做一件与闸门结果无关的小事：把 `engineFingerprint` 接进高度查询（理由见 §4.1，它同时是 spike 的测量保护）。
 
@@ -28,13 +59,15 @@
 | 事项 | 决定 |
 |---|---|
 | 立即按 Phase 1–4 迁移 | ❌ 不采纳。提案自己承认最大假设（500 turn 性能）未验证 |
-| 核验报告 §5 的三项待办（滚动状态机 / 高度下沉 block 级） | ⏸️ 暂缓。若 spike 通过，前两者随边界一起消失；若证伪，按原顺序执行 |
+| 核验报告 §5 的三项待办（滚动状态机 / 指纹高度校验 / block 级高度表） | 当时暂缓：GO 则滚动迁入文档、指纹与高度表随旧机制退役；NO-GO 才执行原顺序（现已归档） |
 | 工具卡原生 vs 文档内 | ✅ 采纳提案 §6.4：单文档前提下工具卡进文档。调研报告的"原生卡片"建议只在留守当前架构时成立，两文不矛盾 |
 | osaurus 作为目标架构 | ❌ 不采纳（同意提案 §4：其复杂度多在重新实现浏览器已有机制）；作为参考实现质量第 1 位的评价保留 |
 
 ---
 
 ## 2. 为什么我判断提案的根因诊断成立
+
+> **历史依据**：本节“当前”、文件行号及 73% / 160pt 数据均指迁移前实现，不是现行路径或本次复测结果。
 
 提案的核心论点是：当前痛点不是 N 个 bug，而是「原生持布局权、Web 持内容尺寸」这一条异步边界的重复投影。我在决策前独立核对了代码，文档论断属实，且**找到一条文档没有强调、但更有力的证据**：
 
@@ -77,6 +110,8 @@ Phase 1 排期应为此留出余量。
 
 ## 3. 与近期工作的兼容性（刚合入 main 的三个特性）
 
+> **历史兼容性评估**：“刚合入”与下方 A/B 指纹约束仅指迁移准备期；当前没有双路径高度缓存共享。
+
 | 特性 | 单文档下的归宿 | 兼容性 |
 |---|---|---|
 | 轮对话气泡背景色（`Color.bubbleTint(for:)`） | 移到 CSS：`<section class="turn" style="--turn-tint: …">`，FNV-1a 色相算法可直接用 JS 复刻，确定性不变 | ✅ 甚至更自然（turn 本来就是文档结构单位） |
@@ -90,6 +125,9 @@ Phase 1 排期应为此留出余量。
 ---
 
 ## 4. 执行方案
+
+> **历史执行档案，非待执行计划**：迁移已收官；§4.3 中“尚未删除”等中间态随后被“迁移完成”覆盖。
+> 文中的“目前没有测试覆盖”也是当时判断，不代表当前覆盖情况；本次仅整理文档，未运行测试。
 
 ### 4.1 Step 0（先做，与闸门结果无关）：engineFingerprint 接进高度查询
 
@@ -201,7 +239,10 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 
 ### 4.4 NO-GO 退路（预先写好，证伪时不临时想方案）
 
-维持当前架构，按核验报告 §5 顺序执行三项待办：
+> **已失效的历史 fallback**：Spike 已 GO，遗留生产路径已删除。本节不属于当前 backlog；
+> 若未来需要复议，应按 §5 重新决策，不能直接恢复本节排期。
+
+当时若 NO-GO，则维持迁移前架构，按核验报告 §5 顺序执行三项待办：
 
 1. 滚动写入收敛为显式状态机（`ChatScrollIntent`，单 writer）——价值最高
 2. ~~engineFingerprint 接进高度查询~~（Step 0 已完成）
@@ -217,13 +258,16 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 以下任一成立时，应重开本文档复议：
 
 - Phase 0 spike 数据与 §4.2 判定标准冲突（数据优先于本文结论）
-- 单文档在真实使用中出现当前架构没有的硬伤（如 WKWebView 单点崩溃恢复
+- 单文档在真实使用中出现迁移前架构没有的硬伤（如 WKWebView 单点崩溃恢复
   体验不可接受、VoiceOver 实测不达标）
 - macOS SDK 行为变化使 `content-visibility` 虚拟化失效
 
 ---
 
 ## 6. 一句话版本
+
+当前摘要：单文档为唯一生产路径，布局与滚动留在文档内，旧高度表 fallback 不再排期。
+以下保留**闸门执行前**的原始摘要：
 
 > 文档的根因诊断经独立代码核实成立（73% 主线程 CA 同步是边界成本的直接量化），
 > 最难的渲染器资产已确认可复用；但最大假设未经测量，
@@ -233,6 +277,10 @@ Spike 产出无论成败都写成报告（`docs/dev-notes/`），失败数据对
 ---
 
 ## 7. 补充（2026-08-30）：「block 级高度表」与「展示重规划」的关系
+
+> **迁移前讨论归档**：本节高度表、stringly-typed 模型、thinking 仅写日志与 Step 0.5
+> 均为当时快照，不是当前缺口。现行 `NewPiViewModel.swift` 已有 `NewPiTranscriptItemKind`
+> 与 thinking 增量通道，宿主按类型生成文档 ops；block 级原生高度表不再有落地对象。
 
 背景：后续计划重新规划 agent 输出的展示方式（工具展示 / 思考过程展示 / 结论展示），
 曾考虑以此为由提前做核验报告待办 #3（block 级高度表）。核实后结论：**两者不在同一层，

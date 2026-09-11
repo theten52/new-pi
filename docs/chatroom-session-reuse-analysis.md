@@ -1,8 +1,16 @@
 # 聊天室 × Session 对话：技术方案对照与复用分析
 
+> **当前状态（2026-09-12 源码核对）：聊天室已平铺并复用单文档渲染，Phase A/B 已落地。**
+> Phase A 已接入详情组、共享多行 Composer、累计用量；Phase B 主路径由
+> `ChatRoomFlowController` 注入角色引擎，`ChatRoomLoop` 直接驱动 `AgentLoop`，
+> **并非每角色一个 `AgentSession`**。详情组现按 `speechID`（旧消息回退 `message.id`）
+> 收纳 thinking / 工具 / 中间正文，最终正文在组外（`NewPiChatRoomTranscriptAdapter.swift`）。
+> 审批已接通授权记忆、危险评估、审计及共用 UI；图片附件不因复用 Composer 自动获得。
+> 下文旧对照表、原始路线与早期落地差异保留作历史；未逐项重跑验收，不代表原计划全量完成。
+
 > 2026-09-11 更新：已接通独立的聊天室授权记忆及共用审批 UI，替代本文早期“只允许一次”的描述，见 [授权实现说明](dev-notes/2026-09-11-chatroom-authorization.md)。
 
-> 2026-09-06。应「看看聊天室有什么可以复用 Session 对话技术」的调研需求，
+> **历史调研摘要（2026-09-06，以下“下一层”已实施）**：应「看看聊天室有什么可以复用 Session 对话技术」的调研需求，
 > 对照 Session 对话的完整技术方案与聊天室现状，给出可复用项清单与建议路线。
 > 结论先行：**文本渲染管线已复用（Phase 2 完成）**；下一层高价值复用是
 > **详情组折叠 / Composer 输入框 / token 用量**；架构完全体是把角色发言迁移到
@@ -29,7 +37,7 @@
 | `NewPiTranscriptDocumentView` + JS | 单文档渲染管线：diff → ops → WKWebView（markdown-it/hljs、流式/最终双渲染、详情组折叠、fork、minimap、滚动状态机） |
 | `ScrollPositionStore` | 滚动锚点持久化 |
 
-## 二、聊天室现状对照
+## 二、聊天室对照（历史基线，当前状态见文首）
 
 ### 已复用 ✓
 
@@ -42,7 +50,10 @@
 | `ContextTokenEstimator` | 预算提示与自动压缩共用 |
 | 压缩语义 | `CompactionConfig.recommended` 与 Session 对齐（窗口×0.8 / 0.75 触发 / 保留 8 条） |
 
-### 自建且与 Session 平行/重复 ✗
+### 自建且与 Session 平行/重复 ✗（Phase A/B 前快照）
+
+> 下表的「无详情组 / 单行输入 / 无用量 / 自制工具 / 无审计」已被后续实现取代，
+> 不可重新列为当前待办。仍有独立共享历史、消息存储与全量适配路径，不等于与 Session 完全合并。
 
 | 聊天室 | Session 对应物 | 差异要点 |
 |--------|----------------|----------|
@@ -58,18 +69,22 @@
 
 ## 三、可复用项与建议路线
 
+> 以下保留原始路线及落地记录；是否继续优化节流、附件等需另行核对，不能据 Phase A/B 标签一并判定完成。
+
 ### Phase A：组件级复用（低成本、直接收益）
 
 > **✅ 已实施（2026-09-06）**：三项全部落地——
 > ① 详情组折叠：`ChatRoomTranscriptAdapter` 把同一发言的工具卡收进
 > `.detailGroup` 组（`detailTurnID = "speak-<messageID>"`），实时发言展开、
-> 完成自动收起，长工具循环不再刷屏；thinking 卡保持内联（讨论期的思考
-> 是该发言的主要内容，不折叠）。
+> 完成自动收起，长工具循环不再刷屏；当时 thinking 卡保持内联。
+> **后续变化**：当前 thinking 已入组，组身份改按 `speechID`，见文首源码核对。
 > ② Composer：聊天室输入框替换为 Session 的 `NewPiComposerTextView`
 > （多行、固定 4 行高并在超出后内部滚动、Return 发送 / Shift+Return 换行）；发言进行中保持
 > 可输入——发送即插话（steering），这是与 Session 语义的有意差异。
 > ③ 用量显示：输入栏空闲态展示 `runtime.usage.newPiCompactText` 累计
 > token（逐发言由 messageEnd 事件累加）。
+
+原始建议（历史，非剩余待办；图片附件与节流收敛不在上述三项完成声明内）：
 
 1. **详情组折叠**（收益最大）：把 adapter 的 `detailTurnID` 从恒 nil 改为按「同一发言内的 thinking/工具卡」分组复用 Session 的详情组渲染——一次发言几十张工具卡（如 500 轮那次）会折叠成一行「处理详情」，彻底解决刷屏。
 2. **Composer 输入框复用**：多行 + 固定 4 行高并在超出后滚动 + 图片附件，聊天室插话体验直接对齐 Session。
@@ -84,17 +99,18 @@
 > （每个角色的 AgentContext 都是每次发言重建的共享历史投影，跨发言保留
 > 会话壳只会引入分叉）。AgentLoop 直驱保留了全部目标收益。
 
-已落地：
+已落地记录（含早期策略，后续变化另注）：
 - **引擎工厂注入**：`ChatRoomLoop(engineProvider:mcpToolsProvider:)`，由
   `ChatRoomFlowController` 用 providers.json 构造 `ChatRoomRoleEngine(llm:model:)`
   （多模型 = 每角色不同组合）
 - **完整工具链**：`chatroomTools` = Read/Write/Edit/Bash（edit 快照挂项目目录）
   + `MCPToolLoader.loadAgentTools()` 注入；不再使用聊天室自制工具集
-- **统一审批桥**：`ChatRoomApprovalManager.approvalDecision(for:roleID:roleName:)`
+- **统一审批桥（早期落地策略，已更新）**：`ChatRoomApprovalManager.approvalDecision(for:roleID:roleName:)`
   把 AgentLoop 的 `ToolApprovalRequest` 映射到聊天室审批卡片（同意 = allowOnce，
   授权不跨发言持久化，保留决策 #10/#18 的简化语义）；
   策略 = `requireApprovalFor: ["write", "edit", "bash"]`（读自动过，写类需审批，
-  bash 按写类处理）
+  bash 按写类处理）。当前已增加独立授权记忆及项目范围规则，并接入危险评估、审计与共用审批 UI；
+  「仅 allowOnce / 不跨发言记忆」不再是当前限制，详见文首授权实现说明。
 - **steering 插话**：发言进行中 `userSpeak` 双写（共享历史 + steering 队列），
   AgentLoop 在工具批次间把插话投喂给正在发言的模型
 - **turn 内压缩**：AgentLoopConfig.compaction = recommended(minWindow)，长工具
@@ -104,7 +120,7 @@
   形态（署名/合并/检查点/首 user 兜底逻辑与旧路径一致），触发消息由 AgentLoop
   的 prompt 承担
 - **回退保留**：`engineProvider == nil` 时走旧 `chatWithEvents` 路径（Phase B
-  前的行为），旧路径与全部旧测试保持绿色
+  前的行为）。「旧路径与全部旧测试保持绿色」是当时落地记录，本次未重跑测试。
 
 规划中的原始条目（保留作对照）：
 
@@ -122,10 +138,11 @@
 3. **事件桥接**：AgentEvent 流 → 现有临时消息实时改写逻辑替换为消费 AgentEvent（textDelta/thinkingDelta/toolExecution* 一一对应，改造成本低）。
 4. 多模型天然支持：每角色不同 `AgentLoopConfig.model`。
 
-**触发条件建议**：当聊天室需要 MCP 工具、统一审批、或 steering 中任意一项时启动 Phase B；Phase A 可独立先行，两者不冲突（Phase A 的成果在 Phase B 中全部保留）。
+**原始触发条件建议（历史，Phase B 已实施）**：当聊天室需要 MCP 工具、统一审批、或 steering 中任意一项时启动 Phase B；Phase A 可独立先行，两者不冲突（Phase A 的成果在 Phase B 中全部保留）。
 
 ## 四、明确不复用项
 
 - **fork/branch**：聊天室无分支语义（决策 #13），不引入。
 - **会话文件格式**：聊天室 messages.jsonl 保持追加式完整记录（决策：记录不删、展示完整），不迁移到 Session 的 branch 式存储。
-- **审批简化语义**：读自动过/写审批是聊天室的产品决策（决策 #10/#18），Phase B 迁移时应保留该策略映射到 session 审批框架，而非照搬 coding agent 默认策略。
+- **审批作用域独立**：聊天室保留自己的授权记忆与策略接线，不与普通 Session 授权直接混用。
+  原「读自动过/写审批」是 Phase B 初始策略（决策 #10/#18），当前还叠加项目范围、危险评估等规则，不能概括为所有写操作都弹审批。

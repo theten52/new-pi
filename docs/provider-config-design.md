@@ -10,6 +10,13 @@
 
 ## 核心数据结构
 
+> 下列类型示意保留早期设计意图，不是当前可直接使用的 Swift 定义或持久化 schema。
+> 当前字段以 [ProviderProfile.swift](../Packages/NewPiCore/Sources/NewPiCore/Providers/ProviderProfile.swift) 为准：
+> - `ProviderProfile.models` 为 `[String]`（模型 ID 列表），详情另存于 `modelDefinitions: [String: ModelDefinition]`。
+> - 默认 provider 由 `ProviderConfigFile.defaultProfileID` 指定；每个 profile 的默认模型为 `modelID`，不是 `defaultModelID`。
+> - profile 保存 `preset` 与 `options`；下例的 `baseUrl` 等不代表顶层编码字段，`apiKeyHeader` 是读取 `options["apiKeyHeader"]` 的计算属性。
+> - API Key 不在 `ProviderProfile` 中编码；凭据存储见下方说明，不能称为默认加密存储。
+
 ### ProviderProfile（用户配置）
 
 ```swift
@@ -20,7 +27,7 @@ public struct ProviderProfile: Codable, Identifiable {
     public var apiMode: APIMode              // openai-chat / anthropic-messages / responses
     public var baseUrl: String               // 基础 URL
     public var apiKeyHeader: String          // API Key Header 名称
-    public var apiKey: String?               // API Key（加密存储）
+    public var apiKey: String?               // 早期设想；当前凭据独立存储，不在 profile 中编码
     public var models: [ModelDefinition]     // 模型列表
     public var defaultModelID: String        // 默认模型
 }
@@ -118,7 +125,7 @@ API Key、支持的 Options 字段、兜底 URL 等）固化在 `ProviderPreset`
 | Thinking 级别 | 🟡 | 沿用既有 `Profile.thinkingLevel`；原 `ModelDefinition.thinkingLevels` 空壳已移除 |
 | 多实例 | ✅ | `makeProfile` 生成 UUID，重复添加同一厂商不覆盖 |
 | 排序 | ✅ | 按厂商名排序（`refreshProviderList`） |
-| 默认 | ✅ | 全局一个默认 provider + 默认模型 |
+| 默认 | ✅ | `defaultProfileID` 指定全局默认 provider；各 profile 的 `modelID` 指定其默认模型 |
 | 编辑 | ✅ | 所有字段可修改 |
 | 删除 | ✅ | 需要确认 |
 | 图标 | ✅ | SF Symbols 名称 |
@@ -136,6 +143,11 @@ API Key、支持的 Options 字段、兜底 URL 等）固化在 `ProviderPreset`
   optionFields / defaultBaseURL / displayName / systemImage）固化到 `ProviderPreset` 枚举扩展。
 
 ## 配置文件格式
+
+> **历史 schema（未按此格式落地）**：以下 version 2、`defaultProviderID`、`defaultModelID`、对象数组 `models` 和 `encrypted_xxx` 仅保留原设计记录，不能作为当前 `providers.json` 示例。
+> 当前 `ProviderConfigFile.currentVersion = 1`，顶层为 `version`、`defaultProfileID`、`profiles`；profile 使用 `modelID`、字符串数组 `models` 和详情字典 `modelDefinitions`，见上方源码链接。
+>
+> **当前凭据存储**：[ProviderCredentialResolver](../Packages/NewPiCore/Sources/NewPiCore/Providers/ProviderCredentialResolver.swift) 默认使用 [LayeredCredentialStore](../Packages/NewPiCore/Sources/NewPiCore/Credentials/LayeredCredentialStore.swift)，UserDefaults 优先读写、Keychain 可选镜像（[默认关闭](../Packages/NewPiCore/Sources/NewPiCore/Credentials/ProviderCredentialPreferences.swift)）。启用 Keychain 后仍写入 UserDefaults，并非 Keychain-only；[UserDefaultsCredentialStore](../Packages/NewPiCore/Sources/NewPiCore/Credentials/UserDefaultsCredentialStore.swift) 直接保存字符串，不能描述为加密存储。
 
 ```json
 {

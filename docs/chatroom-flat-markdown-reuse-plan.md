@@ -1,10 +1,22 @@
 # 聊天室平铺化 + Markdown 渲染复用 Session 单文档管线——实施计划
 
+> **当前状态（2026-09-12 源码核对）：已落地，本文保留原始计划作历史对照。**
+> `NewPiApp.swift` 已将聊天室放入主窗口 detail；`NewPiChatRoomStore.swift` 的
+> `ChatRoomRuntimeStore` / `ChatRoomFlowController` 持有长命运行时与任务；
+> `NewPiChatRoomTranscriptAdapter.swift` → `NewPiTranscriptDocumentView` 已复用单文档管线。
+> 本文 Phase 0/1/2 已实施；后续组件/引擎复用 Phase A/B 见
+> [复用分析](chatroom-session-reuse-analysis.md)。聊天室现已支持流式、详情组和共享 Composer，
+> 下文「无流式 / 无详情组」仅是早期范围约束，不是当前限制；fork、图片附件未因此自动接通。
+> 原始路径、行号、示例与验证清单保留供追溯，不能直接作为当前实现或本次验证结果。
+> 本次仅核对源码与修订文档，未运行构建、测试或 UI 验收。
+
+## 原始实施计划（历史，不再作为待执行任务）
+
 > 两件事、一个顺序：**先平铺化**（聊天室从嵌套 sheet 并入主窗口 NavigationSplitView，
 > runtime 上提为长命缓存），**再渲染复用**（消息 → `NewPiTranscriptItem` → 泛化后的
 > 单文档 transcript 视图）。平铺化做完后，渲染复用就是 session 路径的镜像。
 
-## 一、需求与决策（待需求方确认）
+## 一、需求与决策（历史草案）
 
 1. **聊天室对话本体平铺**：不再是 sheet，和 Session 对话一样占主窗口 detail 区。
    创建/编辑/模板管理/投票/结束讨论等**模态交互保留 sheet**（语义正确，不动）。
@@ -24,7 +36,7 @@
 8. **讨论流程不被 UI 切换打断**：runtime/loop 上提到缓存层后，切到别的 session/聊天室
    再切回，运行中的讨论继续（对齐 session「后台事件循环」语义）。
 
-## 二、架构背景（现状）
+## 二、架构背景（改动前快照）
 
 - 根结构：`NewPiApp.swift` 的 `NewPiRootView` = `NavigationSplitView`，
   sidebar（Project / Sessions / 聊天室 section，只有一个「聊天室列表」按钮）+
@@ -201,7 +213,7 @@ NewPiTranscriptDocumentView(
 每个阶段单独可构建可回滚；Phase 1 落地后「讨论不被 UI 切换打断」即生效，
 Phase 2 纯粹是渲染升级。
 
-## 五、验证清单
+## 五、验证清单（原计划，非本次验证记录）
 
 1. `cd Packages/NewPiCore && swift test`（core 不动，应全过）。
 2. `./scripts/package.sh Debug` 每阶段构建通过。
@@ -218,7 +230,7 @@ Phase 2 纯粹是渲染升级。
    - session 对话无 speaker 行、零回归。
 6. 提交信息：中文 conventional commit，按阶段分别提交。
 
-## 六、已知不做
+## 六、已知不做（原阶段范围，部分已被后续实现取代）
 
 - 聊天室流式渲染（core 无 delta 事件；若未来加，管线天然支持）。
 - rail minimap 接入聊天室（v1 不做，接口现成）。

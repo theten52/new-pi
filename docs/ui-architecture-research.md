@@ -19,8 +19,12 @@
 > 仅作历史记录；现行架构见 [`ui-architecture-decision.md`](./ui-architecture-decision.md)。
 > 修正处均标注 `[已核验]` 或 `[核验修正]`。
 >
-> **后续提案（2026-08-30）**：本文的建议均以「保留当前 per-message WKWebView 架构」为前提。
-> 若允许调整架构前提，另有一份目标架构提案主张**收拢为单文档 transcript**：
+> **阅读边界**：§2 外部仓库事实保留在调研 commit；其中对 NewPi 的建议及 §0、§3–§7
+> 的旧方案均以迁移前实现为参照，不能直接提取为当前 backlog。§4.0 开头另列后续加固记录。
+> 当前决策与源码地图见 [ADR §1](./ui-architecture-decision.md#1-结论)，导航见 [`README.md`](./README.md)。
+>
+> **历史提案关系（2026-08-30）**：本文原建议以「保留迁移前 per-message WKWebView 架构」为前提。
+> 随后目标架构提案主张**收拢为单文档 transcript**，现已采纳：
 > [`ui-target-architecture.md`](./ui-target-architecture.md)。
 > 该提案在若干点上**与本文结论相反**（最明显的是工具卡该原生还是该进文档，见其 §6.4），
 > 分歧源于架构前提不同，不是本文有错。两文对照阅读。
@@ -29,8 +33,11 @@
 
 ## 0. 先说结论
 
+> **迁移前结论归档**：以下高度表、原生预热、replay 与滚轮转发不是当前资产清单；
+> 原生工具卡建议也已被文档内组件取代。块级增量与尾部规范化仍保留，不需重做。
+
 > **[核验修正]** 本节初版把三项 NewPi 已落地的能力同时写进了"待借鉴"，与 §4/§5/§7 自相矛盾。
-> 现按"已完成 / 待办"重新表述。净待办清单见 §4.0 与核验报告 §5。
+> 当时按"已完成 / 待办"重新表述。历史台账及退役状态见 §4.0 与核验报告 §5。
 
 NewPi 当前方向是对的，而且比大多数参考项目更接近问题的核心：
 
@@ -96,6 +103,9 @@ research-repos/
 ---
 
 ## 2. 逐仓库源码发现
+
+> **调研快照**：外部实现与引用不变；本节所有“NewPi 已有／应当／目前”的对照建议均指迁移前，
+> 特别是 block 高度缓存、rail 高度表、原生工具卡，不应重新列入当前迁移任务。
 
 ### 2.1 microsoft/SwiftStreamingMarkdown
 
@@ -1400,6 +1410,8 @@ New development is happening in Textual.
 
 ## 3. 横向对比
 
+> **历史横向对照**：以下结论保留原架构前提；当前由单文档管理布局/滚动，原生高度表已退役。
+
 ### 3.1 流式 Markdown
 
 | 项目 | 输入模型 | 更新粒度 | 不完整 Markdown 处理 | 高频性能策略 |
@@ -1422,7 +1434,7 @@ New development is happening in Textual.
 
 | 项目 | 列表载体 | 高度管理 | 长历史策略 |
 |---|---|---|---|
-| NewPi 当前 | SwiftUI 手动窗口 + 高度表 | block/message 高度预热 | 可见区外占位 |
+| NewPi（迁移前） | SwiftUI 手动窗口 + 高度表 | block/message 高度预热 | 可见区外占位 |
 | SwiftChat | UITableView | IndexPath cache + message id cache | 无完整高度表 |
 | osaurus | NSTableView diffable | block height cache + noteHeightOfRows debounce | cell recycle + view cache |
 | Agent | 单个 NSTextView | TextKit layout | 50K log bound + tab storage cache |
@@ -1431,7 +1443,8 @@ New development is happening in Textual.
 | ChatGPTSwiftUI | LazyVStack | SwiftUI 自动 | 无 |
 | AICat | LazyVStack | SwiftUI 自动 | 无 |
 
-**结论**：NewPi 的高度表方向正确；下一步是把高度 key 与失效规则做严格化，并把 block 高度也纳入表内。
+**迁移前结论（已不再排期）**：当时建议严格化高度 key 与失效规则，并把 block 高度纳入表内；
+现行方案以文档内 CV、Warmer/Poller 处理几何，不恢复原生高度表。
 
 ### 3.3 滚动
 
@@ -1486,26 +1499,28 @@ New development is happening in Textual.
 > （文档内单 writer，见 `transcript-document.js` 的 Scroll 模块），engineFingerprint /
 > block 级高度表随高度表机制本身消亡而失去对象。本表仅作历史决策记录留存；
 > 现行实现见 CLAUDE.md 与 [`ui-architecture-decision.md`](./ui-architecture-decision.md) §4.3。
+> 删除范围仅指**原生遗留路径**：文档内 Warmer（CV 占位高固化）和 Poller（滚动期几何补偿）
+> 仍在使用。JS 兼容高度/产物 API 仍保留，但生产单文档实例关闭这两类回传。
 >
 > 初版本节的建议是在**未核对 NewPi 实际代码**的前提下写的，其中三项已经落地。
 > 直接按 §5「实现顺序」执行会重做 `renderStreaming()` 与 `repairTailSource()`。
 > 下表为交叉验证后的净结论，逐条依据见
 > [核验报告 §3 / §4](./ui-architecture-research-verification.md)。
 
-| 建议项 | 状态 | 依据 |
+| 建议项 | 历史状态 → 当前处置 | 迁移前依据（旧行号） |
 |---|---|---|
 | 块级增量渲染 + 冻结前缀对齐 | ✅ 已完成 | `markdown-renderer.js:405-462` |
 | 流式尾部规范化（tail-only normalization） | ✅ 已完成，优于参考实现 | `markdown-renderer.js:237-297` |
-| rail pending jump + 有界校正 | ✅ 已完成 | `NewPiChatView.swift:58-63,403-424` |
-| 本地资源 / render-once replay / ResizeObserver 高度桥 | ✅ 已完成 | `markdown-renderer.js:91,102,147,175` |
-| 高度预热 / 手动窗口化 + 高度表 | ✅ 已完成 | `NewPiMarkdownHeightPreheater.swift`、`NewPiChatView.swift:45-46,97` |
-| **显式滚动状态机** | ⬜ 待办 · 价值最高 | 4 个写入点 + 6 个 onChange 驱动，无统一意图状态 |
-| **engineFingerprint 接进高度查询** | ⬜ 待办 · 有实际隐患 | `height(for:)` 无引擎校验（`NewPiMarkdownWebRenderer.swift:60-78`） |
-| **高度表下沉到 block 级** | ⬜ 待办 | 当前按整条 `item.body` 算 SHA256；JS 高度上报不带 blockID |
+| rail pending jump + 有界校正 | 当时已完成；旧实现已退役，现为文档内跳转 | `NewPiChatView.swift:58-63,403-424` |
+| 本地资源 / render-once replay / ResizeObserver 高度桥 | 本地资源保留；旧持久 replay / 高度桥已退出生产路径 | `markdown-renderer.js:91,102,147,175` |
+| 高度预热 / 手动窗口化 + 高度表 | 当时已完成；原生机制已删除 | `NewPiMarkdownHeightPreheater.swift`、`NewPiChatView.swift:45-46,97` |
+| **显式滚动状态机** | 已由文档内 Scroll 意图纪律落地，不重做原生方案 | 旧实现 4 个写入点 + 6 个 onChange 驱动 |
+| **engineFingerprint 接进高度查询** | 随旧缓存退役，不属于当前 backlog | 当时 `height(for:)` 无引擎校验（`NewPiMarkdownWebRenderer.swift:60-78`） |
+| **高度表下沉到 block 级** | 原生高度表已删除，不再排期 | 当时按整条 `item.body` 算 SHA256；JS 高度上报不带 blockID |
 | 块的显式 `RenderBlockID` | ◻︎ 可选加固 | 现为下标 + source 比对的隐式 identity，分叉时有全量兜底 |
 
-以下 P0–P3 保留完整设计推导（对未完成项仍然有效，对已完成项可作为回溯依据），
-但**请先读上表再排期**。
+以下 P0–P3 保留迁移前设计推导，**不构成当前 backlog**；其“待办／必须保持／下一步”
+均属历史措辞。通用设计思想可参考，但不能恢复旧高度表、原生 preheater 或双路径 fallback。
 
 ### P0：建立稳定的 RenderBlock 模型
 
@@ -1558,6 +1573,8 @@ complete 时: tail 冻结，生成最终 digest，下一帧从 tail 变成 froze
 
 ### P0：流式 Markdown 只更新 tail
 
+> **边界**：增量与规范化能力保留；下方管线末尾的高度上报 / height table patch 仅属旧原生路径。
+
 > **[核验修正]** ✅ 本项已完成，保留于此仅作设计回溯。
 > `renderStreaming()`（`markdown-renderer.js:405-462`）已实现下面整条管线；
 > `repairTailSource()`（`:237-297`）已实现下面的尾部规范化，且在两点上比 osaurus 更保守：
@@ -1590,7 +1607,9 @@ SwiftStreamingMarkdown 的 partial emphasis/table rewriter 可以作为第二阶
 
 ### P0：高度缓存 key
 
-> **[核验修正]** ⬜ 待办，但**方案需要改**。初版建议引入手工维护的 `rendererVersion: Int`，
+> **当前处置：随旧缓存退役，不再排期。** 以下为迁移前缺陷与方案核验。
+>
+> **[历史核验修正]** 当时为待办，但**方案需要改**。初版建议引入手工维护的 `rendererVersion: Int`，
 > 而 NewPi 已有更好的机制：`NewPiMarkdownWebDocument.engineFingerprint()`
 > （`NewPiMarkdownWebRenderer.swift:313-333`）对整个 `MarkdownRenderer/` 目录的 js/css
 > 做内容 SHA256，渲染器或样式任何变化都会改变指纹，**无需手工维护版本号**。
@@ -1646,7 +1665,9 @@ struct MarkdownLayoutValue {
 
 ### P1：显式滚动状态机
 
-> **[核验状态]** ⬜ 待办，**三项待办中价值最高**。
+> **当前处置：文档内已落地。** 以下为原生旧方案，不应再补一套原生 writer。
+>
+> **[历史核验状态]** 当时待办，**三项待办中价值最高**。
 > `NewPiChatScrollHelper.swift` 仅 101 行，实质是 per-session 锚点持久化（`Entry: rowID/delta/offset`）
 > 与两个 PreferenceKey，**不含滚动意图状态**。实际滚动写入分散在 `NewPiChatView.swift`：
 >
@@ -1689,6 +1710,9 @@ enum ChatScrollIntent {
 
 ### P1：rail 继续基于高度表
 
+> **已被替代**：当前 rail 消费 JS 上报的条目相对位置；下方 block 高度表、原生 preheat 完成度
+> 与 pending jump 清单全部属于旧路径，不是现行待办。
+
 NewPi 已经从 geometry/PreferenceKey 转向高度表，这是正确的。应继续保证：
 
 ```text
@@ -1713,6 +1737,9 @@ rail y = heightTable.prefixHeight(before: target)
   （`NewPiChatView.swift:58-63`）
 
 ### P1：过程事件与语义消息分层
+
+> **历史实现建议**：语义分层仍适用；下方“原生 status chip / card”不适用于当前 transcript 滚动流，
+> 工具和思考已由 `transcript-document.js` 构建文档内卡片。
 
 ```text
 semantic transcript:
@@ -1743,7 +1770,10 @@ hanlin 的 3-line faded tail、MLXCode 的三态工具卡、osaurus 的 native t
 
 ### P2：WKWebView 继续作为 document renderer
 
-必须保持：
+> **旧路径维护清单**：仅本地资源、模板与块级更新等通用约束延续；高度桥、滚轮转发、
+> per-WebView watchdog 与高度缓存指纹不应恢复。
+
+迁移前要求保持：
 
 - 本地 HTML/JS/CSS，不依赖 CDN
 - 页面模板加载一次
@@ -1763,6 +1793,8 @@ hanlin 的 3-line faded tail、MLXCode 的三态工具卡、osaurus 的 native t
 
 ### P2：高频 UI 下移到轻量原生视图
 
+> **未采纳的旧建议**：当前随 transcript 滚动的工具/思考内容留在文档，不按本节迁回原生。
+
 优先级：
 
 1. tool status row
@@ -1779,6 +1811,9 @@ hanlin 的 3-line faded tail、MLXCode 的三态工具卡、osaurus 的 native t
 正文 Markdown 仍留在 WKWebView。
 
 ### P2：会话切换与重放
+
+> **旧方案归档**：当前保活与恢复不依赖原生高度表或持久 HTML replay；
+> 宿主保存最新 transcript 快照，内容进程终止时重新 upsert，并恢复条目锚点。
 
 NewPi 已有面板保活和高度缓存，可继续借鉴 Agent：
 
@@ -1819,21 +1854,21 @@ sessionID
 
 ## 5. 建议的实现顺序
 
-> **[核验修正] 本节顺序已作废，按下表执行。**
+> **历史排期归档：原顺序及下方修正顺序均不再执行。**
 > 初版第一、二步描述的能力已在 JS 侧落地（见 §4.0 台账），照原顺序执行会重做既有代码。
-> 修正后的顺序：
+> 以下是迁移前修正顺序及当前处置，不是当前 backlog：
 >
 > | 顺序 | 事项 | 对应初版 |
 > |---|---|---|
-> | 1 | 滚动写入收敛为显式状态机（4 写入点 + 6 驱动） | 原第四步 |
-> | 2 | `engineFingerprint` 接进 `height(for:)`；theme/fontScale 纳入 key | 原第三步（部分） |
-> | 3 | 高度上报带 blockID，高度表下沉到 block 级 | 原第三步 |
-> | 4 | 工具过程卡片化 | 原第五步（不变） |
+> | 1 | 滚动状态机：现已在文档内落地 | 原第四步 |
+> | 2 | `engineFingerprint` / theme / fontScale 高度 key：随旧缓存退役 | 原第三步（部分） |
+> | 3 | 高度上报带 blockID、原生高度表下沉：不再排期 | 原第三步 |
+> | 4 | 工具过程卡片化：已采用文档内组件，非旧原生方案 | 原第五步 |
 > | — | ~~抽出 MarkdownBlockBuilder~~ | 原第一步：JS 侧 `splitBlocks` 已承担 |
 > | — | ~~JS API 改为 block patch~~ | 原第二步：`renderStreaming` 已是 block patch |
 >
-> 原第一步若要做，价值在于**把切块逻辑从 JS 挪到 Swift 以获得单元测试覆盖**
-> （当前 `splitBlocks` / `repairTailSource` 无 Swift 侧测试），而不是"补齐缺失能力"。
+> 当时讨论将切块逻辑挪到 Swift 是为了测试便利，不是补齐缺失能力；
+> 不应据此推断当前 JS 没有回归覆盖，更不构成迁移语言的要求。
 
 ### 第一步（已由 JS 侧承担）：抽出纯 Swift MarkdownBlockBuilder
 
@@ -1859,8 +1894,8 @@ replay same text → block identity/digest 一致
 > **[核验修正]** ✅ `window.renderMarkdown(source, {streaming: true})` → `renderStreaming()`
 > 已经是 block patch：冻结前缀不重建 DOM、只替换尾块、分叉时全量兜底、源变短时裁尾节点。
 > 下面的 `upsertBlock`/`freezeBlock` 接口形态是另一种设计（Swift 侧持块），
-> 当前实现选择"传完整 source、JS 侧切块比对"，二者等效；**唯一真实差距是 height report 不带 blockID**
-> （见修正后的第 3 项）。
+> 当时实现选择"传完整 source、JS 侧切块比对"，已有块级更新能力；当时另记的差距是
+> height report 不带 blockID（原修正顺序第 3 项），现随原生高度表退役，**不再是当前缺口**。
 
 建议接口（供参考，非待办）：
 
@@ -1889,6 +1924,8 @@ window.newPi.freezeBlock({
 
 ### 第三步（修正后排第 2–3 位）：高度表接入 blockID
 
+> **已作废的历史步骤**：原生高度表已退役；以下“先做／后做”不再用于排期。
+
 ```text
 messageHeight = sum(blockHeights) + blockSpacing
 ```
@@ -1903,6 +1940,8 @@ rail 与恢复锚点都从这张表读取。
 
 ### 第四步（修正后排第 1 位）：完成滚动状态机
 
+> **历史步骤已被替代**：现行滚动纪律在 `transcript-document.js`，不补回原生四处 writer。
+
 先收敛 writer，再处理体验细节：
 
 1. 禁止 restore 期间 bottom follow
@@ -1911,8 +1950,8 @@ rail 与恢复锚点都从这张表读取。
 4. programmatic scroll 差值 <1pt 跳过
 5. 高频 scroll coalesce
 
-> **[核验补充]** 这是三项待办中价值最高的一项：当前 4 个滚动写入点由 6 个 `onChange` 驱动，
-> 无统一意图状态，代码注释已记录过由此产生的"恢复被钉底覆盖""冷启动 scrollTo 被时序吞掉"两类症状。
+> **[历史核验补充]** 这是当时三项待办中价值最高的一项：迁移前 4 个滚动写入点由 6 个 `onChange` 驱动，
+> 无统一意图状态，旧代码注释记录过"恢复被钉底覆盖""冷启动 scrollTo 被时序吞掉"两类症状。
 
 ### 第五步（修正后排第 4 位）：工具过程卡片化
 
@@ -1927,6 +1966,8 @@ rail 与恢复锚点都从这张表读取。
 ---
 
 ## 6. 风险与不要做的事
+
+> 本节高度表、原生过程 UI 的比较仍限于迁移前；离线资源与流式/持久化分离等约束继续适用。
 
 ### 不要把 NewPi 改成纯 SwiftUI LazyVStack
 
@@ -1989,7 +2030,7 @@ markdown-webview / OmniChat 都依赖远端资源。NewPi 作为本地 coding ag
 12. **ChatGPTSwiftUI**：简单 baseline。
 13. **mlx-swift-chat**：模型加载/生成状态，基本不涉及 chat 渲染。
 
-NewPi 最合理的路线不是推倒重来，而是：
+以下是**迁移前路线（已被单文档决策取代，不再排期）**，保留用于理解调研结论的演变：
 
 ```text
 保留 WKWebView document renderer
@@ -2027,26 +2068,27 @@ NewPi 最合理的路线不是推倒重来，而是：
 
 ## 9. 目标架构提案（架构前提不同）
 
-本文全部建议以**保留当前 per-message WKWebView 架构**为前提，
-在该前提下净待办为 §4.0 台账中的三项。
+本文原落地建议以**保留迁移前 per-message WKWebView 架构**为前提，
+在该前提下曾有 §4.0 的三项待办；现在均已落地或随旧机制退役，不能作为 fallback backlog。
 
-若允许调整前提，另有一份提案主张把整条 transcript 收拢进**单个 WKWebView**，
+随后已采纳的提案把整条 transcript 收拢进**单个 WKWebView**，
 让 Web 引擎同时拥有布局权与滚动权：
 
 **[`ui-target-architecture.md`](./ui-target-architecture.md)**
 
 其核心论点是：本文 §4.0 的三项待办（滚动状态机、engineFingerprint、block 级高度表）
 **都是「原生持布局权、Web 持内容尺寸」这条异步边界的补偿工作**；
-移除该边界后其中两项直接消失，同时换来当前架构做不到的三项能力——
-跨消息文本选择、全文查找、诚实的滚动条。
+移除该边界后其中两项失去对象，滚动状态机移入文档；单文档也为跨消息文本选择和全文查找
+提供基础条件，但不代表这些交互已完整验收。滚动条仍受 CV 占位估算影响，需文档内校正。
 
 需注意该提案有两处与本文结论相反，分歧均源于架构前提：
 
-| 议题 | 本文（当前架构下） | 目标架构提案 |
+| 议题 | 本文（迁移前架构下） | 目标架构提案 |
 |---|---|---|
 | 工具卡的实现 | 原生轻量视图（避免再开 WebView） | 文档内组件（原生视图插进流会重造边界） |
 | osaurus 的借鉴地位 | 借鉴价值第 1 位 | 参考实现质量第 1，但不作为目标架构（其复杂度多在重新实现浏览器已有机制） |
 
 该提案已用本机 WebKit 实测了所依赖的平台能力（`content-visibility` ✅ / `overflow-anchor` ❌ 等），
-并明确标注其最大未验证假设为「单文档在 500 turn 规模下的性能」，
-建议以一次 spike 作为 go/no-go 闸门。
+当时将「单文档在 500 turn 规模下的性能」列为最大未验证假设。
+Spike 结果及迁移收官见 [ADR §4](./ui-architecture-decision.md#4-执行方案)；
+历史 GO 不等于所有后续真实场景性能问题已根治，后续限制见 §4.0 的加固记录。
