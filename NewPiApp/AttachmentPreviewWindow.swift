@@ -1,4 +1,6 @@
 import AppKit
+import CoreImage
+import ImageIO
 import NewPiCore
 import SwiftUI
 
@@ -17,24 +19,24 @@ final class AttachmentPreviewWindowController {
 
     func present(relativePath: String, title: String) {
         guard let fileURL = SessionAttachments.resolve(relativePath: relativePath),
-              let image = NSImage(contentsOf: fileURL) else {
+              let image = Self.loadPreviewImage(at: fileURL) else {
             NSSound.beep()
             return
         }
         close()
 
-        // 尺寸适配：图片等比缩到主屏可视区 70% 以内，加上说明与内边距。
+        // 先扣除内边距与标题，再等比缩图；整个窗口不超过可视区 70%。
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let maxW = visible.width * 0.7
-        let maxH = visible.height * 0.7
+        let maxW = max(1, visible.width * 0.7 - 40)
+        let maxH = max(1, visible.height * 0.7 - 66)
         var size = image.size
         if size.width > maxW || size.height > maxH {
             let scale = min(maxW / size.width, maxH / size.height)
             size = NSSize(width: size.width * scale, height: size.height * scale)
         }
         let contentSize = NSSize(
-            width: max(size.width + 40, 220),
-            height: size.height + 56
+            width: max(size.width + 40, min(220, visible.width * 0.7)),
+            height: size.height + 66
         )
 
         let window = AttachmentPreviewWindow(
@@ -48,7 +50,7 @@ final class AttachmentPreviewWindowController {
         window.level = .floating
         window.animationBehavior = .utilityWindow
         window.contentView = NSHostingView(
-            rootView: AttachmentPreviewContent(image: image, title: title) { [weak self] in
+            rootView: AttachmentPreviewContent(image: image, imageSize: size, contentSize: contentSize, title: title) { [weak self] in
                 self?.close()
             }
         )
@@ -64,6 +66,22 @@ final class AttachmentPreviewWindowController {
             }
             return event
         }
+    }
+
+    // NSImage(contentsOf:) 的逻辑尺寸会受 DPI 影响，非等比 DPI 会把屏幕图片拉伸。
+    // thumbnail 的 WithTransform 在方向字段缺省时也会按 DPI 重采样，不能用于屏幕比例归一化。
+    // 直接解码像素，单独应用 EXIF 的旋转/镜像；不改动磁盘附件。
+    private static func loadPreviewImage(at url: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              var pixels = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.int32Value ?? 1
+        if (2...8).contains(orientation) {
+            let oriented = CIImage(cgImage: pixels).oriented(forExifOrientation: orientation)
+            guard let transformed = CIContext().createCGImage(oriented, from: oriented.extent) else { return nil }
+            pixels = transformed
+        }
+        return NSImage(cgImage: pixels, size: NSSize(width: pixels.width, height: pixels.height))
     }
 
     func close() {
@@ -83,6 +101,8 @@ final class AttachmentPreviewWindow: NSWindow {
 
 private struct AttachmentPreviewContent: View {
     let image: NSImage
+    let imageSize: NSSize
+    let contentSize: NSSize
     let title: String
     var onClose: () -> Void
 
@@ -95,13 +115,15 @@ private struct AttachmentPreviewContent: View {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
+                    .frame(width: imageSize.width, height: imageSize.height)
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.65))
                     .lineLimit(1)
+                    .frame(width: contentSize.width - 40, height: 16)
             }
             .padding(20)
         }
-        .frame(minWidth: 180, minHeight: 120)
+        .frame(width: contentSize.width, height: contentSize.height)
     }
 }
