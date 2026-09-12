@@ -44,7 +44,23 @@
 最终复跑 throughTwoRAF：Session 首载 450.95ms，room A 373.18ms，B 211.65ms，A 返回 368.64ms，Session 返回 335.25ms。
 这是受控 fixture 的单次结果，不是磁盘冷读、性能提升结论或真实 App 滚动像素精度证明。
 日志中的文档进程终止来自恢复检查；DateFormatter nonisolated / AppIntents 提示为已有警告。
-本轮未重新执行全部 Core 测试；此前 85 个 ChatRoom 核心测试结果见发送接受边界记录。
+上述实机验收时未重新执行全部 Core 测试；随后全量回归结果见下一节，此前 85 个 ChatRoom 核心测试结果见发送接受边界记录。
+
+## 后续交付前审查与全量核心回归
+
+实机验收脚本与记录已提交为 `d44812a`。本次 UI 分支的比较基线为 `origin/main`（`7b5d656`）；
+本地 `main` 较旧，不能把相对本地 main 的所有历史差异都当成本轮 UI 变更。
+
+- 在 `Packages/NewPiCore/` 执行 `swift test`，exit 0；**334 tests / 88 suites 全部通过，SKIP 0**。
+  日志 `/private/tmp/newpi-ui/release-review-core-tests.log`。这是当前工作区结果，日志包含 Lab01–05 等学习套件，
+  不将总数描述为排除用户未跟踪 Labs 的纯净 checkout 测试数量；未编辑或提交学习资料。
+- 对 `NewPiChatView`、`NewPiApp`、共享状态栏、`NewPiComposerDraft`、SessionRuntime 及聊天室控制器进行定向源码审查，
+  重点核对草稿持有者、通知传播、发送接受/清稿和附件回调归属，未发现确定的新引入回归。
+  这不是整个历史分支的安全审计，也不保证多主窗口、所有异步附件时序或无障碍路径均正确。
+- 已知运行时淘汰/退出草稿丢失、未提交 IME、异步采集中视图销毁、部分磁盘写入等边界没有被这次通过结论关闭。
+
+当前可进入后续打包检查或 PR 审查准备，但不能标记全量发布验收完成：下节实机未覆盖项仍在。
+本轮没有新的生产代码改动，未更新 `dist`、未推送远程、未创建 PR。
 
 ## 未覆盖（不能以本轮通过替代）
 
