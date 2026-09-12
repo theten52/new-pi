@@ -29,6 +29,7 @@ struct NewPiChatEmptyStateView: View {
     var hasProject: Bool
     var onSuggestion: ((String) -> Void)? = nil
     var suggestionsEnabled = true
+    var projectName: String? = nil
 
     static let suggestions: [(title: String, icon: String, prompt: String)] = [
         ("理解项目结构", "folder", "请先梳理这个项目的结构和主要入口。"),
@@ -39,14 +40,20 @@ struct NewPiChatEmptyStateView: View {
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 14) {
-            Image(systemName: hasProject ? "text.bubble" : "folder")
-                .font(.system(size: 30, weight: .light))
+            Text("n·")
+                .font(.system(size: 27, weight: .semibold, design: .rounded))
                 .foregroundStyle(NewPiWorkbenchStyle.accent)
-                .padding(.bottom, 8)
+                .frame(width: 47, height: 47)
+                .background(NewPiWorkbenchStyle.accentSoft, in: RoundedRectangle(cornerRadius: 13))
+                .padding(.bottom, 11)
+            Text("NEW SESSION" + (projectName.map { " / \($0)" } ?? ""))
+                .font(.system(size: 11))
+                .tracking(2)
+                .foregroundStyle(.secondary)
             Text(hasProject ? "今天，我们从哪里开始？" : "选择你的工作项目")
-                .font(.title2.weight(.medium))
+                .font(.system(size: 25, weight: .medium))
             Text(hasProject
-                ? "在已有会话中输入任务，或从侧边栏新建会话。一起理解代码、定位问题，再逐步完成修改。"
+                ? "项目已就绪。描述一个问题、一处改动，\n或者先一起理解这份代码。"
                 : "从侧边栏打开项目文件夹，加载项目指令、技能与已保存的会话。")
                 .foregroundStyle(.secondary)
                 .lineSpacing(5)

@@ -109,7 +109,7 @@ struct NewPiApp: App {
                 Button("新会话") {
                     NotificationCenter.default.post(name: .newPiNewSession, object: nil)
                 }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .keyboardShortcut("n", modifiers: .command)
             }
             CommandGroup(after: .help) {
                 Button("调试日志") {
@@ -200,17 +200,46 @@ private struct WorkbenchSidebarRowSurface: ViewModifier {
 private struct SessionRow: View {
     let summary: SessionSummary
     let isActive: Bool
+    var runtime: SessionRuntime? = nil
 
     var body: some View {
+        Group {
+            if let runtime {
+                LiveSessionRow(summary: summary, isActive: isActive, runtime: runtime)
+            } else {
         NewPiWorkbenchSidebarEntry(
             title: summary.workbenchTitle,
-            subtitle: (summary.workbenchLabel != nil
-                ? summary.createdAt.formatted(date: .abbreviated, time: .shortened) + " · " : "")
-                + "\(summary.messageCount) 条消息",
+            subtitle: "创建于\(NewPiSidebarFacts.relativeDate(summary.createdAt)) · 状态未知",
             systemImage: "bubble.left",
             isSelected: isActive
         )
+        .help("尚未加载此会话；运行结果与已记录编辑数量未知。\(summary.messageCount) 条消息。")
+            }
+        }
         .modifier(WorkbenchSidebarRowSurface(isSelected: isActive))
+    }
+}
+
+/// 仅行观察匹配的 runtime，不把正文／token 通知向根列表转发。
+private struct LiveSessionRow: View {
+    let summary: SessionSummary
+    let isActive: Bool
+    @ObservedObject var runtime: SessionRuntime
+
+    private var subtitle: String {
+        let date = runtime.transcript.compactMap(\.timestamp).max()
+        let time = date.map { NewPiSidebarFacts.relativeDate($0) }
+            ?? "创建于\(NewPiSidebarFacts.relativeDate(summary.createdAt))"
+        let paths = Set(runtime.transcript.flatMap { $0.fileChanges ?? [] }.map(\.path))
+        let edits = paths.isEmpty ? "编辑数未知" : "已记录编辑 \(paths.count) 个文件"
+        return "\(time) · \(runtime.turnStatusText) · \(edits)"
+    }
+
+    var body: some View {
+        NewPiWorkbenchSidebarEntry(title: summary.workbenchTitle, subtitle: subtitle,
+            systemImage: NewPiSidebarFacts.statusIcon(isRunning: runtime.isStreaming, outcome: runtime.turnOutcome),
+            isSelected: isActive)
+            .help(subtitle + "\n仅统计当前已加载分支中现有编辑记录的去重路径；不代表工作区全部改动。")
     }
 }
 
@@ -232,6 +261,8 @@ struct NewPiRootView: View {
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
     @State private var exportError: String?
+    /// 仅持有引用，不观察逐键通知；房间切换销毁 ChatView 时仍保留未发送空态草稿。
+    @State private var emptySessionDraft = NewPiComposerDraft()
 
     private let recentSessionLimit = 5
     private let sessionDisplayIncrement = 5
@@ -255,7 +286,8 @@ struct NewPiRootView: View {
                         SessionRow(
                             summary: summary,
                             // 聊天室被选中时 session 行不再高亮（两侧互斥，用户要求）
-                            isActive: summary.id == viewModel.activeSessionID && selectedChatroomID == nil
+                            isActive: summary.id == viewModel.activeSessionID && selectedChatroomID == nil,
+                            runtime: viewModel.keptAliveRuntimes.first { $0.sessionID == summary.id }
                         )
                     }
                     .buttonStyle(.plain)
@@ -532,7 +564,7 @@ struct NewPiRootView: View {
                             Image(systemName: "plus")
                             Text("新会话")
                             Spacer(minLength: 4)
-                            Text("⇧⌘N")
+                            Text("⌘N")
                                 .font(.system(size: 10))
                                 .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
                         }
@@ -547,7 +579,7 @@ struct NewPiRootView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.projectURL == nil)
-                    .help(viewModel.projectURL == nil ? "请先选择项目" : "新建会话（⇧⌘N）")
+                    .help(viewModel.projectURL == nil ? "请先选择项目" : "新建会话（⌘N）")
                     .padding(.horizontal, 4)
                 }
                 sessionsSection
@@ -647,7 +679,7 @@ struct NewPiRootView: View {
                     // 仍是上一个聊天室的 key——滚动锚点串号且不恢复（review #1）。
                     .id(chatroom.id)
                 } else {
-                    NewPiChatView(viewModel: viewModel)
+                    NewPiChatView(viewModel: viewModel, emptyDraft: emptySessionDraft)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -1576,6 +1608,7 @@ struct ChatRoomDetailView: View {
     @ObservedObject var controller: ChatRoomFlowController
 
     @ObservedObject private var draft: NewPiComposerDraft
+    @State private var composerFocused = false
 
     init(viewModel: NewPiViewModel, controller: ChatRoomFlowController) {
         self.viewModel = viewModel
@@ -1625,6 +1658,9 @@ struct ChatRoomDetailView: View {
 
             // 消息列表
             messageList
+
+            // 原生尾行紧邻正文；不冒充文档流中的消息，不修改 renderer/adapter。
+            nextSpeakerFooter
 
             // 输入栏
             inputBar
@@ -1684,7 +1720,7 @@ struct ChatRoomDetailView: View {
             NewPiWorkbenchRoleStrip(
                 phaseTitle: phaseTitle,
                 roundText: roundText,
-                roles: runtime.chatroom.configuredRoles.map { role in
+                roles: runtime.chatroom.roles.map { role in
                     NewPiWorkbenchRole(
                         id: role.id,
                         name: role.name,
@@ -1760,13 +1796,16 @@ struct ChatRoomDetailView: View {
                 controller: docController,
                 tintHues: snapshot.tintHues,
                 restoreEntry: chatroomUUID.flatMap { ScrollPositionStore.shared.entry(for: $0) },
+                    projectName: URL(fileURLWithPath: runtime.chatroom.projectPath).lastPathComponent,
+                    dateContext: "多模型协作",
                 onFork: nil,
                 approval: approval,
-                onApproval: { requestID, decision in
+                    onApprovalAccepted: { requestID, decision in
                     guard let pending, approvalManager.pendingApprovals.first?.id == requestID,
-                          approvalManager.pendingApprovals.first?.request == pending.request else { return }
+                          approvalManager.pendingApprovals.first?.request == pending.request else { return false }
                     if decision.approved { approvalManager.approve(id: requestID, scope: decision.scope) }
                     else { approvalManager.reject(id: requestID) }
+                      return !approvalManager.pendingApprovals.contains { $0.id == requestID }
                 },
                 approvalIsCurrent: {
                     pending != nil && approvalManager.pendingApprovals.first?.request == pending?.request
@@ -1826,7 +1865,7 @@ struct ChatRoomDetailView: View {
                 lastTurnOutputTokens: nil
             )
 
-            NewPiComposerSurface {
+            NewPiComposerSurface(isFocused: composerFocused) {
                 VStack(alignment: .leading, spacing: 8) {
                     // 保留聊天室运行中 Return 插话的既有行为，不把它改成停止。
                     NewPiComposerTextView(
@@ -1838,16 +1877,16 @@ struct ChatRoomDetailView: View {
                             return draft.recallHistory(previous: previous) {
                                 runtime.messages.filter(\.isUserMessage).map(\.content)
                             }
-                        }
+                        },
+                        focusRequest: draft.focusRequest,
+                        onFocusChange: { composerFocused = $0 },
+                        onCompositionChange: { draft.isComposing = $0 }
                     )
                     .frame(height: NewPiComposerScrollView.fixedHeight)
                     .help("Return 发送，Shift+Return 换行；首行 ↑ / 末行 ↓ 取回历史输入；发言中发送 = 插话")
 
                     HStack(spacing: 12) {
-                        Text(runtime.isRunning ? "发言中可插话" : "Return 发送 · Shift+Return 换行")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        NewPiComposerHint(isRunning: runtime.isRunning, isRoom: true)
                         Spacer(minLength: 8)
                         // 常驻占位保证运行状态变化不重建输入组件；插话与停止是两个明确动作。
                         Button("发送插话", action: sendUserMessage)
@@ -1897,14 +1936,41 @@ struct ChatRoomDetailView: View {
 
     private var speakerActions: some View {
         HStack(spacing: 12) {
-            Button { controller.triggerNextSpeaker() } label: {
-                Label("推进下一发言", systemImage: "play.fill")
-            }
             Button { showingRolePicker = true } label: {
                 Label("指定角色", systemImage: "at")
             }
         }
         .disabled(controller.isBusy || controller.directoryIssue != nil || runtime.chatroom.currentPhase == .completed)
+    }
+
+    private var nextSpeakerFooter: some View {
+        HStack(spacing: 12) {
+            if runtime.chatroom.currentPhase == .completed {
+                Text("流程已完成")
+            } else if runtime.isRunning {
+                Text(runtime.speakingRoleID.flatMap { runtime.chatroom.role(by: $0) }
+                    .map { "\($0.name) · 正在发言" } ?? "正在发言")
+            } else if let next = runtime.currentSpeaker {
+                Text("下一位 · \(next.name)")
+                Spacer(minLength: 0)
+                Button {
+                    guard !controller.isBusy, controller.directoryIssue == nil,
+                          runtime.chatroom.currentPhase != .completed,
+                          runtime.currentSpeaker?.id == next.id else { return }
+                    controller.triggerNextSpeaker()
+                } label: {
+                    Label("让\(next.name)发言", systemImage: "arrow.right")
+                }
+                .disabled(controller.isBusy || controller.directoryIssue != nil)
+            } else {
+                Text("尚无已配置模型的角色")
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+        .padding(.vertical, 10).padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+        .frame(maxWidth: NewPiWorkbenchStyle.maxReadingWidth)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .top) { Divider() }
     }
 
     @ViewBuilder
@@ -1997,7 +2063,8 @@ struct ChatRoomDetailView: View {
         }
         return NewPiAgentStatusPresentation(
             systemImage: "bubble.left.and.bubble.right",
-            label: "聊天室就绪",
+            label: runtime.chatroom.currentPhase == .completed ? "流程已完成"
+                : runtime.currentSpeaker.map { "下一位 · \($0.name)" } ?? "尚无已配置模型的角色",
             isActive: false
         )
     }

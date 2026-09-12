@@ -559,7 +559,9 @@ public final class ChatRoomLoop {
                     output: result.content,
                     isError: result.isError,
                     fileChanges: result.fileChanges,
-                    durationSeconds: result.durationSeconds
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 ))
             case .messageEnd(.assistant(let assistant)):
                 buffer.completeMessage()
@@ -711,12 +713,7 @@ public final class ChatRoomLoop {
 
     /// 聊天室引擎工具集：session 的 BuiltInTools（不含 SubAgent），edit 快照挂项目目录。
     static func chatroomTools(projectURL: URL, additional: [any AgentTool]) -> [any AgentTool] {
-        var tools: [any AgentTool] = [
-            ReadTool(),
-            WriteTool(),
-            EditTool(snapshotStore: .forProject(projectURL)),
-            BashTool(),
-        ]
+        var tools = BuiltInTools.codingTools(for: projectURL)
         tools.append(contentsOf: additional)
         return tools
     }

@@ -136,6 +136,9 @@ public struct ToolResultMessage: Sendable, Codable, Equatable {
     /// 展示/持久化专用，不进入 provider 的工具输出；旧历史缺省 nil。
     public var fileChanges: [ToolFileChange]?
     public var durationSeconds: Double?
+    /// 展示/持久化元数据；provider 只编码 content。
+    public var progressReport: ProgressReport?
+    public var testReport: TestReport?
 
     public init(
         toolCallID: String,
@@ -144,7 +147,9 @@ public struct ToolResultMessage: Sendable, Codable, Equatable {
         isError: Bool,
         timestamp: Date = Date(),
         fileChanges: [ToolFileChange]? = nil,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        progressReport: ProgressReport? = nil,
+        testReport: TestReport? = nil
     ) {
         self.toolCallID = toolCallID
         self.toolName = toolName
@@ -153,6 +158,8 @@ public struct ToolResultMessage: Sendable, Codable, Equatable {
         self.timestamp = timestamp
         self.fileChanges = fileChanges
         self.durationSeconds = durationSeconds
+        self.progressReport = progressReport
+        self.testReport = testReport
     }
 }
 

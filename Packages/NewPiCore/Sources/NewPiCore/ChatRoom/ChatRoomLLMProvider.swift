@@ -156,7 +156,9 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                     content: result.output,
                     isError: result.isError,
                     fileChanges: result.fileChanges,
-                    durationSeconds: result.durationSeconds
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 )))
             }
 

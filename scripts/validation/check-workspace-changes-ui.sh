@@ -1,5 +1,5 @@
 #!/bin/bash
-# 独立原生窗口 + 完整生产 Changes 视图 + 真实 Reader / 系统 Git。
+# 独立原生窗口 + 完整生产 Status（除 Preview）/Changes overlay + 真实 Reader / 系统 Git。
 # 0 = 全部通过；1 = 构建/运行/断言失败；2 = 存在无法验证的 SKIP。无宽松模式。
 # 请用 bash 执行；不启动、查找、关闭用户 NewPi App，不读取用户仓库的 Git 内容。
 set -euo pipefail
@@ -69,6 +69,16 @@ python3 - "$ROOT" <<'PY' | xcrun swiftc -swift-version 6 -parse-as-library \
 from pathlib import Path
 import hashlib, sys
 root = Path(sys.argv[1])
+status = (root/'NewPiApp/NewPiAgentStatusView.swift').read_text()
+print('SOURCE: NewPiAgentStatusView.swift', hashlib.sha256(status.encode()).hexdigest(), file=sys.stderr)
+# 完整共享生产实现（包括 presentation/filter/backdrop/style），只剥离尾部 Preview。
+marker = '#Preview("Ready")'
+if status.count(marker) != 1:
+    raise RuntimeError('Status Preview 提取契约变化')
+status, previews = status.split(marker, 1)
+if '#Preview' in status or not previews.rstrip().endswith('}'):
+    raise RuntimeError('Status Preview 边界变化')
+print(status)
 source = (root/'NewPiApp/NewPiChangesView.swift').read_text()
 print('SOURCE: NewPiChangesView.swift', hashlib.sha256(source.encode()).hexdigest(), file=sys.stderr)
 def once(old, new):
@@ -82,34 +92,37 @@ def measure(key):
 once('        .help("查看整个 Git 工作区',
      '        .workspaceMeasure("open", space: "workspace-button")\n        .help("查看整个 Git 工作区')
 for key, expression in [
-    ('title', 'Label("工作区 Git 改动", systemImage: "arrow.triangle.branch").font(.headline)'),
+    ('title', 'Label("工作区 Git 改动", systemImage: "plus.forwardslash.minus").font(.headline)'),
     ('refresh', 'Button("刷新", systemImage: "arrow.clockwise") { model.refreshNow() }'),
-    ('done', 'Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)'),
     ('notice', '.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)'),
     ('scope', '.font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)'),
-    ('count', '.font(.caption2).foregroundStyle(.secondary)'),
-    ('list', '.accessibilityLabel("改动文件")'),
+    ('count', r'Text("最近完整清单：\(snapshot.readAt.formatted(date: .omitted, time: .standard)) · \(snapshot.files.count) 个文件；diff 按需读取，非原子快照")'
+              + '\n                        .font(.caption2).foregroundStyle(.secondary)'),
     ('selected', 'Text(file.displayPath).font(.system(.body, design: .monospaced)).textSelection(.enabled)'),
     ('picker', '.accessibilityLabel("改动分区")'),
     ('diff', 'NewPiChangesDiffLines(diff: diff)'),
 ]:
     once(expression, expression + '\n                ' + measure('"' + key + '"'))
-once('.accessibilityAddTraits(model.selectedPath == file.path ? .isSelected : [])',
-    '.accessibilityAddTraits(model.selectedPath == file.path ? .isSelected : [])\n                    .workspaceMeasure("row:" + file.path)')
+once('                            .accessibilityLabel(file.displayPath)\n                            if model.selectedPath == file.path {',
+    '                            .accessibilityLabel(file.displayPath)\n                            .workspaceMeasure("row:" + file.path)\n                            if model.selectedPath == file.path {')
+once('                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NewPiWorkbenchStyle.line) }',
+    '                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NewPiWorkbenchStyle.line) }\n                        .workspaceMeasure("card:" + file.path)')
+once('                }.padding(12)\n            }\n        } else {',
+    '                }.padding(12)\n            }\n            .workspaceMeasure("cards-scroll")\n        } else {')
 once('.accessibilityAddTraits(model.area == area ? .isSelected : [])',
     '.accessibilityAddTraits(model.area == area ? .isSelected : [])\n            .workspaceMeasure("area:" + area.rawValue)')
 once('        }.frame(maxWidth: .infinity, maxHeight: .infinity)\n    }\n\n    private var areaButtons',
     '        }.frame(maxWidth: .infinity, maxHeight: .infinity)\n        .workspaceMeasure("detail")\n    }\n\n    private var areaButtons')
-once('                }.textSelection(.enabled)\n            }\n        }',
-     '                }.textSelection(.enabled)\n            }\n            .workspaceMeasure("diff-scroll")\n        }')
-frame = '.frame(minWidth: 420, idealWidth: 920, minHeight: 420, idealHeight: 650)'
+once('                }.frame(width: max(geometry.size.width, layout.width)).textSelection(.enabled)\n            }\n        }',
+    '                }.frame(width: max(geometry.size.width, layout.width)).textSelection(.enabled)\n                .workspaceMeasure("diff-content")\n            }\n            .workspaceMeasure("diff-scroll")\n        }')
+frame = '.frame(minWidth: isOverlay ? 0 : 420, idealWidth: 920, minHeight: isOverlay ? 0 : 420, idealHeight: 650)'
 once(frame, frame + '\n        .workspaceMeasure("panel")\n        .coordinateSpace(name: "workspace-panel")\n        .background(WorkspaceCoordinate(space: "workspace-panel"))')
 # 原文件完整拼接，所有 private 声明保持原样；测试不访问/调用生产 model。
 print(source)
 checks = (root/'scripts/validation/WorkspaceChangesUIChecks.swift').read_text()
 print(checks)
 print('CHECKS:', hashlib.sha256(checks.encode()).hexdigest(), file=sys.stderr)
-print('EXTRACT: 完整生产文件，仅增加 geometry/坐标锚点；真实 NewPiCore，无 mock', file=sys.stderr)
+print('EXTRACT: 完整 Status（除 Preview）与 Changes，仅增加只读 geometry/坐标锚点；真实 NewPiCore，无 mock', file=sys.stderr)
 PY
 # Reader 的默认 HOME 可能由 Foundation 取自账号；显式配置定位可确保不读取用户 Git 配置。
 # 此环境也不继承用户 DYLD、Git trace、仓库定位或 SwiftUI 测试开关。

@@ -26,8 +26,82 @@
   const items = new Map();
   const actionButtons = new WeakMap();
   let approvalState = null;
+  const approvalReceipts = new Map();
+  let dateContext = "";
   let changesDialog = null;
   let footersDirty = false;
+
+  // 图形仅取本地常量，任何模型/工具文本都不进入 SVG/HTML。
+  const iconPaths = {
+    done: '<path d="m5 12 4 4L19 6"/>',
+    pending: '<circle cx="12" cy="12" r="8"/>',
+    running: '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
+    stopped: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    error: '<path d="m12 3 10 18H2zM12 9v5M12 17h.01"/>',
+    copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
+    diff: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 15h8M12 12v6"/>',
+    shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/>',
+    file: '<path d="M5 3h9l5 5v13H5zM14 3v6h5M9 13h6M9 17h6"/>',
+    retry: '<path d="M3 11a9 9 0 1 1 3 8M3 4v7h7"/>',
+    chevron: '<path d="m9 5 7 7-7 7"/>',
+    close: '<path d="m6 6 12 12M6 18 18 6"/>'
+  };
+  function icon(name) {
+    const span = textElement("span", "transcript-icon icon-" + name, "");
+    span.setAttribute("aria-hidden", "true");
+    span.innerHTML = '<svg viewBox="0 0 24 24" focusable="false">' + (iconPaths[name] || iconPaths.running) + '</svg>';
+    return span;
+  }
+  function toolStatus(tool) {
+    // 真实失败优先；停止只表示原生报告的未结束调用，不改写执行结果。
+    return tool.toolError ? "error" : tool.interrupted ? "stopped" : tool.toolRunning ? "running" : "done";
+  }
+  const statusLabels = { done: "已完成", running: "进行中", error: "失败", stopped: "已停止" };
+  function finiteDuration(seconds) { return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0; }
+  function requestCopy(button, text, label, valid) {
+    window.newPiCopy?.request(button, text, label, valid);
+  }
+
+  // 只消费 Core 的结构化字段；未知/非法数据不是 0，也不是执行证明。
+  function progressReport(value) {
+    if (!value || value.source !== "agentReport" || !Array.isArray(value.steps)) return null;
+    const ids = new Set();
+    for (const step of value.steps) {
+      if (!step || typeof step.id !== "string" || !step.id.trim() || ids.has(step.id) ||
+          typeof step.title !== "string" || !step.title.trim() ||
+          !["pending", "inProgress", "completed"].includes(step.status)) return null;
+      ids.add(step.id);
+    }
+    return value;
+  }
+
+  function testReport(value) {
+    if (!value || value.source !== "JUnit" || typeof value.path !== "string" || !value.path.trim() ||
+        ![value.passed, value.failed, value.skipped, value.total].every(n => Number.isSafeInteger(n) && n >= 0) ||
+        value.total !== value.passed + value.failed + value.skipped) return null;
+    return value;
+  }
+
+  function testReportSegments(tools) {
+    // 已解析报告按当前 turn/speech 内路径取最后一次读取，不去重不同作用域。
+    const latest = new Map();
+    for (const tool of tools) {
+      if (tool.testReport) latest.set(tool.testReport.path, tool.testReport);
+    }
+    if (!latest.size) return [{ icon: "file", className: "result-test-notice", text: "未提供测试报告" }];
+    const reports = [...latest.values()];
+    const totals = reports.reduce((sum, report) => ({
+      passed: sum.passed + report.passed, failed: sum.failed + report.failed, skipped: sum.skipped + report.skipped
+    }), { passed: 0, failed: 0, skipped: 0 });
+    const countText = report => `通过 ${report.passed} · 失败 ${report.failed} · 跳过 ${report.skipped}`;
+    return [
+      { icon: totals.failed ? "error" : "file", className: "result-test-summary",
+        text: "JUnit 报告汇总：" + (Object.values(totals).every(Number.isSafeInteger) ? countText(totals) : "计数超出显示范围") },
+      ...reports.map(report => ({ icon: "file", className: "result-test-source",
+        text: `${report.source} · ${report.path}：${countText(report)}` })),
+      { icon: "file", className: "result-test-notice", text: "仅为已读取的测试报告，不保证报告新鲜度或对应当前代码。" }
+    ];
+  }
 
   function closeChanges() {
     if (changesDialog) {
@@ -47,11 +121,14 @@
     const heading = textElement("h2", "changes-title", title);
     heading.id = "changes-dialog-title";
     dialog.setAttribute("aria-labelledby", heading.id);
-    dialog.appendChild(heading);
+    const dialogHeader = textElement("div", "changes-header", "");
+    dialogHeader.appendChild(heading);
     const close = textElement("button", "changes-close", "关闭");
     close.type = "button";
+    close.prepend(icon("close"));
     close.addEventListener("click", () => dialog.close());
-    dialog.appendChild(close);
+    dialogHeader.appendChild(close);
+    dialog.appendChild(dialogHeader);
     dialog.appendChild(textElement("p", "changes-notice", message || ""));
     if (!changes.length) dialog.appendChild(textElement("p", "changes-empty", "本轮未记录文件编辑快照"));
     changes.forEach(change => {
@@ -89,14 +166,30 @@
   }
 
   function positionApproval() {
-    if (!approvalState) return;
-    const anchor = items.get(approvalState.afterID)?.el;
-    if (anchor) {
-      if (anchor.nextSibling !== approvalState.el) main.insertBefore(approvalState.el, anchor.nextSibling);
-    } else if (main.firstChild !== approvalState.el) {
-      // 空正文时出现的审批保持在后来消息之前，而不是每次追加到 tail。
-      main.insertBefore(approvalState.el, main.firstChild);
+    const anchored = new Map();
+    for (const state of [...approvalReceipts.values(), ...(approvalState ? [approvalState] : [])]) {
+      const anchor = anchored.get(state.afterID) || items.get(state.afterID)?.el;
+      const next = anchor ? anchor.nextSibling : main.firstChild;
+      if (next !== state.el) main.insertBefore(state.el, next);
+      anchored.set(state.afterID, state.el);
     }
+  }
+
+  function applyApprovalReceipt(op) {
+    const state = approvalState;
+    if (!state || state.id !== op.id || state.nonce !== op.nonce ||
+        !["approved", "denied", "cancelled"].includes(op.outcome)) return;
+    if (changesDialog?.approvalNonce) closeChanges();
+    state.el.textContent = "";
+    state.el.className = "ti ti-approval-receipt";
+    state.el.setAttribute("aria-label", "审批结果");
+    state.el.setAttribute("role", "status");
+    state.el.append(icon(op.outcome === "approved" ? "done" : op.outcome === "denied" ? "shield" : "stopped"),
+      textElement("span", "approval-result-text", op.message));
+    state.el.dataset.outcome = op.outcome;
+    approvalReceipts.set(state.id, state);
+    approvalState = null;
+    Warmer.warmed.delete(state.id);
   }
 
   function applyApproval(op) {
@@ -113,8 +206,11 @@
     el.setAttribute("aria-label", "待审批工具");
     const state = { id: op.id, nonce: op.nonce, el, afterID: op.afterID, claimed: false };
     approvalState = state;
-    el.appendChild(textElement("h3", "approval-title", "等待审批 · " + op.toolName));
-    el.appendChild(textElement("p", "approval-risk", [op.risk, op.reason].filter(Boolean).join(" · ")));
+    const title = textElement("h3", "approval-title", "需要你的确认 · " + op.toolName);
+    title.prepend(icon("shield"));
+    title.appendChild(textElement("span", "approval-risk", op.risk || "风险未标注"));
+    el.appendChild(title);
+    if (op.reason) el.appendChild(textElement("p", "approval-reason", op.reason));
     if (op.role) el.appendChild(textElement("p", "approval-role", "角色：" + op.role));
     el.appendChild(textElement("p", "approval-directory", "工作目录：" + op.directory));
     el.appendChild(textElement("pre", "approval-summary", op.summary || ""));
@@ -122,6 +218,7 @@
     const actions = textElement("div", "approval-actions", "");
     function button(label, action, scope) {
       const btn = textElement("button", "approval-action approval-" + action, label);
+      if (action === "approve" && scope === "once") btn.classList.add("approval-primary");
       btn.type = "button";
       // 能力只在闭包中，不放 DOM dataset；模型输出不能通过相同 class/href 冒充。
       btn.addEventListener("click", () => {
@@ -165,17 +262,25 @@
       if (turn.final) wanted.delete(turn.final);
       turn.final = state;
       const tools = [...new Set(turn.tools)];
-      const completed = tools.filter(t => !t.toolRunning && !t.toolError);
+      const completed = tools.filter(t => toolStatus(t) === "done");
       const failed = tools.filter(t => t.toolError).length;
-      const running = tools.filter(t => t.toolRunning).length;
+      const running = tools.filter(t => toolStatus(t) === "running").length;
+      const stopped = tools.filter(t => toolStatus(t) === "stopped").length;
       const changes = completed.flatMap(t => t.fileChanges || []);
       const paths = new Set(changes.map(c => c.path));
-      const timed = tools.filter(t => typeof t.durationSeconds === "number" && !t.toolRunning);
+      const timed = tools.filter(t => finiteDuration(t.durationSeconds) && toolStatus(t) !== "running");
       const seconds = timed.reduce((sum, t) => sum + t.durationSeconds, 0);
-      let text = tools.length ? `工具成功 ${completed.length} · 失败 ${failed} · 未完成 ${running}` : "本轮未调用工具";
-      if (timed.length) text += ` · 已记录工具耗时 ${seconds.toFixed(2)} 秒` + (timed.length < tools.length ? "（部分）" : "");
-      text += changes.length ? ` · 文件编辑记录 ${changes.length} 次 / ${paths.size} 个路径` : " · 本轮未记录文件编辑快照";
-      wanted.set(state, { text, changes, notice: state.coverageNotice || "仅展示已记录文件快照，不代表工作区全部改动或测试结果。" });
+      const segments = [{ icon: failed ? "error" : stopped ? "stopped" : running ? "running" : "done",
+        text: tools.length ? `工具成功 ${completed.length} · 失败 ${failed} · 未完成 ${running + stopped}` + (stopped ? `（已停止 ${stopped}）` : "") : "本轮未调用工具" }];
+      if (timed.length) segments.push({ icon: "running", text: `已记录工具耗时 ${seconds.toFixed(2)} 秒` + (timed.length < tools.length ? "（部分）" : "") });
+      segments.push({ icon: "file", text: changes.length ? `文件编辑记录 ${changes.length} 次 / ${paths.size} 个路径` : "本轮未记录文件编辑快照" });
+      wanted.set(state, { segments, changes, reportTools: turn.tools,
+        notice: state.coverageNotice || "仅展示已记录文件快照，不代表工作区全部改动或测试结果。" });
+    }
+    // 报告在全作用域扫描后归并；交错/迟到的读取也属于其显式发言，不能被 final 的 DOM 位置截断。
+    for (const result of wanted.values()) {
+      result.segments.push(...testReportSegments(result.reportTools));
+      delete result.reportTools;
     }
     items.forEach(state => {
       const result = wanted.get(state);
@@ -191,21 +296,31 @@
       }
       const footer = textElement("footer", "answer-footer", "");
       state.footer = footer;
-      footer.appendChild(textElement("div", "result-strip", result.text));
+      const actions = textElement("div", "answer-actions", "");
       const copy = textElement("button", "answer-copy", "复制回答");
       copy.type = "button";
+      copy.prepend(icon("copy"));
       copy.addEventListener("click", () => {
-        if (items.get(state.el.dataset.iid) !== state || state.footer !== footer ||
-            !footer.isConnected || copy.parentElement !== footer) return;
-        window.webkit?.messageHandlers?.copyText?.postMessage(state.source || "");
+        const valid = () => items.get(state.el.dataset.iid) === state && state.footer === footer &&
+            footer.isConnected && copy.parentElement === actions && actions.parentElement === footer;
+        if (!valid()) return;
+        requestCopy(copy, state.source || "", "复制回答", valid);
       });
       const view = textElement("button", "answer-changes", "查看改动");
       view.type = "button";
+      view.prepend(icon("diff"));
       view.addEventListener("click", () => {
         if (state.footer !== footer || !footer.isConnected) return;
         showChanges("本轮文件编辑快照", result.changes, result.notice, view);
       });
-      footer.append(copy, view);
+      actions.append(copy, view);
+      const strip = textElement("div", "result-strip", "");
+      result.segments.forEach(segment => {
+        const cell = textElement("span", "result-segment" + (segment.className ? " " + segment.className : ""), segment.text);
+        cell.prepend(icon(segment.icon));
+        strip.appendChild(cell);
+      });
+      footer.append(actions, strip);
       state.el.querySelector(".card.answer").appendChild(footer);
       syncTopCopy(state.el.querySelector('.card.answer > .ti-actions'), state);
       Warmer.warmed.delete(state.el.dataset.iid);
@@ -772,15 +887,9 @@
       const state = ti ? items.get(ti.getAttribute("data-iid")) : null;
       if (!state || capability.state !== state || state.el !== ti || state.copyButton !== copyBtn ||
           !copyBtn.isConnected || copyBtn.disabled || state.footer?.isConnected) return;
-      const text = state.source || "";
-      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText) {
-        window.webkit.messageHandlers.copyText.postMessage(text);
-      }
-      // 复制成功反馈（与代码块复制通道一致）：短暂高亮 + 图标切勾。
-      copyBtn.classList.add("copied");
-      window.setTimeout(function () {
-        copyBtn.classList.remove("copied");
-      }, 1000);
+      requestCopy(copyBtn, state.source || "", "复制消息", () =>
+        items.get(ti.dataset.iid) === state && state.copyButton === copyBtn &&
+        copyBtn.isConnected && !state.footer?.isConnected);
       return;
     }
     const forkBtn = event.target.closest(".ti-action-fork");
@@ -802,6 +911,7 @@
       if (card) {
         const plan = Scroll.beginBatch();
         card.classList.toggle("expanded");
+        header.setAttribute("aria-expanded", String(card.classList.contains("expanded")));
         // 卡片会在 thinking delta / 工具结果到达时整体重建。把用户的展开选择
         // 存进条目的长命 state，而不是只留在即将被替换的 DOM class 上。
         const ti = card.closest(".ti");
@@ -898,6 +1008,8 @@
     header.textContent = "";
     header.classList.add("message-hd");
     const avatar = textElement("span", "message-avatar " + (op.kind === "user" ? "user-avatar" : "assistant-avatar"), "");
+    const roleName = typeof op.speaker === "string" ? op.speaker.trim() : "";
+    avatar.textContent = op.kind === "user" ? "你" : roleName ? Array.from(roleName)[0] : "n";
     avatar.setAttribute("aria-hidden", "true");
     header.appendChild(avatar);
     const speaker = textElement("span", "message-speaker", op.speaker || (op.kind === "user" ? "你" : op.kind === "summary" ? "摘要" : "NewPi"));
@@ -922,6 +1034,38 @@
 
   // 同批最终顺序上计算：分隔线嵌在 .ti 内，不新增无 id 的顶层节点。
   // 日期未知的相邻消息切断已知日期链，不能暗示它属于前一天。
+  function syncPlanRows(state, report) {
+    const key = JSON.stringify(report || null);
+    let section = state.el.querySelector(":scope > .agent-plan");
+    if (section && state.planKey === key) return;
+    if (!section) {
+      section = textElement("section", "agent-plan", "");
+      section.setAttribute("aria-label", "Agent计划（自报）");
+      state.el.appendChild(section);
+    }
+    section.textContent = "";
+    const steps = report?.steps || [];
+    const completed = steps.filter(step => step.status === "completed").length;
+    const count = steps.length ? `${completed}/${steps.length}` : report ? "未声明步骤（总数未知）" : "未提供计划";
+    section.appendChild(textElement("div", "plan-summary", "Agent计划（自报） · " + count));
+    if (steps.length) {
+      const list = textElement("ol", "plan-steps", "");
+      for (const step of steps) {
+        const row = textElement("li", "plan-row", "");
+        row.dataset.status = step.status;
+        row.dataset.stepId = step.id;
+        const status = step.status === "completed" ? "done" : step.status === "inProgress" ? "running" : "pending";
+        row.append(icon(status), textElement("span", "plan-title", step.title),
+          textElement("span", "plan-status", step.status === "completed" ? "已完成（自报）" : step.status === "inProgress" ? "进行中（自报）" : "待处理"));
+        list.appendChild(row);
+      }
+      section.appendChild(list);
+    }
+    if (report) section.appendChild(textElement("p", "plan-notice", "仅为 Agent 最后声明的计划；不代表工具成功或测试通过，停止后不自动改写状态。"));
+    state.planKey = key;
+    Warmer.warmed.delete(state.el.dataset.iid);
+  }
+
   function syncBatchDecorations() {
     const today = dayKey(new Date());
     const todayUTC = new Date(today + "T12:00:00Z");
@@ -929,9 +1073,12 @@
     const yesterday = todayUTC.toISOString().slice(0, 10);
     let previousDay = null;
     const counts = new Map();
+    const plans = new Map();
+    const activeGroups = new Set();
     for (const el of main.children) {
       const state = items.get(el.dataset.iid);
       if (!state) continue;
+      if (state.detailTurnID && state.streaming) activeGroups.add(state.detailTurnID);
       const topLevel = (state.kind === "user" || state.kind === "assistant") && !state.detailTurnID && !el.classList.contains("detail-hidden");
       const day = topLevel ? state.day : null;
       const show = day && day !== previousDay;
@@ -942,7 +1089,8 @@
           separator = textElement("div", "message-date", "");
           el.prepend(separator);
         }
-        const label = day === today ? "今日" : day === yesterday ? "昨日" : day.replace(/^(\d+)-(\d+)-(\d+)$/, "$1年$2月$3日");
+        const dateLabel = day === today ? "今天" : day === yesterday ? "昨天" : day.replace(/^(\d+)-(\d+)-(\d+)$/, "$1年$2月$3日");
+        const label = dateLabel + (dateContext ? " · " + dateContext : "");
         if (separator.textContent !== label) {
           separator.textContent = label;
           Warmer.warmed.delete(el.dataset.iid);
@@ -953,22 +1101,33 @@
         Warmer.warmed.delete(el.dataset.iid);
       }
       if (state.kind === "tool" && state.detailTurnID) {
-        const count = counts.get(state.detailTurnID) || { done: 0, running: 0, failed: 0 };
-        if (state.toolRunning) count.running++;
-        else if (state.toolError) count.failed++;
-        else count.done++;
+        if (state.progressReport) plans.set(state.detailTurnID, state.progressReport);
+        const count = counts.get(state.detailTurnID) || { done: 0, running: 0, error: 0, stopped: 0, total: 0 };
+        count[toolStatus(state)]++;
+        count.total++;
         counts.set(state.detailTurnID, count);
       }
     }
     items.forEach(state => {
       if (state.kind !== "detailGroup") return;
       const count = counts.get(state.detailTurnID);
-      const label = count ? `工具步骤 · 已完成 ${count.done} · 进行中 ${count.running} · 失败 ${count.failed}` : "处理详情";
+      const active = !!count?.running || activeGroups.has(state.detailTurnID);
+      const status = count ? count.error ? "error" : active ? "running" : count.stopped ? "stopped" : "done" : active ? "running" : "done";
+      const label = count ?
+        `${active ? "正在执行" : count.stopped ? "已停止" : count.error ? "处理未完成" : "处理过程"} · 已完成 ${count.done} / ${count.total} 个已知工具调用` +
+        (count.error ? ` · 失败 ${count.error}` : "") +
+        (count.stopped ? ` · 保留 ${count.done} 个已完成步骤` : "") : active ? "正在思考" : "处理详情";
       const title = state.el.querySelector(".detail-label");
       if (title.textContent !== label) {
         title.textContent = label;
         Warmer.warmed.delete(state.el.dataset.iid);
       }
+      const statusIcon = state.el.querySelector(".detail-status");
+      if (statusIcon.dataset.status !== status) {
+        statusIcon.replaceChildren(icon(status));
+        statusIcon.dataset.status = status;
+      }
+      syncPlanRows(state, plans.get(state.detailTurnID));
       state.el.querySelector(".detail-row").setAttribute("aria-expanded", String(!groupState[state.detailTurnID]));
     });
   }
@@ -981,7 +1140,9 @@
     el.className = "ti ti-error";
     el.textContent = "";
     const card = textElement("section", "error-card" + (op.retryState === "recovered" ? " recovered" : ""), "");
-    card.appendChild(textElement("div", "error-title sysline", op.errorTitle ?? "本轮未完成"));
+    const title = textElement("div", "error-title sysline", op.errorTitle ?? "本轮未完成");
+    title.prepend(icon("error"));
+    card.appendChild(title);
     const status = op.retryState === "retrying" ? "正在重试，请稍候。" : op.retryState === "recovered" ? "已恢复 · 历史错误记录" : "本次输出未完成。";
     card.appendChild(textElement("div", "error-status", status));
     card.appendChild(textElement("p", "error-guidance", "已有对话和输出仍会保留；重试不会发送或覆盖输入框中的新草稿。已执行的工具操作不会自动撤销。"));
@@ -989,6 +1150,7 @@
     if (op.retryState === "available" || op.retryState === "retrying") {
       const retry = textElement("button", "error-retry", op.retryState === "retrying" ? "重试中…" : "重试");
       retry.type = "button";
+      retry.prepend(icon("retry"));
       state.retryButton = retry;
       // 只绑定我们创建的按钮，绝不委托 HTML class/href 为权限入口。
       retry.addEventListener("click", function () {
@@ -1002,13 +1164,20 @@
     const details = textElement("div", "card error-details" + (state.cardExpanded ? " expanded" : ""), "");
     const header = textElement("button", "card-hd", "");
     header.type = "button";
-    header.appendChild(textElement("span", "card-chevron", ""));
+    header.setAttribute("aria-expanded", String(!!state.cardExpanded));
+    const disclosure = textElement("span", "card-chevron", "");
+    disclosure.appendChild(icon("chevron"));
+    header.appendChild(disclosure);
     header.appendChild(textElement("span", "card-title", "错误详情"));
     details.appendChild(header);
     details.appendChild(textElement("pre", "card-body error-raw", op.body));
     const copy = textElement("button", "error-copy", "复制错误详情");
     copy.type = "button";
-    copy.addEventListener("click", function () { window.webkit?.messageHandlers?.copyText?.postMessage(state.source || ""); });
+    copy.prepend(icon("copy"));
+    copy.addEventListener("click", function () {
+      const valid = () => items.get(op.id) === state && state.kind === "error" && details.parentElement === card && card.parentElement === el && copy.isConnected;
+      if (valid()) requestCopy(copy, state.source || "", "复制错误详情", valid);
+    });
     details.appendChild(copy);
     card.appendChild(details);
     el.appendChild(card);
@@ -1089,7 +1258,7 @@
     el.className = "ti " + cssClass;
     el.textContent = "";
     const line = document.createElement("div");
-    line.className = "sysline";
+    line.className = op.phaseDivider === true ? "phase-divider" : "sysline";
     line.textContent = op.body;
     el.appendChild(line);
   }
@@ -1115,17 +1284,19 @@
     row.className = "detail-row";
     const chevron = document.createElement("span");
     chevron.className = "detail-chevron";
-    row.appendChild(chevron);
+    chevron.appendChild(icon("chevron"));
+    row.appendChild(textElement("span", "detail-status", ""));
     const label = document.createElement("span");
     label.className = "detail-label";
     label.textContent = "处理详情";
     row.appendChild(label);
+    row.appendChild(chevron);
     el.appendChild(row);
     // 组内条目（可能存在，若先渲染了条目再渲染 marker）按当前组状态对齐。
     applyGroupState(op.detailTurnID);
   }
 
-  // 思考 / 工具卡：header（chevron + 标题胶囊 + 折叠预览）+ 折叠体。
+  // 思考 / 工具卡：状态图标、两行说明、耗时及右侧 disclosure；正文仍按原增量路径渲染。
   // ===== 消息级操作按钮（复制 / 分叉）：hover 显示在 user / assistant 条目右上角 =====
   // 复制走 copyText（复用代码块复制通道）；分叉走 fork（回传 messageIndex，原生触发 forkFromMessage）。
   function syncTopCopy(wrap, state) {
@@ -1207,44 +1378,61 @@
     const card = document.createElement("div");
     card.className = "card" + (op.toolError ? " is-error" : "") +
       (state.cardExpanded ? " expanded" : "");
+    const status = toolStatus(op);
+    if (!isThinking) card.dataset.status = status;
 
     const header = document.createElement("button");
     header.type = "button";
     header.className = "card-hd";
+    header.setAttribute("aria-expanded", String(!!state.cardExpanded));
 
     const chevron = document.createElement("span");
     chevron.className = "card-chevron";
-    header.appendChild(chevron);
+    chevron.appendChild(icon("chevron"));
+    header.appendChild(icon(isThinking ? op.streaming ? "running" : "done" : status));
+
+    const description = textElement("span", "card-description", "");
 
     const title = document.createElement("span");
     title.className = "card-title" + (isThinking ? " thinking" : "");
     if (isThinking) {
       title.textContent = op.streaming ? "思考中…" : "思考";
     } else {
-      title.textContent = op.toolName || "tool";
+      // 有限的已知工具名映射，不从任意命令/模型 prose 猜测意图或测试结果。
+      const titles = { read: "读取文件", write: "写入文件", edit: "编辑文件", bash: "执行命令",
+        read_file: "读取文件", write_file: "写入文件", apply_patch: "应用补丁", grep: "搜索内容", glob: "查找文件", subagent: "调用子代理",
+        update_plan: "更新自报计划", read_test_report: "读取测试报告" };
+      title.textContent = Object.prototype.hasOwnProperty.call(titles, op.toolName) ? titles[op.toolName] : op.toolName || "工具调用";
+      title.title = op.toolName || "工具调用";
     }
-    header.appendChild(title);
+    description.appendChild(title);
 
     if (!isThinking) {
       const badge = document.createElement("span");
-      badge.className = "card-badge" + (op.toolError ? " error" : op.toolRunning ? " running" : "");
-      badge.textContent = op.toolRunning ? "进行中" : op.toolError ? "失败" : "已完成";
-      header.appendChild(badge);
+      badge.className = "card-badge " + status;
+      badge.textContent = statusLabels[status];
+      description.appendChild(badge);
     } else if (op.streaming) {
       const badge = document.createElement("span");
       badge.className = "card-badge running";
       badge.textContent = "···";
-      header.appendChild(badge);
+      description.appendChild(badge);
     }
 
     const preview = document.createElement("span");
     preview.className = "card-preview";
-    // 思考展示最新一行（流式追加在尾部）；工具展示结果首行摘要，
-    // 结果为空（Running 中）时回退展示命令本身——折叠态也能看到正在跑什么。
+    // 思考展示最新一行；工具只展示已记录调用参数，不把 stdout prose 冒充命令。
     preview.textContent = isThinking
       ? lastNonEmptyLine(op.body)
-      : (firstNonEmptyLine(op.body) || (op.command ? firstNonEmptyLine(op.command) : ""));
-    header.appendChild(preview);
+      : (op.command ? firstNonEmptyLine(op.command) : "未记录调用参数");
+    description.appendChild(preview);
+    header.appendChild(description);
+    if (!isThinking) {
+      const duration = textElement("span", "card-duration", finiteDuration(op.durationSeconds) ? op.durationSeconds.toFixed(2) + "s" : status === "running" ? "执行中" : status === "stopped" ? "已停止" : "—");
+      duration.title = finiteDuration(op.durationSeconds) ? "已记录工具耗时" : "未记录耗时";
+      header.appendChild(duration);
+    }
+    header.appendChild(chevron);
 
     card.appendChild(header);
 
@@ -1362,6 +1550,8 @@
       const attachKey = attachmentKey(op);
       if (state.source !== op.body || state.streaming !== op.streaming ||
           state.toolRunning !== op.toolRunning || state.toolError !== op.toolError ||
+          state.interrupted !== op.interrupted || state.durationSeconds !== op.durationSeconds ||
+          state.phaseDivider !== op.phaseDivider ||
           state.command !== op.command || state.toolName !== op.toolName ||
           state.errorTitle !== op.errorTitle || state.retryState !== op.retryState ||
           state.kind !== op.kind || state.attachKey !== attachKey) {
@@ -1397,12 +1587,18 @@
     state.kind = op.kind;
     state.command = op.command;
     state.toolName = op.toolName;
+    state.interrupted = op.interrupted;
+    state.phaseDivider = op.phaseDivider;
+    // detailGroup 不经过结构重建分支，但仍需真实运行态供无工具的思考组使用。
+    if (op.kind === "detailGroup") state.streaming = op.streaming;
     state.errorTitle = op.errorTitle;
     state.retryState = op.retryState;
     state.fileChanges = op.fileChanges;
     state.durationSeconds = op.durationSeconds;
     state.answerState = op.answerState;
     state.resultScopeID = op.resultScopeID;
+    state.progressReport = progressReport(op.progressReport);
+    state.testReport = testReport(op.testReport);
     state.coverageNotice = op.coverageNotice;
     if (state.timestamp !== op.timestamp) {
       state.date = messageDate(op.timestamp);
@@ -1452,6 +1648,9 @@
         footersDirty = true;
         closeChanges();
         approvalState = null;
+        approvalReceipts.clear();
+        dateContext = "";
+        window.newPiCopy?.reset();
         main.textContent = "";
         items.clear();
         Warmer.reset();
@@ -1494,6 +1693,14 @@
           };
           window.requestAnimationFrame(catchUp);
         }
+      } else if (op.op === "copyCapability") {
+        window.newPiCopy?.configure(op.capability);
+      } else if (op.op === "copyResult") {
+        window.newPiCopy?.acknowledge(op);
+      } else if (op.op === "context") {
+        dateContext = [op.projectName, op.dateContext].filter(value => typeof value === "string" && value.trim()).join(" · ");
+      } else if (op.op === "approvalReceipt") {
+        applyApprovalReceipt(op);
       } else if (op.op === "approval") {
         applyApproval(op);
       } else if (op.op === "approvalPreview") {
@@ -1504,6 +1711,14 @@
         touchedEls.push(upsert(op));
       } else if (op.op === "remove") {
         footersDirty = true;
+        // fork/删轮次时撤下失去正文锚点的内存回执，不能搬到另一轮冒充其审批结果。
+        for (const [id, receipt] of approvalReceipts) {
+          if (receipt.afterID === op.id) {
+            receipt.el.remove();
+            approvalReceipts.delete(id);
+            Warmer.warmed.delete(id);
+          }
+        }
         const state = items.get(op.id);
         if (state) {
           state.el.remove();

@@ -426,6 +426,8 @@ public enum BuiltInTools {
             WriteTool(),
             EditTool(snapshotStore: .forProject(projectDirectory)),
             BashTool(),
+            UpdatePlanTool(),
+            ReadTestReportTool(),
         ]
     }
 

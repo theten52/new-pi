@@ -12,6 +12,42 @@ final class NewPiComposerDraft: ObservableObject {
         }
     }
     @Published var attachments: [DraftImageAttachment] = []
+    /// 焦点请求随草稿存活；填建议的既有 VM 调用也能唤醒对应输入框。
+    @Published private(set) var focusRequest: UUID?
+    @Published var isComposing = false
+    private final class AttachmentDelivery {
+        weak var destination: NewPiComposerDraft?
+    }
+    private var attachmentDelivery = AttachmentDelivery()
+
+    func requestFocus() { focusRequest = UUID() }
+
+    /// 异步图片解码可能晚于空态→会话交接；只转交给已明确接收此草稿的对象。
+    func appendAttachments(_ values: [DraftImageAttachment]) {
+        attachments.append(contentsOf: values)
+    }
+
+    func attachmentReceiver() -> ([DraftImageAttachment]) -> Void {
+        let delivery = attachmentDelivery
+        return { [self] values in
+            (delivery.destination ?? self).appendAttachments(values)
+        }
+    }
+
+    @discardableResult
+    func transfer(to destination: NewPiComposerDraft) -> Bool {
+                guard destination !== self, !text.isEmpty || !attachments.isEmpty,
+              destination.text.isEmpty, destination.attachments.isEmpty,
+              !isComposing else { return false }
+        destination.text = text
+        destination.attachments = attachments
+        text = ""
+        attachments = []
+        attachmentDelivery.destination = destination
+        attachmentDelivery = AttachmentDelivery()
+        destination.requestFocus()
+        return true
+    }
 
     private var history: [String] = []
     private var historyIndex: Int?
@@ -48,8 +84,9 @@ final class NewPiComposerDraft: ObservableObject {
     /// 建议只进入空草稿，不覆盖文本、图片或触发发送。
     @discardableResult
     func fillSuggestion(_ prompt: String) -> Bool {
-        guard text.isEmpty, attachments.isEmpty, !prompt.isEmpty else { return false }
+        guard text.isEmpty, attachments.isEmpty, !isComposing, !prompt.isEmpty else { return false }
         text = prompt
+        requestFocus()
         return true
     }
 }

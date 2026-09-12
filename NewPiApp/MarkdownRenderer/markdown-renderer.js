@@ -49,23 +49,97 @@
   // 单文档内多个 renderer 实例共存时 id 会撞车。
   const caretClass = "streaming-caret";
 
+  // 文档级复制确认：请求能力只存在闭包中，旧节点/克隆按钮不能接收新按钮的反馈。
+  // 老宿主仍可接受字符串，但没有确认协议时绝不显示“已复制”。
+  const copyRequests = new Map();
+  const copyButtons = new WeakMap();
+  let copyCapability = null;
+  let copySequence = 0;
+  function copyFeedback(button, label, status) {
+    const labels = { pending: "正在复制…", success: "已复制", failure: "复制失败，请重试", unconfirmed: "复制请求未确认，请检查剪贴板" };
+    button.dataset.copyFeedback = labels[status];
+    button.dataset.copyStatus = status;
+    button.classList.toggle("copied", status === "success");
+    button.classList.toggle("copy-failed", status === "failure" || status === "unconfirmed");
+    button.setAttribute("aria-label", label + " · " + labels[status]);
+    button.title = labels[status];
+    let feedback = button.querySelector(":scope > .copy-state-icon");
+    if (!feedback) {
+      feedback = document.createElement("span");
+      feedback.className = "copy-state-icon";
+      feedback.setAttribute("aria-hidden", "true");
+      button.prepend(feedback);
+    }
+    const path = status === "success" ? '<path d="m5 12 4 4L19 6"/>' : status === "pending" ? '<path d="M3 12h4l3-7 4 14 3-7h4"/>' : '<path d="m12 3 10 18H2zM12 9v5M12 17h.01"/>';
+    feedback.innerHTML = '<svg viewBox="0 0 24 24" focusable="false">' + path + '</svg>';
+    // 可见反馈与读屏反馈分开，保留按钮的稳定名称、宽度和原始图标。
+    let live = document.getElementById("newpi-copy-feedback");
+    if (!live) {
+      live = document.createElement("span");
+      live.id = "newpi-copy-feedback";
+      live.className = "copy-announcement";
+      live.setAttribute("role", "status");
+      live.setAttribute("aria-live", "polite");
+      document.body.appendChild(live);
+    }
+    live.textContent = labels[status];
+  }
+  window.newPiCopy = {
+    configure(capability) { copyCapability = typeof capability === "string" ? capability : null; },
+    reset() {
+      for (const request of copyRequests.values()) window.clearTimeout(request.timer);
+      copyRequests.clear();
+      const live = document.getElementById("newpi-copy-feedback");
+      if (live) live.textContent = "";
+    },
+    request(button, text, label, valid = () => button.isConnected) {
+      if (!button.isConnected || button.disabled || !valid()) return;
+      const handler = window.webkit?.messageHandlers?.copyText;
+      if (!handler) { copyFeedback(button, label, "failure"); return; }
+      const requestID = String(++copySequence) + "-" + (window.crypto?.randomUUID?.() || String(Date.now()));
+      copyButtons.set(button, requestID);
+      copyFeedback(button, label, "pending");
+      if (!copyCapability) {
+        try { handler.postMessage(text); copyFeedback(button, label, "unconfirmed"); }
+        catch (_) { copyFeedback(button, label, "failure"); }
+        return;
+      }
+      const request = { button, label, valid, capability: copyCapability };
+      request.timer = window.setTimeout(() => {
+        copyRequests.delete(requestID);
+        if (valid() && copyButtons.get(button) === requestID) copyFeedback(button, label, "unconfirmed");
+      }, 3000);
+      copyRequests.set(requestID, request);
+      try { handler.postMessage({ text, requestID, capability: copyCapability }); }
+      catch (_) {
+        window.clearTimeout(request.timer);
+        copyRequests.delete(requestID);
+        copyFeedback(button, label, "failure");
+      }
+    },
+    acknowledge(result) {
+      const request = copyRequests.get(result.requestID);
+      if (!request || result.capability !== request.capability || result.capability !== copyCapability) return;
+      copyRequests.delete(result.requestID);
+      window.clearTimeout(request.timer);
+      if (request.button.isConnected && request.valid() && copyButtons.get(request.button) === result.requestID) {
+        copyFeedback(request.button, request.label, result.success === true ? "success" : "failure");
+      }
+    }
+  };
+
   // ===== 共享纯函数（无实例状态） =====
 
   // 复制按钮点击：file:// 源下 navigator.clipboard 不可靠，走原生 NSPasteboard。
   // enhanceCodeBlocks（新建外框）与 rebindInteractivity（产物重放）共用。
   function attachCopyHandler(button, pre) {
     const code = pre.querySelector("code");
+    button.textContent = "复制";
+    button.setAttribute("aria-label", "复制代码");
     button.addEventListener("click", function () {
       const text = code ? code.textContent : pre.textContent;
-      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText) {
-        window.webkit.messageHandlers.copyText.postMessage(text || "");
-      }
-      button.textContent = "✓";
-      button.classList.add("copied");
-      window.setTimeout(function () {
-        button.textContent = "Copy";
-        button.classList.remove("copied");
-      }, 1000);
+      window.newPiCopy.request(button, text || "", "复制代码", () =>
+        button.isConnected && pre.isConnected && button.closest(".code-block-container") === pre.parentElement);
     });
   }
 
@@ -226,8 +300,15 @@
     return afterLast.length > 0 && !/^\s/.test(afterLast);
   }
 
-  // 代码块外框：语言标签 + 复制按钮（hover 显示，点击走原生 copyText 写剪贴板）
+  // 代码块外框：语言标签 + 中文常显复制按钮，点击走原生确认通道。
   function enhanceCodeBlocks(scope) {
+    scope.querySelectorAll("table").forEach(function (table) {
+      if (table.parentElement?.classList.contains("table-scroll")) return;
+      const wrapper = document.createElement("div");
+      wrapper.className = "table-scroll";
+      table.replaceWith(wrapper);
+      wrapper.appendChild(table);
+    });
     scope.querySelectorAll("pre").forEach(function (pre) {
       if (pre.parentElement && pre.parentElement.classList.contains("code-block-container")) {
         return;
@@ -250,12 +331,12 @@
 
       const label = document.createElement("span");
       label.className = "code-block-language";
-      label.textContent = language || "code";
+      label.textContent = language || "text";
 
       const button = document.createElement("button");
       button.type = "button";
       button.className = "code-block-copy";
-      button.textContent = "Copy";
+      button.textContent = "复制";
       attachCopyHandler(button, pre);
 
       header.appendChild(label);

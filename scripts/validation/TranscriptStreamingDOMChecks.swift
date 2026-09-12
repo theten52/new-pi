@@ -9,6 +9,9 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
       styleMask: [.titled], backing: .buffered, defer: false)
     let root: URL
     var bridgeMessages: [(String, Any)] = []
+    let copyCapability = UUID().uuidString
+    var copiedTexts: [String] = []
+    var copyRequestIDs = Set<String>()
 
     init(root: URL) {
         self.root = root
@@ -22,6 +25,23 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
 
       func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         bridgeMessages.append((message.name, message.body))
+        guard message.name == "copyText", message.frameInfo.isMainFrame,
+              let payload = message.body as? [String: Any],
+              payload["capability"] as? String == copyCapability,
+              let requestID = payload["requestID"] as? String, !requestID.isEmpty,
+              let text = payload["text"] as? String,
+              copyRequestIDs.insert(requestID).inserted else { return }
+        // 合成内存 sink：只在接收合法请求并保存原文后确认，不触碰系统剪贴板。
+        copiedTexts.append(text)
+        let ack: [[String: Any]] = [["op": "copyResult", "capability": copyCapability,
+            "requestID": requestID, "success": true]]
+        let json = String(data: try! JSONSerialization.data(withJSONObject: ack), encoding: .utf8)!
+        Task { @MainActor in
+            do {
+                _ = try await webView.callAsyncJavaScript("window.transcriptDoc.apply(ack);",
+                    arguments: ["ack": json], in: nil, contentWorld: .page)
+            } catch { print("FAIL: copy ACK: \(error)"); exit(1) }
+        }
       }
 
     func run() throws {
@@ -319,10 +339,24 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
           const el=node(id), child=el.firstElementChild;
           const rect=el.getBoundingClientRect();
           check(el.style.height === '', stage+': no stepped inline height');
-          check(Math.abs(rect.height-child.getBoundingClientRect().height)<1,
+          // 详情组含 disclosure 与计划摘要，按全部可见子节点的自然边界检查，不只取首行。
+          const visibleChildren=[...el.children].filter(child=>getComputedStyle(child).display!=='none');
+          const contentTop=visibleChildren[0].getBoundingClientRect().top;
+          const contentBottom=visibleChildren.at(-1).getBoundingClientRect().bottom;
+          check(Math.abs(rect.top-contentTop)<1 && Math.abs(rect.bottom-contentBottom)<1,
             stage+': row must fit its visible content');
           const gap=window.innerHeight-rect.bottom;
-          check(Math.abs(gap-32)<2, stage+': bottom gap must be 32px, got '+gap);
+          const describe = element => {
+            const box=element.getBoundingClientRect(), style=getComputedStyle(element);
+            return {className:element.className,top:box.top,bottom:box.bottom,height:box.height,
+              marginTop:style.marginTop,marginBottom:style.marginBottom,padding:style.padding,
+              contentVisibility:style.contentVisibility,intrinsic:style.containIntrinsicSize};
+          };
+          check(Math.abs(gap-32)<2, stage+': bottom gap must be 32px, got '+gap+'; geometry '+JSON.stringify({
+            scrollY,viewport:innerHeight,scrollHeight:document.documentElement.scrollHeight,
+            main:describe(document.querySelector('main')),row:describe(el),child:describe(child),
+            previous:el.previousElementSibling && describe(el.previousElementSibling),
+            descendants:[...el.querySelectorAll('*')].map(describe)}));
           geometry.push({stage,gap,height:rect.height});
         };
         checkTail('gap-thinking','thinking');
@@ -388,6 +422,25 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
         apply([{op:'scrollToBottom',smooth:false}]);
         await frames();
         checkTail('gap-last-answer','jump back to latest');
+        // 不能用恰好命中某个估算高掩盖问题：命令换行、展开结果与完成后收起均走自然高度。
+        const wrappedTool={op:'upsert',id:'gap-wrapped-tool',kind:'tool',toolName:'bash',
+          command:'echo '+ 'wrapped-argument '.repeat(45),toolRunning:true,body:'',streaming:false};
+        apply([wrappedTool]);
+        await frames();
+        checkTail(wrappedTool.id,'wrapped running tool');
+        check(node(wrappedTool.id).getBoundingClientRect().height>100,
+          'wrapped tool must grow beyond compact-row estimate');
+        node(wrappedTool.id).querySelector('.card-hd').click();
+        await frames();
+        checkTail(wrappedTool.id,'wrapped expanded tool');
+        apply([{...wrappedTool,toolRunning:false,body:'result\n'.repeat(8)}]);
+        await frames();
+        checkTail(wrappedTool.id,'wrapped completed expanded tool');
+        node(wrappedTool.id).querySelector('.card-hd').click();
+        await frames();
+        checkTail(wrappedTool.id,'wrapped completed collapsed tool');
+        check(getComputedStyle(node(wrappedTool.id)).contentVisibility==='auto',
+          'settled collapsed tools must return to content-visibility virtualization');
         apply([{op:'reset'},{op:'upsert',id:'short-answer',kind:'assistant',body:'Short answer',streaming:true}]);
         await frames();
         // A 文档工作台将顶部设计留白从 16px 调整为 24px；尾距仍严格保持 32px。
@@ -477,7 +530,7 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
         const css=el=>getComputedStyle(el), rect=el=>el.getBoundingClientRect();
         const near=(a,b)=>Math.abs(a-b)<1;
         const transparent=el=>css(el).backgroundColor==='rgba(0, 0, 0, 0)' && css(el).backgroundImage==='none';
-        const source='First paragraph 正文首行。\n\n```swift\nlet value = "'+'x'.repeat(120)+'"\n```';
+        const source='First paragraph 正文首行。\n\n## 标题\n\n### 小节\n\n> 引用说明\n\n| 检查项 | 值 |\n| --- | --- |\n| A | B |\n\n```swift\nlet value = "'+'x'.repeat(120)+'"\n```';
         const speaker='Role A / '+'协作评审员'.repeat(10);
         apply([{op:'reset'},{op:'forkLock',locked:true},
           {op:'upsert',id:'style-user',kind:'user',body:'User steering 用户输入 '+ 'readable text '.repeat(8),
@@ -514,11 +567,13 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
         check(transparent(answer) && transparent(card) && transparent(article),'assistant must have no card background');
         check(['Top','Right','Bottom','Left'].every(side=>parseFloat(css(card)['border'+side+'Width'])===0 &&
           parseFloat(css(card)['padding'+side])===0),'assistant card must have no border or padding');
-        check(css(article).fontSize==='14px' && near(parseFloat(css(article).lineHeight),24.5),
-          'Markdown font override must be 14px/1.75');
-        check(css(document.body).fontSize==='14px' && css(bubble).lineHeight===css(article).lineHeight,
-          'user and Markdown must share body typography');
-        check(header.textContent===speaker && css(header).display!=='none','speaker header must remain visible');
+        check(css(article).fontSize==='14px' && near(parseFloat(css(article).lineHeight),25.9),
+          'A Markdown font must be 14px/1.85');
+        check(css(document.body).fontSize==='14px' && near(parseFloat(css(bubble).lineHeight),23.8) &&
+          css(bubble).borderTopWidth==='1px' && css(bubble).borderRadius==='9px',
+          'A user bubble must use 14px/1.7, fine border and 9px corners');
+        check(header.querySelector('.message-speaker').textContent===speaker &&
+          header.querySelector('.message-avatar').textContent==='R' && css(header).display!=='none','speaker and role initial must remain visible');
         const actions=card.querySelector('.ti-actions'), userActions=bubble.querySelector('.ti-actions');
         check(actions.children.length===2 && userActions.children.length===2,'fixtures must cover copy and fork');
         check(css(actions).position==='absolute' && css(userActions).position==='absolute',
@@ -527,7 +582,8 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
         const textRect=el=>{ const range=document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect(); };
         check(textRect(header).right<=rect(actions).left,'wrapped speaker must leave room for both actions');
         const userRange=document.createRange(); userRange.selectNode(bubble.firstChild);
-        check(userRange.getBoundingClientRect().right<=rect(userActions).left,'user text must leave room for both actions');
+        check(rect(userActions).bottom<=userRange.getBoundingClientRect().top && css(bubble).padding==='14px 17px',
+          'user actions must stay in the signature line, not obscure text or change A bubble padding');
         const neutralNodes=[bubble,card,detail,node('style-thinking').querySelector('.card'),node('style-tool').querySelector('.card')];
         const backgrounds=neutralNodes.map(el=>css(el).backgroundColor);
         for(const tint of [0,120,280]){
@@ -538,7 +594,11 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
           'detail group must be a weak separator, not a colored rounded button');
         for(const id of ['style-thinking','style-tool']){
           const el=node(id), inner=el.querySelector('.card'), title=el.querySelector('.card-title');
-          check(transparent(inner) && rect(inner).height<48,'collapsed process must be a compact neutral row');
+          check(transparent(inner) && rect(inner).height<(id==='style-tool'?72:48),'process must be a compact neutral row with room for two tool lines');
+          if(id==='style-tool') check(title.textContent==='读取文件' &&
+            rect(el.querySelector('.card-preview')).top>=rect(title).bottom &&
+            rect(el.querySelector('.card-duration')).left>=rect(el.querySelector('.card-description')).right,
+            'tool subtitle must be on a second line, duration at right');
           check(transparent(title) && css(title).padding==='0px' && css(title).borderRadius==='0px',
             'process titles must not be capsules');
           check(css(el).contentVisibility==='auto' && el.style.height==='',
@@ -552,8 +612,18 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
           'appearance matrix finalization must retain DOM and natural height');
         check(answer.style.height==='' && near(rect(answer).height,rect(card).height),'answer must have no artificial height');
         const code=article.querySelector('pre code'), pre=article.querySelector('pre');
-        check(css(code).fontSize==='12px' && near(parseFloat(css(code).lineHeight),19.2) &&
-          css(pre).fontSize==='12px' && near(parseFloat(css(pre).lineHeight),19.2),'code must use 12px/1.6');
+        const h2=article.querySelector('h2'), h3=article.querySelector('h3'), quote=article.querySelector('blockquote');
+        const table=article.querySelector('table'), cell=table.querySelector('td');
+        check(css(h2).fontSize==='20px' && near(parseFloat(css(h2).lineHeight),30) && css(h2).borderBottomWidth==='0px' &&
+          css(h3).fontSize==='14px' && near(parseFloat(css(h3).lineHeight),23.8), 'A heading hierarchy, without GitHub heading rule');
+        check(css(quote).borderLeftWidth==='2px' && css(quote).borderLeftColor===css(article.querySelector('a') || document.querySelector('.icon-done')).color,
+          'A blockquote uses a 2px accent rule');
+        check(table.parentElement.classList.contains('table-scroll') && css(table.parentElement).overflowX==='auto' &&
+          css(cell).borderLeftWidth==='0px' && css(cell).borderRightWidth==='0px' && css(cell).borderBottomWidth==='1px' &&
+          [...table.querySelectorAll('tr')].every(transparent), 'A table uses local horizontal scroll, horizontal rules and no stripes');
+        check(css(code.querySelector('.hljs-keyword')).color===(expectedDark?'rgb(214, 162, 154)':'rgb(149, 98, 92)'), 'A syntax keyword palette');
+        check(css(code).fontSize==='12px' && near(parseFloat(css(code).lineHeight),21) &&
+          css(pre).fontSize==='12px' && near(parseFloat(css(pre).lineHeight),21),'A code must use 12px/1.75');
         check(pre.scrollWidth>pre.clientWidth && css(pre).overflowX==='auto','long code must scroll locally');
         check(document.documentElement.scrollWidth<=document.documentElement.clientWidth,
           'wide code must not overflow the document');
@@ -575,6 +645,9 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
         check(!transparent(danger) && css(danger).borderTopColor!==css(detail).borderTopColor &&
           errorColor!==secondary && rgb(errorColor)[0]>rgb(errorColor)[1], 'error/danger must retain distinct styling');
         const copy=article.querySelector('.code-block-copy');
+        check(copy.textContent==='复制' && parseFloat(css(copy).opacity)===1 &&
+          css(article.querySelector('.code-block-header')).padding==='6px 12px' && css(pre).padding==='13px 15px',
+          'A code language bar uses Chinese always-visible copy and prototype spacing');
         // 先呈现代码按钮所在的 CV 条目；不能要求跳过布局的视口外控件立刻获得可见焦点。
         copy.scrollIntoView({block:'center'});
         await frames();
@@ -616,11 +689,14 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScri
                 let metadataURL = URL(fileURLWithPath: CommandLine.arguments[1])
                   .appendingPathComponent("scripts/validation/TranscriptMetadataDOMChecks.js")
                 let metadataScript = try String(contentsOf: metadataURL, encoding: .utf8)
-                print(try await webView.callAsyncJavaScript(metadataScript, arguments: [:], in: nil, contentWorld: .page) ?? "missing metadata result")
+                print(try await webView.callAsyncJavaScript(metadataScript, arguments: ["copyCapability": copyCapability], in: nil, contentWorld: .page) ?? "missing metadata result")
                 let retries = bridgeMessages.filter { $0.0 == "retryError" }
                 precondition(retries.count == 1 && (retries.first?.1 as? [String: String])?["id"] == "error-available",
                   "Only the genuine unlocked retry button may postMessage")
-                let copies = bridgeMessages.filter { $0.0 == "copyText" }.compactMap { $0.1 as? String }
+                let copyMessages = bridgeMessages.filter { $0.0 == "copyText" }
+                let copies = copiedTexts
+                precondition(copyMessages.count == copies.count && copyRequestIDs.count == copies.count,
+                  "所有复制必须由真实 WK sink 接收唯一且有效的 ACK 请求，不得静默丢弃非法 payload")
                 let actionCopies = try await webView.callAsyncJavaScript("return window.expectedActionCopies;",
                     arguments: [:], in: nil, contentWorld: .page) as! [String]
                 let actionForks = try await webView.callAsyncJavaScript("return window.expectedActionForks;",

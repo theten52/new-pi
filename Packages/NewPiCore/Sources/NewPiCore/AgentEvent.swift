@@ -37,20 +37,35 @@ public enum AgentEvent: Sendable {
     }
 }
 
-public struct ToolResult: Sendable, Equatable {
+public struct ToolResult: Sendable, Codable, Equatable {
     public var content: String
     public var isError: Bool
     /// 仅本次工具实际写入的文件记录，不是工作区差异。
     public var fileChanges: [ToolFileChange]
     /// 单调时钟测得的执行耗时；未执行/未知为 nil，不含审批等待。
     public var durationSeconds: Double?
+    public var progressReport: ProgressReport?
+    public var testReport: TestReport?
 
     public init(content: String, isError: Bool = false, fileChanges: [ToolFileChange] = [],
-                durationSeconds: Double? = nil) {
+                durationSeconds: Double? = nil, progressReport: ProgressReport? = nil,
+                testReport: TestReport? = nil) {
         self.content = content
         self.isError = isError
         self.fileChanges = fileChanges
         self.durationSeconds = durationSeconds
+        self.progressReport = progressReport
+        self.testReport = testReport
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        content = try container.decode(String.self, forKey: .content)
+        isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+        fileChanges = try container.decodeIfPresent([ToolFileChange].self, forKey: .fileChanges) ?? []
+        durationSeconds = try container.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        progressReport = try container.decodeIfPresent(ProgressReport.self, forKey: .progressReport)
+        testReport = try container.decodeIfPresent(TestReport.self, forKey: .testReport)
     }
 }
 

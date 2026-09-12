@@ -58,6 +58,9 @@ struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
     private let sidebar: Sidebar
     private let content: Content
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var availableWidth: CGFloat = 1000
+    @State private var wasCompact: Bool?
+    @State private var visibilityBeforeCollapse: NavigationSplitViewVisibility?
 
     init(@ViewBuilder sidebar: () -> Sidebar, @ViewBuilder content: () -> Content) {
         self.sidebar = sidebar()
@@ -65,11 +68,15 @@ struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: Binding(get: { columnVisibility }, set: { value in
+            if value != columnVisibility, wasCompact == true { visibilityBeforeCollapse = nil }
+            columnVisibility = value
+        })) {
             sidebar
-                .frame(minWidth: 226, maxWidth: 250, maxHeight: .infinity)
+                .frame(minWidth: 188, maxWidth: availableWidth <= 1000 ? 188 : 250, maxHeight: .infinity)
                 .background(NewPiWorkbenchStyle.sidebar)
-                .navigationSplitViewColumnWidth(min: 226, ideal: 226, max: 250)
+                .navigationSplitViewColumnWidth(min: 188, ideal: availableWidth <= 1000 ? 188 : 226,
+                    max: availableWidth <= 1000 ? 188 : 250)
         } detail: {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -79,11 +86,37 @@ struct NewPiWorkbenchShell<Sidebar: View, Content: View>: View {
         .navigationTitle("")
         .toolbarBackground(NewPiWorkbenchStyle.surface, for: .windowToolbar)
         .tint(NewPiWorkbenchStyle.accent)
+        .environment(\.newPiCompactWorkbench, availableWidth <= 700)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            availableWidth = width
+            let compact = width <= 700
+            guard wasCompact != compact else { return }
+            wasCompact = compact
+            if compact {
+                visibilityBeforeCollapse = columnVisibility
+                columnVisibility = .detailOnly
+            } else if let previous = visibilityBeforeCollapse {
+                if columnVisibility == .detailOnly { columnVisibility = previous }
+                visibilityBeforeCollapse = nil
+            }
+        }
+    }
+}
+
+private struct NewPiCompactWorkbenchKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var newPiCompactWorkbench: Bool {
+        get { self[NewPiCompactWorkbenchKey.self] }
+        set { self[NewPiCompactWorkbenchKey.self] = newValue }
     }
 }
 
 /// 内容区唯一的身份标题；目录必须由当前对象提供，操作不注册输入快捷键。
 struct NewPiWorkbenchHeader<Actions: View>: View {
+    @Environment(\.newPiCompactWorkbench) private var compact
     let mode: String
     let title: String
     let directory: String
@@ -132,7 +165,7 @@ struct NewPiWorkbenchHeader<Actions: View>: View {
                     .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset)
+            .padding(.horizontal, compact ? 13 : NewPiWorkbenchStyle.horizontalInset)
             .frame(height: 72)
             Divider()
         }
@@ -162,7 +195,7 @@ struct NewPiWorkbenchSidebarEntry: View {
                 Text(subtitle)
                     .font(.system(size: 10))
                     .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -225,14 +258,31 @@ struct NewPiWorkbenchRole: Identifiable {
     let isSpeaking: Bool
 }
 
-/// 角色多时只横向滚动头像区域，不挤占阶段文字或调用方尾部菜单。
+/// 首字头像最多展示五位，完整角色清单保留在帮助文字；窄栏换行。
 struct NewPiWorkbenchRoleStrip: View {
     let phaseTitle: String
     var roundText: String? = nil
     let roles: [NewPiWorkbenchRole]
 
     var body: some View {
-        HStack(spacing: 12) {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                roleIdentity
+                phaseIdentity
+                Spacer(minLength: 0)
+                Text("手动推进")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                roleIdentity
+                HStack { phaseIdentity; Spacer(minLength: 0); Text("手动推进") }
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var phaseIdentity: some View {
             HStack(spacing: 6) {
                 Text("当前阶段")
                     .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
@@ -245,42 +295,77 @@ struct NewPiWorkbenchRoleStrip: View {
                 }
             }
             .fixedSize()
-            Divider().frame(height: 14)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(roles) { role in
-                        HStack(spacing: 5) {
-                            Image(systemName: role.systemImage.isEmpty ? "person.fill" : role.systemImage)
-                                .font(.system(size: 11))
-                                .frame(width: 26, height: 26)
-                                .background(role.isSpeaking ? NewPiWorkbenchStyle.accentSoft : NewPiWorkbenchStyle.surfaceSoft,
-                                            in: Circle())
-                            Text(role.name)
-                            if role.isSpeaking {
-                                Text("发言中").font(.system(size: 9, weight: .medium))
-                            }
-                        }
-                        .foregroundStyle(role.isSpeaking ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.secondaryText)
-                        .fixedSize()
+    }
+
+    private var roleIdentity: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: -5) {
+                ForEach(roles.prefix(5)) { role in
+                    Text(String(role.name.prefix(1)))
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 24, height: 24)
+                        .background(role.isSpeaking ? NewPiWorkbenchStyle.accentSoft : NewPiWorkbenchStyle.surfaceSoft, in: Circle())
+                        .overlay { Circle().strokeBorder(NewPiWorkbenchStyle.surface, lineWidth: 2) }
                         .help(role.name + (role.isSpeaking ? " · 正在发言" : ""))
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(role.name)
-                        .accessibilityValue(role.isSpeaking ? "正在发言" : "未发言")
-                    }
+                        .accessibilityLabel(role.name + (role.isSpeaking ? " · 正在发言" : ""))
                 }
             }
-            .frame(minWidth: 0, maxWidth: .infinity)
+            Text("\(roles.count) 位角色").fixedSize()
+            if let speaker = roles.first(where: \.isSpeaking) {
+                Text("\(speaker.name) · 发言中")
+                    .foregroundStyle(NewPiWorkbenchStyle.accent)
+                    .lineLimit(1).help("\(speaker.name) · 正在发言")
+            }
         }
-        .font(.system(size: 11))
-        .frame(height: 30)
+        .help(roles.map(\.name).joined(separator: "、"))
+    }
+}
+
+/// 可见提示保留语义，窄栏用短文案，不靠 hover 才能发现键盘行为。
+struct NewPiComposerHint: View {
+    var isRunning: Bool
+    var isRoom = false
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            Text(isRunning ? (isRoom ? "发言中可插话 · ⇧↵ 换行" : "可继续编辑草稿") : "↵ 发送 · ⇧↵ 换行")
+            Text(isRunning ? (isRoom ? "↵ 插话" : "编辑草稿") : "↵ / ⇧↵")
+        }
+        .font(.system(size: 10)).foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+        .help(isRunning && !isRoom ? "运行中可编辑草稿，结束后才能发送；停止须点击停止按钮。" : "Return 发送，Shift+Return 换行")
+    }
+}
+
+enum NewPiContextWarning {
+    static func text(input: Int, window: Int) -> String? {
+        guard input > 0, window > 0, Double(input) / Double(window) > 0.8 else { return nil }
+        return "上下文接近上限：最近请求输入 \(input) / 当前模型窗口 \(window) tokens（\(String(format: "%.1f", Double(input) / Double(window) * 100))%）。可压缩上下文或新建会话。"
+    }
+}
+
+enum NewPiSidebarFacts {
+    static func relativeDate(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        if date <= now, now.timeIntervalSince(date) < 60 { return "刚刚" }
+        if calendar.isDate(date, inSameDayAs: now) { return "今天" }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) { return "昨天" }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    static func statusIcon(isRunning: Bool, outcome: String?) -> String {
+        if isRunning { return "circle.dotted" }
+        if outcome?.hasPrefix("已停止") == true { return "stop.circle" }
+        if outcome == "失败" { return "exclamationmark.circle" }
+        if outcome == "已完成" || outcome == "已恢复" { return "checkmark.circle" }
+        return "bubble.left"
     }
 }
 
 /// 输入区与底部工具栏共用的外壳；焦点、输入行为及高度由调用方管理。
 struct NewPiComposerSurface<Content: View>: View {
     private let content: Content
+    private let isFocused: Bool
 
-    init(@ViewBuilder content: () -> Content) {
+    init(isFocused: Bool = false, @ViewBuilder content: () -> Content) {
+        self.isFocused = isFocused
         self.content = content()
     }
 
@@ -293,7 +378,13 @@ struct NewPiComposerSurface<Content: View>: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(NewPiWorkbenchStyle.line, lineWidth: 1)
+                    .strokeBorder(isFocused ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.line, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .background {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(NewPiWorkbenchStyle.accentSoft, lineWidth: isFocused ? 4 : 0)
+                    .padding(-1)
                     .allowsHitTesting(false)
             }
     }
@@ -318,16 +409,15 @@ struct NewPiComposerPrimaryAction: View {
                 .labelStyle(.iconOnly)
                 .font(.system(size: 13, weight: .semibold))
                 .frame(width: 32, height: 32)
-                .foregroundStyle(NewPiWorkbenchStyle.surfaceRaised)
+                .foregroundStyle(!isRunning && !canSend ? NewPiWorkbenchStyle.secondaryText : NewPiWorkbenchStyle.surfaceRaised)
                 .background {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(isRunning ? NewPiWorkbenchStyle.primaryText : NewPiWorkbenchStyle.accent)
+                        .fill(isRunning ? NewPiWorkbenchStyle.primaryText : canSend ? NewPiWorkbenchStyle.accent : NewPiWorkbenchStyle.surfaceSoft)
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isRunning && !canSend)
-        .opacity(!isRunning && !canSend ? 0.45 : 1)
         .accessibilityLabel(actionLabel)
         .help(actionLabel)
     }
@@ -406,16 +496,102 @@ enum NewPiAgentStatusIconSize {
 }
 
 struct NewPiAgentStatusIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     let presentation: NewPiAgentStatusPresentation
     var size: NewPiAgentStatusIconSize = .toolbar
 
     var body: some View {
-        // 保持静态，避免持续 symbolEffect 阻塞正文流式消费。
-        Image(systemName: presentation.systemImage)
-            .font(.system(size: size.symbolSize, weight: .semibold))
+        // 旋转仅在独立 CALayer 上运行，不逐帧发布状态或重新布局正文。
+        ZStack {
+            if presentation.isActive && !presentation.systemImage.hasPrefix("hand.raised") {
+                NewPiStatusSpinner(animate: !reduceMotion && scenePhase == .active,
+                    color: NSColor(presentation.foregroundColor), trackColor: NSColor(NewPiWorkbenchStyle.line))
+            } else {
+                Circle().fill(presentation.foregroundColor).padding(2)
+            }
+        }
+            .frame(width: size.symbolSize, height: size.symbolSize)
             .foregroundStyle(presentation.foregroundColor)
             .frame(width: size.frame, height: size.frame)
             .accessibilityHidden(true)
+    }
+}
+
+private struct NewPiStatusSpinner: NSViewRepresentable {
+    let animate: Bool
+    let color: NSColor
+    let trackColor: NSColor
+
+    func makeNSView(context: Context) -> NewPiStatusSpinnerView { NewPiStatusSpinnerView() }
+    func updateNSView(_ view: NewPiStatusSpinnerView, context: Context) {
+        view.configure(animate: animate, color: color, trackColor: trackColor)
+    }
+    static func dismantleNSView(_ view: NewPiStatusSpinnerView, coordinator: ()) {
+        view.configure(animate: false, color: .clear, trackColor: .clear)
+    }
+}
+
+/// 合成线程驱动的小圆环；重复流式刷新不重启动画，也不使用 Timer。
+final class NewPiStatusSpinnerView: NSView {
+    private let track = CAShapeLayer()
+    let arc = CAShapeLayer()
+    private var shouldAnimate = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        for shape in [track, arc] {
+            shape.fillColor = nil
+            shape.lineWidth = 1.5
+            shape.lineCap = .round
+            layer?.addSublayer(shape)
+        }
+        arc.strokeEnd = 0.3
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(animate: Bool, color: NSColor, trackColor: NSColor) {
+        shouldAnimate = animate
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        arc.strokeColor = color.cgColor
+        track.strokeColor = trackColor.cgColor
+        CATransaction.commit()
+        synchronizeAnimation()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for shape in [track, arc] {
+            shape.bounds = CGRect(origin: .zero, size: bounds.size)
+            shape.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            shape.path = CGPath(ellipseIn: shape.bounds.insetBy(dx: 1, dy: 1), transform: nil)
+            shape.contentsScale = window?.backingScaleFactor ?? 2
+        }
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        synchronizeAnimation()
+    }
+
+    private func synchronizeAnimation() {
+        guard shouldAnimate, window != nil else {
+            arc.removeAnimation(forKey: "rotation")
+            return
+        }
+        guard arc.animation(forKey: "rotation") == nil else { return }
+        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+        rotation.fromValue = 0
+        rotation.toValue = -2 * Double.pi
+        rotation.duration = 1
+        rotation.repeatCount = .infinity
+        rotation.timingFunction = CAMediaTimingFunction(name: .linear)
+        arc.add(rotation, forKey: "rotation")
     }
 }
 
@@ -485,7 +661,7 @@ struct NewPiModelPickerMenu: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "cpu")
+                Image(systemName: "sparkles")
                     .font(.caption)
                 Text(activeModelID.isEmpty ? "选择模型" : activeModelID)
                     .font(.caption.monospaced())
@@ -516,6 +692,7 @@ struct NewPiModelPickerMenu: View {
 
 /// 输入区的静态任务状态；用量明细按需展开，模型菜单保留给旧调用方。
 struct NewPiAgentStatusBar: View {
+    @Environment(\.newPiCompactWorkbench) private var compact
     let presentation: NewPiAgentStatusPresentation
     /// 主状态后的辅助信息；窄栏优先压缩，不挤占状态与用量。
     var detailText: String? = nil
@@ -545,7 +722,7 @@ struct NewPiAgentStatusBar: View {
                 .foregroundStyle(presentation.foregroundColor)
                 .help(presentation.label)
                 .layoutPriority(1)
-            if let detailText {
+            if let detailText, !compact {
                 Text(detailText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -693,8 +870,25 @@ final class NewPiUsagePresentation: NSObject {
     private var contentPostedFrameChanges = false
     private var contentPostedBoundsChanges = false
     private(set) var panel: NewPiUsagePanel?
+    var onDismiss: (() -> Void)?
 
     func present(from button: NSButton, data: NewPiUsageDialogData, restoring responder: NSResponder?) {
+        let backdrop = NewPiUsageBackdrop(data: data)
+        backdrop.owner = self
+        present(from: button, restoring: responder, title: "用量明细", backdrop: backdrop,
+            dialogContent: backdrop.dialog, closeButton: backdrop.closeButton)
+    }
+
+    func present<Content: View>(from button: NSButton, title: String, restoring responder: NSResponder?,
+                               @ViewBuilder content: () -> Content) {
+        let backdrop = NewPiUsageHostedBackdrop(title: title, content: AnyView(content()))
+        backdrop.owner = self
+        present(from: button, restoring: responder, title: title, backdrop: backdrop,
+            dialogContent: backdrop.dialog, closeButton: backdrop.closeButton)
+    }
+
+    private func present(from button: NSButton, restoring responder: NSResponder?, title: String,
+                         backdrop: NSView, dialogContent: NSView, closeButton: NSButton) {
         guard panel == nil, let window = button.window, window.isVisible, window.alphaValue > 0,
               !button.isHiddenOrHasHiddenAncestor, !button.visibleRect.isEmpty,
               let content = window.contentView else { return }
@@ -740,23 +934,21 @@ final class NewPiUsagePresentation: NSObject {
         dialog.appearanceSource = window
         dialog.tabbingMode = .disallowed
         dialog.collectionBehavior = [.fullScreenAuxiliary]
-        dialog.setAccessibilityLabel("用量明细")
+        dialog.setAccessibilityLabel(title)
         dialog.setAccessibilitySubrole(.dialog)
         dialog.setAccessibilityModal(true)
-        let backdrop = NewPiUsageBackdrop(data: data)
-        backdrop.owner = self
         dialog.contentView = backdrop
-        dialog.setAccessibilityChildren([backdrop.dialog])
-        dialog.setAccessibilityCloseButton(backdrop.closeButton)
+        dialog.setAccessibilityChildren([dialogContent])
+        dialog.setAccessibilityCloseButton(closeButton)
         panel = dialog
         synchronize()
         content.setAccessibilityHidden(true)
         window.setAccessibilityChildren([dialog])
         window.addChildWindow(dialog, ordered: .above)
         dialog.makeKeyAndOrderFront(nil)
-        dialog.makeFirstResponder(backdrop.closeButton)
+        dialog.makeFirstResponder(closeButton)
         NSAccessibility.post(element: dialog, notification: .created)
-        NSAccessibility.post(element: backdrop.closeButton, notification: .focusedUIElementChanged)
+        NSAccessibility.post(element: closeButton, notification: .focusedUIElementChanged)
 
         let center = NotificationCenter.default
         for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
@@ -816,6 +1008,13 @@ final class NewPiUsagePresentation: NSObject {
         let belongs = event.window === parent || event.window === panel
             || (event.window == nil && panel.isKeyWindow)
         guard belongs else { return event }
+        if panel.contentView is NewPiUsageHostedBackdrop {
+            // 任意内容必须保留 Tab、方向键、复制与控件 Return；只拦底层窗口和 Escape。
+            if event.type == .keyDown, event.keyCode == 53 { dismiss(); return nil }
+                if event.type == .keyDown, event.modifierFlags.contains(.command),
+                    !["c", "a"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") { return nil }
+            return event.window === parent ? nil : event
+        }
         switch event.type {
         case .keyDown:
             if event.keyCode == 53 { dismiss(); return nil }
@@ -858,6 +1057,7 @@ final class NewPiUsagePresentation: NSObject {
         panel = nil
         dialog.owner = nil
         (dialog.contentView as? NewPiUsageBackdrop)?.owner = nil
+        (dialog.contentView as? NewPiUsageHostedBackdrop)?.owner = nil
         window?.removeChildWindow(dialog)
         dialog.orderOut(nil)
         dialog.close()
@@ -865,6 +1065,7 @@ final class NewPiUsagePresentation: NSObject {
         opener = nil
         previousResponder = nil
         hiddenContent = nil
+        onDismiss?()
         if restoreFocus, wasKey, let window, window.isVisible {
             window.makeKey()
             if let view = restore as? NSView, view.window === window {
@@ -885,6 +1086,56 @@ final class NewPiUsagePanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { owner?.dismiss() }
     override func accessibilityPerformCancel() -> Bool { owner?.dismiss(); return true }
+}
+
+/// 通用窗口内居中容器：内容本身观察业务 model，不用重新赋 rootView 丢掉选择／滚动状态。
+final class NewPiUsageHostedBackdrop: NSView {
+    weak var owner: NewPiUsagePresentation?
+    let dialog = NewPiUsageRoundedSurface()
+    let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭")!, target: nil, action: nil)
+    let host: NSHostingView<AnyView>
+    private let titleField: NSTextField
+    override var isFlipped: Bool { true }
+
+    init(title: String, content: AnyView) {
+        host = NSHostingView(rootView: content)
+        host.sizingOptions = []
+        titleField = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        addSubview(dialog)
+        dialog.radius = 14
+        dialog.addSubview(host)
+        dialog.addSubview(titleField)
+        titleField.font = .systemFont(ofSize: 15, weight: .semibold)
+        dialog.addSubview(closeButton)
+        closeButton.isBordered = false
+        closeButton.target = self
+        closeButton.action = #selector(close)
+        closeButton.toolTip = "关闭（Escape）"
+        closeButton.setAccessibilityLabel("关闭\(title)")
+        closeButton.setAccessibilityIdentifier("newpi.dialog.close")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func close() { owner?.dismiss() }
+
+    override func layout() {
+        super.layout()
+        let width = max(1, min(920, bounds.width - 40))
+        let height = max(1, min(700, bounds.height * 0.8))
+        dialog.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
+        titleField.frame = NSRect(x: 22, y: 18, width: max(1, width - 90), height: 24)
+        closeButton.frame = NSRect(x: width - 52, y: 14, width: 30, height: 30)
+        host.frame = NSRect(x: 12, y: 56, width: max(1, width - 24), height: max(1, height - 68))
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        return dialog.frame.contains(local) ? super.hitTest(point) : self
+    }
+    override func mouseDown(with event: NSEvent) {
+        if !dialog.frame.contains(convert(event.locationInWindow, from: nil)) { owner?.dismiss() }
+    }
 }
 
 /// draw 使用真实原生像素；不依赖会影响布局的 SwiftUI overlay 或隐式动画。

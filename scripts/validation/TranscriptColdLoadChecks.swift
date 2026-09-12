@@ -203,6 +203,7 @@ struct TranscriptColdLoadChecks {
                 if page.loaded && page.applyCount > 0 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
+            FileHandle.standardError.write(Data("Cold check \(name): loaded=\(page.loaded), batches=\(page.applyCount)\n".utf8))
             precondition(page.loaded && page.applyCount == 1, "Pending SwiftUI snapshots must coalesce to one batch")
             _ = try await page.webView.callAsyncJavaScript("await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return true;",
                 arguments: [:], in: nil, contentWorld: .page)
@@ -216,6 +217,8 @@ struct TranscriptColdLoadChecks {
                 return {...window.coldProbe,rows:rows.length,unique:new Set(rows.map(x=>x.dataset.iid)).size,error,anchorFound:!anchor||!!row,
                   code:!!document.querySelector('pre code'),nonblank:document.body.innerText.length>100};
                 """, arguments: ["anchor": anchor?.uuidString ?? ""], in: nil, contentWorld: .page) as! [String: Any]
+                        // 优化编译的 precondition trap 不保证打印文案；先输出真实结果定位失败，不放宽断言。
+                        FileHandle.standardError.write(Data("Cold check \(name): expectedRows=\(items.count), expectedFinal=\(items.filter(\.isAssistantMarkdown).count), DOM=\(result)\n".utf8))
             precondition(result["rows"] as? Int == items.count && result["unique"] as? Int == items.count)
             precondition(result["nonblank"] as? Bool == true && result["code"] as? Bool == true)
             precondition(result["anchorFound"] as? Bool == true)

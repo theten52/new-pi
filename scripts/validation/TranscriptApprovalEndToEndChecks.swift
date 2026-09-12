@@ -190,12 +190,12 @@ private final class ApprovalE2EScenario {
         }
         defer { collector.cancel(); responseTask?.cancel(); page.close() }
         page.coordinator.approvalIsCurrent = { [weak self] in self?.pending != nil && self?.finished == false }
-        page.coordinator.onApproval = { [weak self] id, decision in
-            guard let self else { return }
+        page.coordinator.onApprovalAccepted = { [weak self] id, decision in
+            guard let self else { return false }
             self.decisions.append((id, decision))
             guard self.pending?.id == id, decision == (self.approved ? .allowOnce : .deny) else {
                 self.failure = "Coordinator 返回了错误 requestID 或非预期 scope/decision"
-                return
+                return false
             }
             self.pending = nil
             self.responseTask = Task { @MainActor in
@@ -203,6 +203,7 @@ private final class ApprovalE2EScenario {
                 await self.session.respondToToolApproval(requestID: id, approved: decision.approved, scope: decision.scope)
                 self.responseCompleted = true
             }
+            return true
         }
         do {
             await session.prompt(.user("请写入 fixture.txt，等待我的审批。"))
@@ -264,6 +265,9 @@ private final class ApprovalE2EScenario {
         try await click(approved ? ".ti-approval .approval-approve" : ".ti-approval .approval-deny",
             text: approved ? "允许一次" : "拒绝")
         try await wait("DOM 决策实际 await respondToToolApproval，并完成 AgentLoop") { self.responseCompleted && self.finished }
+        try await waitDOM("document.querySelector('.ti-approval-receipt')")
+        try await checkDOM("const r=document.querySelector('.ti-approval-receipt'); return r.dataset.outcome===outcome && !r.querySelector('button') && r.textContent.includes(text);",
+            "只有 runtime 领取决策后才能显示允许/拒绝原位回执", ["outcome": approved ? "approved" : "denied", "text": approved ? "仅授权本次操作" : "未授予执行权限"])
         try approvalE2ERequire(failure == nil && requests.count == 1 && decisions.count == 1
             && decisions.first?.0 == request.id && decisions.first?.1 == (approved ? .allowOnce : .deny),
             "审批必须只领取一次并完成真实 Session 响应：\(failure ?? "无 Core 错误")")
@@ -330,6 +334,8 @@ private final class ApprovalE2EScenario {
         page.coordinator.updateApproval(nil, after: nil)
         page.coordinator.apply(transcript: project(messages), isStreaming: false, streamingBubbleComplete: true, tintHues: [:])
         try await waitDOM("document.querySelector('.answer-footer .answer-changes') && !document.querySelector('.ti-approval')")
+        try await checkDOM("return document.querySelectorAll('.ti-approval-receipt').length===1 && document.querySelector('.ti-approval-receipt').previousElementSibling.dataset.iid===anchor;",
+            "工具结果和最终回答到达后，内存回执仍保持原审批锚点", ["anchor": rows.last?.id.uuidString ?? ""])
         try await checkDOM("""
             const strips=[...document.querySelectorAll('.answer-footer .result-strip')];
             return document.querySelectorAll('.ti-user').length===1 && document.querySelectorAll('.ti-tool').length===1 &&

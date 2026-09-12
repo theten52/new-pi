@@ -405,13 +405,18 @@ public struct ChatRoomToolResult: Codable, Sendable, Equatable {
     /// nil = 旧历史/未知；空数组不代表 bash/MCP/子代理没有修改文件。
     public var fileChanges: [ToolFileChange]?
     public var durationSeconds: Double?
+    public var progressReport: ProgressReport?
+    public var testReport: TestReport?
     
     public init(toolCallID: String, output: String, isError: Bool = false,
-                fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil) {
+                fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil,
+                progressReport: ProgressReport? = nil, testReport: TestReport? = nil) {
         self.toolCallID = toolCallID
         self.output = output
         self.isError = isError
         self.fileChanges = fileChanges
         self.durationSeconds = durationSeconds
+        self.progressReport = progressReport
+        self.testReport = testReport
     }
 }

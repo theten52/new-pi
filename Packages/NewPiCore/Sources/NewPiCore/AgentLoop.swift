@@ -575,7 +575,9 @@ public struct AgentLoop: Sendable {
                     content: result.content,
                     isError: result.isError,
                     fileChanges: result.fileChanges,
-                    durationSeconds: result.durationSeconds
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 )
             } catch {
                 NewPiLogger.error(

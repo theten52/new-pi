@@ -57,9 +57,11 @@ public struct ToolPolicyRules: Sendable, Equatable {
 public enum ToolApprovalSummary {
     public static func make(toolName: String, arguments: JSONValue) -> String {
         switch toolName {
-        case "read":
+        case "read", "read_test_report":
             let path = ToolArguments.optionalString(arguments, key: "path", aliases: ["file_path", "filePath"]) ?? "?"
             return "Read file: \(path)"
+        case "update_plan":
+            return "更新模型声明的计划（agent report，非执行验证，无外部副作用）"
         case "write":
             let path = ToolArguments.optionalString(arguments, key: "path", aliases: ["file_path", "filePath"]) ?? "?"
             let content = arguments.objectValue?["content"]?.stringValue ?? ""

@@ -83,7 +83,7 @@ public enum ChatRoomTools {
 
     /// 获取所有工具定义
     public static func allDefinitions() -> [ToolDefinition] {
-        [readFile, writeFile, listDirectory, searchFiles]
+        [readFile, writeFile, listDirectory, searchFiles, UpdatePlanTool().definition, ReadTestReportTool().definition]
     }
 }
 
@@ -134,6 +134,26 @@ public actor ChatRoomToolExecutor {
             result = await executeListDirectory(toolCallID: toolCall.id, arguments: toolCall.arguments)
         case "search_files":
             result = await executeSearchFiles(toolCallID: toolCall.id, arguments: toolCall.arguments)
+        case "update_plan", "read_test_report":
+            // 兼容路径也走现有风险评估/审批，不能直接调用而绕过 gate。
+            let approval = await approvalManager.requestApproval(toolCall: toolCall,
+                roleID: currentRoleID, roleName: currentRoleName)
+            if case let .rejected(reason) = approval {
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: reason, isError: true)
+            }
+            try Task.checkCancellation()
+            let started = ContinuousClock.now
+            do {
+                let tool: any AgentTool = toolCall.name == "update_plan" ? UpdatePlanTool() : ReadTestReportTool()
+                let report = try await tool.execute(id: toolCall.id, arguments: toolCall.arguments,
+                    context: ToolContext(workingDirectory: URL(fileURLWithPath: projectPath)), onUpdate: nil)
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: report.content, isError: report.isError,
+                    durationSeconds: ToolExecutionTiming.seconds(since: started),
+                    progressReport: report.progressReport, testReport: report.testReport)
+            } catch {
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: error.localizedDescription, isError: true,
+                    durationSeconds: ToolExecutionTiming.seconds(since: started))
+            }
         default:
             return ChatRoomToolResult(
                 toolCallID: toolCall.id,

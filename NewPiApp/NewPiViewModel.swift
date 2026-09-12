@@ -59,6 +59,9 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let answerState: String?
     /// 聊天室按发言身份聚合，不能依赖可能交错的 DOM 邻接关系。
     let resultScopeID: String?
+    /// 结构化自报计划与已读取的测试报告；缺失不推测为零或成功。
+    let progressReport: ProgressReport?
+    let testReport: TestReport?
 
     init(
         id: UUID = UUID(),
@@ -79,7 +82,9 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         fileChanges: [ToolFileChange]? = nil,
         durationSeconds: Double? = nil,
         answerState: String? = nil,
-        resultScopeID: String? = nil
+        resultScopeID: String? = nil,
+        progressReport: ProgressReport? = nil,
+        testReport: TestReport? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -100,6 +105,8 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.durationSeconds = durationSeconds
         self.answerState = answerState
         self.resultScopeID = resultScopeID
+        self.progressReport = progressReport
+        self.testReport = testReport
     }
 
     /// 拷贝时默认保留全部元数据；双层可选允许显式清空索引/分组。
@@ -115,7 +122,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
              provider: provider ?? self.provider, modelID: modelID ?? self.modelID, errorTitle: errorTitle,
              retryState: retryState ?? self.retryState, fileChanges: fileChanges,
              durationSeconds: durationSeconds, answerState: answerState ?? self.answerState,
-             resultScopeID: resultScopeID)
+             resultScopeID: resultScopeID, progressReport: progressReport, testReport: testReport)
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -476,7 +483,8 @@ private func makeTranscriptItems(
                 messageIndex: index,
                 sessionEntryID: entryID,
                 detailTurnID: currentTurnID,
-                timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds
+                timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                progressReport: result.progressReport, testReport: result.testReport
             ))
         case let .compactionSummary(summary):
             items.append(NewPiTranscriptItem(kind: .summary, body: summary, messageIndex: index, sessionEntryID: entryID))
@@ -620,6 +628,8 @@ final class NewPiViewModel: ObservableObject {
     /// 会话切换序号：同项目内连续切换时，只有「最后发起的那次」才算数（GLM review 意见2 竞态防护）。
     /// 防止"冷 A 慢构建 → 热 B 先切 → A 就绪后覆盖 B"把用户拽回未选择的会话。复用分支同样取号。
     private var sessionSwitchGeneration = 0
+    /// 空态显式发送的创建流程用它核对导航身份，不暴露可写切换状态。
+    var composerSessionGeneration: Int { sessionSwitchGeneration }
     private var providerStateGeneration = 0
 
     private var runtimes: [String: SessionRuntime] = [:]
@@ -1762,16 +1772,18 @@ final class NewPiViewModel: ObservableObject {
     }
 
     /// 正文按钮只领取所属运行实例的最新请求，不能借当前全局镜像批准另一条调用。
-    func respondToTranscriptApproval(requestID: String, decision: ApprovalDecision, on runtime: SessionRuntime) {
+    @discardableResult
+    func respondToTranscriptApproval(requestID: String, decision: ApprovalDecision, on runtime: SessionRuntime) -> Bool {
         guard runtime === activeRuntime, let request = runtime.pendingToolApproval,
               request.id == requestID,
-              !decision.approved || request.dangerLevel != .high || decision.scope == .once else { return }
+              !decision.approved || request.dangerLevel != .high || decision.scope == .once else { return false }
         runtime.pendingToolApproval = nil
         reflectActive()
         Task {
             await runtime.session.respondToToolApproval(requestID: requestID,
                 approved: decision.approved, scope: decision.scope)
         }
+        return true
     }
 
     func denyPendingTool() {
@@ -2045,6 +2057,7 @@ final class NewPiViewModel: ObservableObject {
             )
         case let .toolExecutionEnd(id, name, result):
             // isError 入 kind（结构化），body 只存原始输出，不再拼接 "Error: " 前缀。
+            commitLiveTranscript(on: runtime)
             let command = runtime.toolCommands.removeValue(forKey: id)
             if let lastIndex = runtime.transcript.indices.last,
                case .tool(_, .running) = runtime.transcript[lastIndex].kind {
@@ -2061,7 +2074,9 @@ final class NewPiViewModel: ObservableObject {
                     streamingOverride: running.streamingOverride, timestamp: running.timestamp,
                     provider: running.provider, modelID: running.modelID,
                     errorTitle: running.errorTitle, retryState: running.retryState,
-                    fileChanges: result.fileChanges, durationSeconds: result.durationSeconds
+                    fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    answerState: running.answerState, resultScopeID: running.resultScopeID,
+                    progressReport: result.progressReport, testReport: result.testReport
                 )
             } else {
                 ensureDetailGroupMarker(on: runtime)
@@ -2071,6 +2086,7 @@ final class NewPiViewModel: ObservableObject {
                     toolCommand: command,
                     detailTurnID: runtime.detailTurnID,
                     fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport, testReport: result.testReport,
                     on: runtime
                 )
             }
@@ -2314,7 +2330,8 @@ final class NewPiViewModel: ObservableObject {
                     messageIndex: index,
                     sessionEntryID: entryID,
                     detailTurnID: currentTurnID,
-                    timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds
+                    timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport, testReport: result.testReport
                 ))
             case let .compactionSummary(summary):
                 runtime.transcript.append(NewPiTranscriptItem(
@@ -2550,8 +2567,8 @@ final class NewPiViewModel: ObservableObject {
         )
     }
 
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
-        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, progressReport: ProgressReport? = nil, testReport: TestReport? = nil) {
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, progressReport: progressReport, testReport: testReport)
         if let r = activeRuntime {
             r.transcript.append(item)
             transcript = r.transcript
@@ -2562,10 +2579,10 @@ final class NewPiViewModel: ObservableObject {
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
     @discardableResult
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], timestamp: Date? = nil, fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil, on runtime: SessionRuntime) -> UUID {
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], timestamp: Date? = nil, fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil, progressReport: ProgressReport? = nil, testReport: TestReport? = nil, on runtime: SessionRuntime) -> UUID {
         // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：追加前先并影子。
         commitLiveTranscript(on: runtime)
-        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments, timestamp: timestamp, fileChanges: fileChanges, durationSeconds: durationSeconds)
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments, timestamp: timestamp, fileChanges: fileChanges, durationSeconds: durationSeconds, progressReport: progressReport, testReport: testReport)
         runtime.transcript.append(item)
         if runtime === activeRuntime {
             transcript = runtime.transcript

@@ -8,16 +8,49 @@ import UniformTypeIdentifiers
 /// 全部免费保留，做到"切换即显示、原位恢复"。被淘汰的会话在 beginSession 冷重建。
 struct NewPiChatView: View {
     @ObservedObject var viewModel: NewPiViewModel
+    @StateObject private var emptyDraft: NewPiComposerDraft
+    @State private var isCreating = false
+    @State private var creationTask: Task<Void, Never>?
+    @State private var creationID = UUID()
+    @State private var claimedRuntime: SessionRuntime?
+    @State private var claimedProject: URL?
+    @State private var creationError: String?
+    @State private var composerFocused = false
+
+    init(viewModel: NewPiViewModel, emptyDraft: NewPiComposerDraft? = nil) {
+        self.viewModel = viewModel
+        _emptyDraft = StateObject(wrappedValue: emptyDraft ?? NewPiComposerDraft())
+    }
 
     var body: some View {
         Group {
-            if viewModel.keptAliveRuntimes.isEmpty {
-                // 未开项目 / 无任何会话时，保留"Open a project / Start a session"引导。
-                NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil,
-                    onSuggestion: { prompt in Task { await viewModel.fillSuggestedDraft(prompt) } },
-                    suggestionsEnabled: !viewModel.isSwitchingSession)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if isCreating || holdsClaimedDraft || !viewModel.keptAliveRuntimes.contains(where: viewModel.isActiveRuntime) {
+                VStack(spacing: 0) {
+                    NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil,
+                        onSuggestion: { emptyDraft.fillSuggestion($0) },
+                        suggestionsEnabled: emptyDraft.text.isEmpty && emptyDraft.attachments.isEmpty && !emptyDraft.isComposing,
+                        projectName: viewModel.projectURL?.lastPathComponent)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    emptyComposer
+                }
             } else {
+                VStack(spacing: 0) {
+                    if !emptyDraft.text.isEmpty || !emptyDraft.attachments.isEmpty {
+                        HStack {
+                            Text("有保留的未发送草稿（\(emptyDraft.attachments.count) 张图片）")
+                            Spacer(minLength: 0)
+                            Button("取回草稿") {
+                                guard !viewModel.isSwitchingSession,
+                                      let runtime = viewModel.keptAliveRuntimes.first(where: viewModel.isActiveRuntime) else { return }
+                                if !emptyDraft.transfer(to: runtime.composerDraft) {
+                                    creationError = "请先处理当前会话的草稿，再取回保留的输入。"
+                                }
+                            }
+                            .disabled(viewModel.isSwitchingSession)
+                        }
+                        .font(.caption).padding(10)
+                        if let creationError { Text(creationError).font(.caption).foregroundStyle(.orange) }
+                    }
                 ZStack {
                     ForEach(viewModel.keptAliveRuntimes, id: \.sessionID) { runtime in
                         NewPiSessionPanel(runtime: runtime, viewModel: viewModel)
@@ -27,9 +60,127 @@ struct NewPiChatView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
         .background(NewPiWorkbenchStyle.surface)
+        .onDisappear {
+            creationID = UUID()
+            creationTask?.cancel()
+            isCreating = false
+        }
+    }
+
+    private var holdsClaimedDraft: Bool {
+        guard let claimedRuntime else { return false }
+        return viewModel.projectURL == claimedProject && viewModel.isActiveRuntime(claimedRuntime)
+            && (!emptyDraft.text.isEmpty || !emptyDraft.attachments.isEmpty || emptyDraft.isComposing)
+    }
+
+    private var emptyComposer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let creationError { Text(creationError).font(.caption).foregroundStyle(.orange) }
+            if isCreating { Text("正在创建会话；可继续编辑草稿").font(.caption).foregroundStyle(.secondary) }
+            NewPiComposerSurface(isFocused: composerFocused) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !emptyDraft.attachments.isEmpty { NewPiDraftAttachmentStrip(drafts: $emptyDraft.attachments) }
+                    NewPiComposerTextView(text: $emptyDraft.text,
+                        placeholder: "描述一个问题，点击发送后创建会话…",
+                        onSubmit: sendEmptyDraft,
+                        onImagesPicked: emptyDraft.attachmentReceiver(),
+                        focusRequest: emptyDraft.focusRequest,
+                        onFocusChange: { composerFocused = $0 },
+                        onCompositionChange: { emptyDraft.isComposing = $0 })
+                        .frame(height: NewPiComposerScrollView.fixedHeight)
+                    HStack(spacing: 10) {
+                        Button {
+                            let panel = NSOpenPanel()
+                            panel.allowedContentTypes = [.image]
+                            panel.allowsMultipleSelection = true
+                            panel.canChooseDirectories = false
+                            if panel.runModal() == .OK {
+                                emptyDraft.appendAttachments(panel.urls.compactMap { ImageAttachmentProcessor.makeDraft(fromFileURL: $0) })
+                            }
+                        } label: { Image(systemName: "plus").frame(width: 28, height: 28) }
+                        .buttonStyle(.borderless).help("添加图片")
+                        NewPiModelPickerMenu(groups: viewModel.providerModelGroups,
+                            activeProfileID: viewModel.activeProviderID, activeModelID: viewModel.activeProviderModel,
+                            thinkingLevel: viewModel.activeThinkingLevel,
+                            isDisabled: isCreating || viewModel.isSwitchingSession,
+                            onSelect: { profile, model in Task { await viewModel.switchModel(profileID: profile, modelID: model) } },
+                            onThinkingSelect: { level in Task { await viewModel.setThinkingLevel(level) } })
+                        Spacer(minLength: 0)
+                        NewPiComposerHint(isRunning: isCreating)
+                        NewPiComposerPrimaryAction(isRunning: false,
+                            canSend: viewModel.projectURL != nil && !isCreating && !viewModel.isSwitchingSession
+                                && (!emptyDraft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !emptyDraft.attachments.isEmpty),
+                            onSend: sendEmptyDraft, onStop: {})
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, NewPiWorkbenchStyle.horizontalInset).padding(.vertical, 16)
+        .frame(maxWidth: NewPiWorkbenchStyle.maxReadingWidth).frame(maxWidth: .infinity)
+    }
+
+    private func sendEmptyDraft() {
+        guard let project = viewModel.projectURL, !isCreating, !viewModel.isSwitchingSession,
+              !emptyDraft.isComposing,
+              !emptyDraft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !emptyDraft.attachments.isEmpty else { return }
+        let text = emptyDraft.text
+        let attachments = emptyDraft.attachments.map(\.id)
+        let request = UUID()
+        creationID = request
+        isCreating = true
+        creationError = nil
+        creationTask = Task { @MainActor in
+            let runtime: SessionRuntime?
+            if let claimedRuntime, claimedProject == project, viewModel.isActiveRuntime(claimedRuntime) {
+                runtime = claimedRuntime
+            } else {
+                runtime = await viewModel.createSessionForComposer(project: project)
+            }
+            guard creationID == request else { return }
+            defer { isCreating = false; creationTask = nil }
+            guard !Task.isCancelled, viewModel.projectURL == project,
+                  let runtime, viewModel.isActiveRuntime(runtime), !viewModel.isSwitchingSession else {
+                creationError = "未发送：创建失败或导航已改变，文字与图片仍保留。"
+                return
+            }
+            claimedRuntime = runtime
+            claimedProject = project
+            let unchanged = emptyDraft.text == text && emptyDraft.attachments.map(\.id) == attachments
+            guard emptyDraft.transfer(to: runtime.composerDraft) else {
+                creationError = "草稿仍保留；请完成输入法组合后再次发送。"
+                return
+            }
+            // 交接和 send 同属一个 MainActor 同步段；期间没有第二个输入框可编辑或发送。
+            if unchanged, viewModel.send(runtime.composerDraft.text, draftAttachments: runtime.composerDraft.attachments) {
+                runtime.composerDraft.text = ""
+                runtime.composerDraft.attachments = []
+            }
+            // 失败草稿已归 runtime；能力/附件错误由 send 的真实错误条目呈现。
+            claimedRuntime = nil
+            claimedProject = nil
+        }
+    }
+}
+
+extension NewPiViewModel {
+    /// VM 集成契约：只读 composerSessionGeneration 返回私有 sessionSwitchGeneration。
+    /// 不能用 isSwitchingSession 代替：切项目的 shutdown await 期间它可能已是 false。
+    @MainActor
+    func createSessionForComposer(project: URL) async -> SessionRuntime? {
+        guard !Task.isCancelled, projectURL == project, !isSwitchingSession,
+              !keptAliveRuntimes.contains(where: isActiveRuntime) else { return nil }
+        let existingIDs = Set(keptAliveRuntimes.map(\.sessionID))
+                let expectedGeneration = composerSessionGeneration + 1
+        await startNewSession()
+                guard !Task.isCancelled, composerSessionGeneration == expectedGeneration,
+              projectURL == project, !isSwitchingSession,
+              let runtime = keptAliveRuntimes.first(where: isActiveRuntime),
+              !existingIDs.contains(runtime.sessionID), runtime.transcript.isEmpty else { return nil }
+        return runtime
     }
 }
 
@@ -41,6 +192,7 @@ struct NewPiSessionPanel: View {
 
     /// 草稿归 runtime 所有；只观察此对象，不让逐键输入通知根列表。
     @ObservedObject private var draft: NewPiComposerDraft
+    @State private var composerFocused = false
 
     init(runtime: SessionRuntime, viewModel: NewPiViewModel) {
         self.runtime = runtime
@@ -69,7 +221,8 @@ struct NewPiSessionPanel: View {
                     } else {
                         NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil,
                             onSuggestion: { prompt in draft.fillSuggestion(prompt) },
-                            suggestionsEnabled: draft.text.isEmpty && draft.attachments.isEmpty)
+                            suggestionsEnabled: draft.text.isEmpty && draft.attachments.isEmpty && !draft.isComposing,
+                            projectName: viewModel.projectURL?.lastPathComponent)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else {
@@ -84,6 +237,7 @@ struct NewPiSessionPanel: View {
                         // 冷启动/切回恢复上次离开的位置（锚点条目 + 行内偏移，offset 兼底）；
                         // 无记录则落底。文档内同步锚定，无「高度未回」中间态。
                         restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID),
+                        projectName: viewModel.projectURL?.lastPathComponent,
                         onFork: { index in
                             Task { await viewModel.forkFromMessage(index: index) }
                         },
@@ -91,7 +245,7 @@ struct NewPiSessionPanel: View {
                             viewModel.retryError(id: id, on: runtime)
                         },
                         approval: transcriptApproval,
-                        onApproval: { requestID, decision in
+                        onApprovalAccepted: { requestID, decision in
                             viewModel.respondToTranscriptApproval(requestID: requestID, decision: decision, on: runtime)
                         },
                         approvalIsCurrent: { [request = runtime.pendingToolApproval] in
@@ -170,8 +324,17 @@ struct NewPiSessionPanel: View {
 
     private var chatComposer: some View {
         VStack(spacing: 6) {
+            if let warning = contextWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             NewPiAgentStatusBar(
-                presentation: viewModel.agentStatusPresentation,
+                presentation: NewPiAgentStatusPresentation(
+                    systemImage: runtime.pendingToolApproval != nil ? "hand.raised.circle"
+                        : NewPiSidebarFacts.statusIcon(isRunning: runtime.isStreaming, outcome: runtime.turnOutcome),
+                    label: runtime.turnStatusText, isActive: runtime.isStreaming),
                 detailText: runtime.turnSummaryText,
                 usageText: runtime.totalUsage.newPiCompactText,
                 lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
@@ -182,7 +345,7 @@ struct NewPiSessionPanel: View {
                 lastTurnOutputTokens: runtime.lastTurnUsage.outputTokens > 0 ? runtime.lastTurnUsage.outputTokens : nil
             )
 
-            NewPiComposerSurface {
+            NewPiComposerSurface(isFocused: composerFocused) {
                 VStack(alignment: .leading, spacing: 8) {
                     if !draft.attachments.isEmpty {
                         NewPiDraftAttachmentStrip(drafts: $draft.attachments)
@@ -194,13 +357,17 @@ struct NewPiSessionPanel: View {
                         isDisabled: false,
                         placeholder: runtime.isStreaming ? "先写下一条消息，当前任务结束后发送…" : "继续提问，或告诉 NewPi 下一步做什么…",
                         onSubmit: sendComposerInput,
-                        onImagesPicked: appendDrafts,
+                        onImagesPicked: draft.attachmentReceiver(),
                         onRecallHistory: { previous, currentText in
                             draft.text = currentText
                             return draft.recallHistory(previous: previous) {
                                 runtime.transcript.filter { $0.kind == .user }.map(\.body)
                             }
-                        }
+                        },
+                        focusRequest: draft.focusRequest,
+                        isFocusEligible: viewModel.isActiveRuntime(runtime) && !viewModel.isSwitchingSession,
+                        onFocusChange: { composerFocused = $0 },
+                        onCompositionChange: { draft.isComposing = $0 }
                     )
                     .help("Return 发送，Shift+Return 换行；首行 ↑ / 末行 ↓ 取回历史输入。" + (runtime.isStreaming ? "当前任务结束后才能发送。" : ""))
                     .frame(height: NewPiComposerScrollView.fixedHeight)
@@ -216,6 +383,7 @@ struct NewPiSessionPanel: View {
 
                         modelPicker
                         Spacer(minLength: 8)
+                        NewPiComposerHint(isRunning: runtime.isStreaming)
                         NewPiComposerPrimaryAction(
                             isRunning: runtime.isStreaming,
                             canSend: !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.attachments.isEmpty,
@@ -251,12 +419,18 @@ struct NewPiSessionPanel: View {
         )
     }
 
+    private var contextWarning: String? {
+        guard viewModel.isActiveRuntime(runtime), let profile = viewModel.activeProfile else { return nil }
+        return NewPiContextWarning.text(input: runtime.lastTurnUsage.totalInputTokens,
+            window: profile.contextWindow(for: viewModel.activeProviderModel))
+    }
+
     private func sendComposerInput() {
         let text = draft.text
         let drafts = draft.attachments
         // 空文本 + 有图片也可发送（识图场景常只发图）；拦截与体积校验在 ViewModel.send。
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty,
-              !runtime.isStreaming else { return }
+              !runtime.isStreaming, !viewModel.isSwitchingSession, viewModel.isActiveRuntime(runtime) else { return }
         // 只有消息通过模型能力、附件体积与落盘等全部校验并真正进入会话后，
         // 才清空草稿。失败时保留用户文本和图片，便于修正配置后重试。
         guard viewModel.send(text, draftAttachments: drafts) else { return }
@@ -285,7 +459,7 @@ struct NewPiSessionPanel: View {
             NSSound.beep()
             return
         }
-        draft.attachments.append(contentsOf: newDrafts)
+        draft.appendAttachments(newDrafts)
     }
 }
 
@@ -304,6 +478,7 @@ private struct NewPiDraftAttachmentStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(drafts) { draft in
+                    VStack(spacing: 5) {
                     ZStack(alignment: .topTrailing) {
                         Group {
                             if let image = NSImage(data: draft.data) {
@@ -328,14 +503,20 @@ private struct NewPiDraftAttachmentStrip: View {
                                 .foregroundStyle(.white, .black.opacity(0.55))
                         }
                         .buttonStyle(.plain)
-                        .help("移除该图片")
+                        .help("移除 \(draft.displayName)")
+                        .accessibilityLabel("移除 \(draft.displayName)")
                         .offset(x: 5, y: -5)
+                    }
+                    Text(draft.displayName)
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle).frame(width: 100)
+                        .help(draft.displayName)
                     }
                 }
             }
             .padding(.vertical, 2)
         }
-        .frame(maxHeight: 64)
+        .frame(maxHeight: 86)
     }
 }
 
@@ -352,6 +533,10 @@ struct NewPiComposerTextView: NSViewRepresentable {
     var onImagesPicked: ([DraftImageAttachment]) -> Void = { _ in }
     /// 返回 nil 表示不消费方向键；历史仅在首/末显示行的裸方向键触发。
     var onRecallHistory: (_ previous: Bool, _ currentText: String) -> String? = { _, _ in nil }
+    var focusRequest: UUID? = nil
+    var isFocusEligible = true
+    var onFocusChange: (Bool) -> Void = { _ in }
+    var onCompositionChange: (Bool) -> Void = { _ in }
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -373,6 +558,10 @@ struct NewPiComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
         textView.onRecallHistory = onRecallHistory
+        textView.onFocusChange = onFocusChange
+        textView.onCompositionChange = onCompositionChange
+        textView.string = text
+        textView.isEditable = !isDisabled
         textView.placeholder = placeholder
         textView.isRichText = false
         textView.importsGraphics = false
@@ -393,6 +582,7 @@ struct NewPiComposerTextView: NSViewRepresentable {
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
+        textView.onAttachToWindow = { [weak coordinator = context.coordinator] in coordinator?.requestFocusIfNeeded() }
         return scrollView
     }
 
@@ -402,18 +592,22 @@ struct NewPiComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
         textView.onRecallHistory = onRecallHistory
+        textView.onFocusChange = onFocusChange
+        textView.onCompositionChange = onCompositionChange
         textView.placeholder = placeholder
         if textView.isEditable != !isDisabled {
             textView.isEditable = !isDisabled
         }
         textView.textColor = isDisabled ? .disabledControlTextColor : .textColor
         context.coordinator.synchronizeText(text)
+        context.coordinator.requestFocusIfNeeded()
     }
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NewPiComposerTextView
         weak var textView: NewPiComposerInnerTextView?
+        private var consumedFocusRequest: UUID?
 
         init(_ parent: NewPiComposerTextView) {
             self.parent = parent
@@ -432,8 +626,24 @@ struct NewPiComposerTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            parent.onCompositionChange(textView.hasMarkedText())
             guard !textView.hasMarkedText() else { return }
             parent.text = textView.string
+        }
+
+        func requestFocusIfNeeded() {
+            guard let request = parent.focusRequest, request != consumedFocusRequest,
+                  parent.isFocusEligible, !parent.isDisabled else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.parent.focusRequest == request, self.consumedFocusRequest != request,
+                      self.parent.isFocusEligible, !self.parent.isDisabled,
+                      let view = self.textView, !view.hasMarkedText(),
+                      !view.isHiddenOrHasHiddenAncestor, let window = view.window,
+                      window.isKeyWindow, !view.visibleRect.isEmpty else { return }
+                guard window.makeFirstResponder(view) else { return }
+                self.consumedFocusRequest = request
+                view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+            }
         }
     }
 }
@@ -450,6 +660,44 @@ final class NewPiComposerScrollView: NSScrollView {
 
 /// 支持占位提示与 Return 发送（Shift+Return 换行）的 NSTextView。
 final class NewPiComposerInnerTextView: NSTextView {
+    var onFocusChange: (Bool) -> Void = { _ in }
+    var onCompositionChange: (Bool) -> Void = { _ in }
+    var onAttachToWindow: () -> Void = {}
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { onAttachToWindow() }
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        onCompositionChange(hasMarkedText())
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        onCompositionChange(hasMarkedText())
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { reportFocus() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { reportFocus() }
+        return accepted
+    }
+
+    private func reportFocus() {
+        // AppKit 可在 SwiftUI 更新期间转焦，延后通知避免发布发生在 body 更新内。
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onFocusChange(self.window?.firstResponder === self)
+        }
+    }
     var placeholder: String = "" {
         didSet { needsDisplay = true }
     }
@@ -468,15 +716,16 @@ final class NewPiComposerInnerTextView: NSTextView {
         // 有图片数据：解码/缩放/压缩可能较耗时，放后台避免阻塞主线程，
         // 完成后回主线程回调外层汇入附件条（失败时明确提示，而非静默 beep）。
         let displayName = Self.pastedDisplayName(from: pasteboard)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let draft = ImageAttachmentProcessor.makeDraft(from: data, displayName: displayName)
-            DispatchQueue.main.async {
+        let acceptImages = onImagesPicked
+        Task { @MainActor in
+            let draft = await Task.detached(priority: .userInitiated) {
+                ImageAttachmentProcessor.makeDraft(from: data, displayName: displayName)
+            }.value
                 guard let draft else {
                     NSSound.beep()
                     return
                 }
-                self?.onImagesPicked?([draft])
-            }
+                acceptImages?([draft])
         }
     }
 

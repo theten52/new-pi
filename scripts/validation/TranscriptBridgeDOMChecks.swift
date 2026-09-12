@@ -1,4 +1,5 @@
 import Foundation
+import NewPiCore
 import WebKit
 
 extension TranscriptColdLoadChecks {
@@ -6,6 +7,7 @@ extension TranscriptColdLoadChecks {
     @MainActor static func checkMetadataAndRetryBridge() async throws {
         FileHandle.standardError.write(Data("Bridge probe: start\n".utf8))
         let page = ColdPage()
+        let copyProbe = TranscriptCopyBridgeProbe(page: page)
         defer { page.close() }
         let errorID = UUID(), answerID = UUID()
         let stamp = Date(timeIntervalSince1970: 1_600_000_000.125)
@@ -62,6 +64,36 @@ extension TranscriptColdLoadChecks {
         precondition(abs((initial["epoch"] as! Double) - stamp.timeIntervalSince1970 * 1000) < 1)
         precondition(initial["providerBadge"] as? Bool == false && initial["model"] as? String == "历史 model")
         precondition(initial["raw"] as? String == raw && initial["retry"] as? Bool == true)
+        // 真实 Coordinator 写入确认；合成 sink 不触碰系统剪贴板。
+        _ = try await js("document.querySelector('.ti-action-copy').click(); return true;")
+        try await settle()
+        precondition(copyProbe.writes == [source])
+        let copied = try await js("return document.querySelector('.ti-action-copy').dataset.copyStatus;") as? String
+        precondition(copied == "success")
+        guard let validCopy = copyProbe.payloads.last else { preconditionFailure("缺少真实复制请求") }
+        let copyCount = copyProbe.writes.count
+        var forgedCopy = validCopy
+        forgedCopy["capability"] = UUID().uuidString
+        _ = try await js("window.webkit.messageHandlers.copyText.postMessage(payload); return true;", arguments: ["payload": forgedCopy])
+        try await settle()
+        precondition(copyProbe.writes.count == copyCount, "错误复制能力不能写入剪贴板")
+        page.coordinator.setVisible(false)
+        _ = try await js("window.webkit.messageHandlers.copyText.postMessage(payload); return true;", arguments: ["payload": validCopy])
+        try await settle()
+        precondition(copyProbe.writes.count == copyCount, "隐藏页面不能利用旧能力写入")
+        page.coordinator.setVisible(true)
+        // 暂存真实 native ack，以便验证 JS 不接受错误 requestID/capability 或旧按钮回执。
+        _ = try await js("window.copyAcks=[]; window.copyApply=window.transcriptDoc.apply; window.transcriptDoc.apply=json=>{const ops=JSON.parse(json);copyAcks.push(...ops.filter(o=>o.op==='copyResult'));copyApply(JSON.stringify(ops.filter(o=>o.op!=='copyResult')));}; document.querySelector('.ti-action-copy').click(); return true;")
+        try await settle()
+        let pendingCopy = try await js("return document.querySelector('.ti-action-copy').dataset.copyStatus==='pending' && copyAcks.length===1;") as? Bool
+        precondition(pendingCopy == true, "原生响应前不能显示已复制")
+        let ignoresForged = try await js("const ack=copyAcks[0]; copyApply(JSON.stringify([{...ack,requestID:'wrong'}, {...ack,capability:'wrong'}])); return document.querySelector('.ti-action-copy').dataset.copyStatus==='pending';") as? Bool
+        precondition(ignoresForged == true)
+        let confirmedCopy = try await js("copyApply(JSON.stringify(copyAcks)); window.transcriptDoc.apply=copyApply; return document.querySelector('.ti-action-copy').dataset.copyStatus==='success';") as? Bool
+        precondition(confirmedCopy == true)
+        _ = try await js("window.webkit.messageHandlers.copyText.postMessage('legacy raw <>&'); return true;")
+        try await settle()
+        precondition(copyProbe.writes.last == "legacy raw <>&", "旧字符串协议必须保留")
         // 逐个只改一项，防 signature 漏字段被其他变化掩盖。
         var currentAnswer = answer()
         for next in [answer(provider: "更正 provider"), answer(provider: "更正 provider", model: "更正 model"),
@@ -74,10 +106,88 @@ extension TranscriptColdLoadChecks {
             let same = try await js("return window.bridgeArticle===document.querySelector('article') && window.bridgeCode===document.querySelector('code');") as? Bool
             precondition(same == true, "metadata-only 不重建 root/code")
         }
+        // 直接使用脚本提取的生产模型：新增字段不能只在手写 JS payload 中通过。
+        let plan = ProgressReport(steps: [
+            .init(id: "read", title: "读取", status: .completed),
+            .init(id: "verify", title: "验证", status: .inProgress)
+        ])
+        let report = TestReport(path: "synthetic-results.xml", passed: 4, failed: 1, skipped: 2)
+        let planID = UUID(), reportID = UUID()
+        let group = NewPiTranscriptItem(kind: .detailGroup(collapsed: false), body: "", detailTurnID: "report-turn")
+        func reportRows(_ plan: ProgressReport?, _ report: TestReport?) -> [NewPiTranscriptItem] {
+            [group,
+             NewPiTranscriptItem(id: planID, kind: .tool(name: "update_plan", state: .completed(isError: false)),
+                body: "固定计划正文", detailTurnID: "report-turn", progressReport: plan),
+             NewPiTranscriptItem(id: reportID, kind: .tool(name: "read_test_report", state: .completed(isError: false)),
+                body: "固定报告正文", detailTurnID: "report-turn", testReport: report),
+             currentAnswer.copying(answerState: .some("final"))]
+        }
+        apply(reportRows(nil, nil))
+        try await settle()
+        for (nextPlan, nextReport, expectedPlan, expectedReport) in [
+            (plan as ProgressReport?, nil as TestReport?, "Agent计划（自报） · 1/2", "未提供测试报告"),
+            (plan, report, "Agent计划（自报） · 1/2", "JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2"),
+            (nil, report, "Agent计划（自报） · 未提供计划", "JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2"),
+            (nil, nil, "Agent计划（自报） · 未提供计划", "未提供测试报告")
+        ] {
+            let batches = page.applyCount
+            apply(reportRows(nextPlan, nextReport))
+            try await settle()
+            precondition(page.applyCount == batches + 1, "每次只改一个报告字段也必须触发一批真实 JSON 更新")
+            let valid = try await js("""
+                return document.querySelector('.plan-summary').textContent===plan &&
+                  (document.querySelector('.result-test-summary') || document.querySelector('.result-test-notice')).textContent===report &&
+                  bridgeArticle===document.querySelector('article') && bridgeCode===document.querySelector('code');
+                """, arguments: ["plan": expectedPlan, "report": expectedReport]) as? Bool
+            precondition(valid == true, "计划/报告新增与撤回必须更新 DOM，保留正文与代码节点")
+        }
+        let copiedRows = reportRows(plan, report).map { $0.copying() }
+        precondition(copiedRows[1].progressReport == plan && copiedRows[2].testReport == report,
+            "生产 copying 必须保留结构化计划/报告")
+        let replayPage = ColdPage()
+        replayPage.load(copiedRows, hues: [:], restore: nil)
+        for _ in 0..<300 {
+            if replayPage.loaded && replayPage.applyCount > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        precondition(replayPage.loaded && replayPage.applyCount == 1)
+        let replayed = try await replayPage.webView.callAsyncJavaScript("""
+            return document.querySelector('.plan-summary').textContent==='Agent计划（自报） · 1/2' &&
+              document.querySelectorAll('.plan-row').length===2 &&
+              document.querySelector('.result-test-summary').textContent==='JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2' &&
+              document.querySelector('.result-test-source').textContent.includes('JUnit · synthetic-results.xml') &&
+              document.querySelector('.result-test-notice').textContent.includes('不保证报告新鲜度');
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        replayPage.close()
+        precondition(replayed == true, "全新文档冷重放不能丢失生产模型中的计划/报告及来源限制")
+        FileHandle.standardError.write(Data("PASS: extracted production report fields/copying/metadata-only signatures/withdrawal/stable Markdown/fresh-page replay\n".utf8))
         apply([currentAnswer, error(title: "自定义标题")])
         try await settle()
         let title = try await js("return document.querySelector('.error-title').textContent;") as? String
         precondition(title == "自定义标题")
+        // 相同 tool body/kind，仅全局 snapshot.isStreaming 变化也必须发送 interrupted 差异。
+        let pendingTool = NewPiTranscriptItem(kind: .tool(name: "read", state: .running), body: "", toolCommand: "file.swift")
+        let failedTool = NewPiTranscriptItem(kind: .tool(name: "bash", state: .completed(isError: true)), body: "failed")
+        apply([pendingTool, failedTool, currentAnswer, error()], running: true)
+        try await settle()
+        let running = try await js("return document.querySelector('.ti-tool .card').dataset.status==='running';") as? Bool
+        precondition(running == true)
+        apply([pendingTool, failedTool, currentAnswer, error()])
+        try await settle()
+        let stopped = try await js("const cards=[...document.querySelectorAll('.ti-tool .card')]; return cards[0].dataset.status==='stopped' && cards[1].dataset.status==='error';") as? Bool
+        precondition(stopped == true, "未完成调用变 stopped，实际 failed 保留 error")
+        let nextTool = NewPiTranscriptItem(kind: .tool(name: "read", state: .running), body: "", toolCommand: "next.swift")
+        apply([pendingTool, failedTool, currentAnswer, error(), nextTool], running: true)
+        try await settle()
+        let notRevived = try await js("const cards=[...document.querySelectorAll('.ti-tool .card')];return cards[0].dataset.status==='stopped' && cards[1].dataset.status==='error' && cards[2].dataset.status==='running';") as? Bool
+        precondition(notRevived == true, "下一轮运行不能复活已中断调用")
+        let lateResult = NewPiTranscriptItem(id: pendingTool.id, kind: .tool(name: "read", state: .completed(isError: false)), body: "late result")
+        apply([lateResult, failedTool, currentAnswer, error(), nextTool], running: true)
+        try await settle()
+        let resolved = try await js("return document.querySelector('.ti-tool .card').dataset.status==='done';") as? Bool
+        precondition(resolved == true, "迟到的真实结果可以替代中断展示")
+        apply([currentAnswer, error()])
+        try await settle()
         // 真按钮回调 id；之后直接伪造 postMessage 验证 native 守卫。
         _ = try await js("document.querySelector('.error-retry').click(); return true;")
         try await settle()
@@ -190,6 +300,10 @@ extension TranscriptColdLoadChecks {
         try await settle()
         precondition(page.retrySubframeCount == subframes + 1 && calls.count == 2, "子 frame 即使有合法 UUID 也必须拒绝")
         precondition(page.forkSubframeCount == 1 && forks == [7, 7])
+        let beforeSubframeCopy = copyProbe.writes.count
+        _ = try await js("const f=document.createElement('iframe'); f.srcdoc='<script>window.webkit.messageHandlers.copyText.postMessage('+JSON.stringify(payload)+')</script>'; document.body.append(f); await new Promise(r=>f.onload=r); return true;", arguments: ["payload": validCopy])
+        try await settle()
+        precondition(copyProbe.writes.count == beforeSubframeCopy, "即使合法能力也拒绝子 frame 写入")
         page.coordinator.detach()
         try await post(errorID.uuidString, expectedCalls: 2)
         try await postFork(7, expectedCalls: 2)

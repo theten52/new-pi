@@ -1,3 +1,4 @@
+import AppKit
 import NewPiCore
 import SwiftUI
 
@@ -8,38 +9,104 @@ struct NewPiChangesButton: View {
     @StateObject private var model = NewPiChangesModel()
 
     var body: some View {
-        Button {
-            model.isPresented = true
-            model.refreshNow()
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.triangle.branch")
-                Text("改动")
-                switch model.phase {
-                case .ready:
-                    Text("\(model.snapshot?.files.count ?? 0)").monospacedDigit()
-                case .loading:
-                    ProgressView().controlSize(.mini)
-                case .failed:
-                    Image(systemName: "exclamationmark.triangle")
-                case .notGit:
-                    Text("非 Git").font(.caption)
-                case .noDirectory:
-                    Text("—")
-                }
-            }
-        }
+        NewPiChangesOpenerView(model: model)
+        .frame(width: 92, height: 28)
         .help("查看整个 Git 工作区的改动；只读。\(model.phaseDescription)")
         .accessibilityLabel("改动，\(model.phaseDescription)")
-        .sheet(isPresented: $model.isPresented) {
-            NewPiChangesPanelContent(model: model)
-        }
         .task(id: directory) { model.setDirectory(directory) }
         .onChange(of: refreshToken) { _, _ in model.requestRefresh() }
         .onChange(of: model.isPresented) { _, presented in
             if !presented { model.cancelDetail() }
         }
         .onDisappear { model.stop() }
+    }
+}
+
+private struct NewPiChangesOpenerView: NSViewRepresentable {
+    @ObservedObject var model: NewPiChangesModel
+    func makeNSView(context: Context) -> NewPiChangesOpener { NewPiChangesOpener(frame: .zero) }
+    func updateNSView(_ view: NewPiChangesOpener, context: Context) {
+        view.model = model
+        switch model.phase {
+        case .ready: view.badge.stringValue = "\(model.snapshot?.files.count ?? 0)"
+        case .loading: view.badge.stringValue = "…"
+        case .failed: view.badge.stringValue = "!"
+        case .notGit: view.badge.stringValue = "非 Git"
+        case .noDirectory: view.badge.stringValue = "—"
+        }
+        view.setAccessibilityLabel("改动，\(model.phaseDescription)")
+        view.toolTip = "查看整个 Git 工作区的改动；只读。\(model.phaseDescription)"
+    }
+    static func dismantleNSView(_ view: NewPiChangesOpener, coordinator: ()) {
+        view.presentation.dismiss(restoreFocus: false)
+    }
+}
+
+private final class NewPiChangesBadge: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private final class NewPiChangesOpener: NSButton {
+    var model: NewPiChangesModel?
+    let presentation = NewPiUsagePresentation()
+    let badge = NewPiChangesBadge(labelWithString: "—")
+    private weak var mouseResponder: NSResponder?
+    private var trackingMouse = false
+    override var acceptsFirstResponder: Bool { !trackingMouse }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        title = "改动"
+        alignment = .left
+        image = NSImage(systemSymbolName: "plus.forwardslash.minus", accessibilityDescription: nil)
+        imagePosition = .imageLeading
+        font = .systemFont(ofSize: 11)
+        isBordered = false
+        contentTintColor = .secondaryLabelColor
+        target = self
+        action = #selector(openChanges)
+        badge.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        badge.alignment = .center
+        badge.drawsBackground = true
+        badge.backgroundColor = NSColor(NewPiWorkbenchStyle.surfaceSoft)
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 4
+        badge.setAccessibilityHidden(true)
+        addSubview(badge)
+        setAccessibilityIdentifier("newpi.changes.open")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        badge.frame = NSRect(x: bounds.width - 34, y: (bounds.height - 18) / 2, width: 34, height: 18)
+    }
+    override func mouseDown(with event: NSEvent) {
+        mouseResponder = window?.firstResponder
+        trackingMouse = true
+        defer { mouseResponder = nil; trackingMouse = false }
+        super.mouseDown(with: event)
+    }
+    @objc private func openChanges() {
+        guard let model else { return }
+        presentation.onDismiss = { [weak model] in
+            model?.isPresented = false
+            model?.cancelDetail()
+        }
+        presentation.present(from: self, title: "改动预览", restoring: mouseResponder ?? window?.firstResponder) {
+            NewPiChangesPanelContent(model: model, isOverlay: true)
+        }
+        guard presentation.panel != nil else { return }
+        model.isPresented = true
+        model.refreshNow()
+    }
+    override func viewDidHide() {
+        super.viewDidHide()
+        presentation.dismiss(restoreFocus: false)
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if presentation.parent != nil, window !== presentation.parent { presentation.dismiss(restoreFocus: false) }
     }
 }
 
@@ -208,15 +275,16 @@ private final class NewPiChangesModel: ObservableObject {
 private struct NewPiChangesPanelContent: View {
     @ObservedObject var model: NewPiChangesModel
     @Environment(\.dismiss) private var dismiss
+    var isOverlay = false
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Label("工作区 Git 改动", systemImage: "arrow.triangle.branch").font(.headline)
+                    Label("工作区 Git 改动", systemImage: "plus.forwardslash.minus").font(.headline)
                     Spacer()
                     Button("刷新", systemImage: "arrow.clockwise") { model.refreshNow() }
-                    Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
+                    if !isOverlay { Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
                 }
                 Text(WorkspaceChanges.notice)
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -254,13 +322,46 @@ private struct NewPiChangesPanelContent: View {
                 repositoryContent
             }
         }
-        .frame(minWidth: 420, idealWidth: 920, minHeight: 420, idealHeight: 650)
+        .frame(minWidth: isOverlay ? 0 : 420, idealWidth: 920, minHeight: isOverlay ? 0 : 420, idealHeight: 650)
     }
 
     @ViewBuilder
     private var repositoryContent: some View {
         if model.snapshot?.files.isEmpty == true {
             message("没有 Git 改动", symbol: "checkmark.circle", detail: "暂存、未暂存和未跟踪文件均为空（遵循 Git ignore 规则）。")
+        } else if isOverlay {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(model.snapshot?.files ?? []) { file in
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button { model.select(file.path) } label: {
+                                HStack(alignment: .top) {
+                                    Image(systemName: "doc.text")
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(file.displayPath).font(.system(size: 11, design: .monospaced))
+                                        if let original = file.originalPath {
+                                            Text("原路径：\(WorkspaceChanges.displayPath(original))").font(.caption2)
+                                        }
+                                        Text(file.statusLabel).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                    Image(systemName: model.selectedPath == file.path ? "chevron.down" : "chevron.right")
+                                }
+                                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(file.displayPath)
+                            if model.selectedPath == file.path {
+                                Divider()
+                                detailView.frame(height: 320)
+                            }
+                        }
+                        .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NewPiWorkbenchStyle.line) }
+                    }
+                }.padding(12)
+            }
         } else {
             GeometryReader { geometry in
                 if geometry.size.width >= 680 {
@@ -381,11 +482,37 @@ private struct NewPiChangesPanelContent: View {
 private struct NewPiChangesDiffLines: View {
     let diff: WorkspaceFileDiff
 
+    /// Reader 已将正文限制在 256 KiB；只在内容变化时测字形，不实例化所有行视图。
+    /// 懒栈不能用首个短行决定横向文档宽度，否则后续长行无法滚到末尾。
+    @MainActor private final class Layout: NSObject {
+        let lines: [String]
+        let width: CGFloat
+        static let cache: NSCache<NSString, Layout> = {
+            let cache = NSCache<NSString, Layout>()
+            cache.countLimit = 4
+            cache.totalCostLimit = 1024 * 1024
+            return cache
+        }()
+        init(text: String) {
+            lines = text.components(separatedBy: "\n")
+            let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            width = ceil(lines.reduce(CGFloat.zero) { max($0, ($1 as NSString).size(withAttributes: [.font: font]).width) }) + 20
+        }
+        static func forText(_ text: String) -> Layout {
+            let key = text as NSString
+            if let value = cache.object(forKey: key) { return value }
+            let value = Layout(text: text)
+            cache.setObject(value, forKey: key, cost: text.utf8.count)
+            return value
+        }
+    }
+
     var body: some View {
+        let layout = Layout.forText(diff.text)
         GeometryReader { geometry in
             ScrollView([.horizontal, .vertical]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(diff.text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                    ForEach(Array(layout.lines.enumerated()), id: \.offset) { _, line in
                         Text(line.isEmpty ? " " : line)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(color(line))
@@ -394,7 +521,7 @@ private struct NewPiChangesDiffLines: View {
                             .frame(minWidth: geometry.size.width, alignment: .leading)
                             .background(color(line).opacity(isHighlighted(line) ? 0.09 : 0))
                     }
-                }.textSelection(.enabled)
+                }.frame(width: max(geometry.size.width, layout.width)).textSelection(.enabled)
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
