@@ -194,9 +194,15 @@ struct NewPiSessionPanel: View {
                         isDisabled: false,
                         placeholder: runtime.isStreaming ? "先写下一条消息，当前任务结束后发送…" : "继续提问，或告诉 NewPi 下一步做什么…",
                         onSubmit: sendComposerInput,
-                        onImagesPicked: appendDrafts
+                        onImagesPicked: appendDrafts,
+                        onRecallHistory: { previous, currentText in
+                            draft.text = currentText
+                            return draft.recallHistory(previous: previous) {
+                                runtime.transcript.filter { $0.kind == .user }.map(\.body)
+                            }
+                        }
                     )
-                    .help(runtime.isStreaming ? "可以先编辑下一条消息；当前任务结束后才能发送。" : "Return 发送，Shift+Return 换行")
+                    .help("Return 发送，Shift+Return 换行；首行 ↑ / 末行 ↓ 取回历史输入。" + (runtime.isStreaming ? "当前任务结束后才能发送。" : ""))
                     .frame(height: NewPiComposerScrollView.fixedHeight)
 
                     HStack(spacing: 10) {
@@ -344,6 +350,8 @@ struct NewPiComposerTextView: NSViewRepresentable {
     var onSubmit: () -> Void = {}
     /// 图片采集回调（输入框拖拽 / ⌘V 粘贴）：汇入外层草稿附件条。
     var onImagesPicked: ([DraftImageAttachment]) -> Void = { _ in }
+    /// 返回 nil 表示不消费方向键；历史仅在首/末显示行的裸方向键触发。
+    var onRecallHistory: (_ previous: Bool, _ currentText: String) -> String? = { _, _ in nil }
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -364,6 +372,7 @@ struct NewPiComposerTextView: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
+        textView.onRecallHistory = onRecallHistory
         textView.placeholder = placeholder
         textView.isRichText = false
         textView.importsGraphics = false
@@ -392,6 +401,7 @@ struct NewPiComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         textView.onSubmit = onSubmit
         textView.onImagesPicked = onImagesPicked
+        textView.onRecallHistory = onRecallHistory
         textView.placeholder = placeholder
         if textView.isEditable != !isDisabled {
             textView.isEditable = !isDisabled
@@ -446,6 +456,7 @@ final class NewPiComposerInnerTextView: NSTextView {
     var onSubmit: (() -> Void)?
     /// 图片采集回调（拖拽文件 / ⌘V 粘贴截图）：由外层汇入草稿附件条。
     var onImagesPicked: (([DraftImageAttachment]) -> Void)?
+    var onRecallHistory: ((_ previous: Bool, _ currentText: String) -> String?)?
 
     // ⌘V 粘贴：剪贴板有图片（截图 / 复制的位图 / 复制的图片文件）→ 采集为草稿；否则走默认文本粘贴。
     override func paste(_ sender: Any?) {
@@ -535,6 +546,17 @@ final class NewPiComposerInnerTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        let previous = event.keyCode == 126
+        if (previous || event.keyCode == 125), isEditable, !hasMarkedText(),
+           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+           isAtHistoryBoundary(previous: previous),
+           let recalled = onRecallHistory?(previous, string) {
+            // 走文本编辑通道同步 Binding 与撤销栈，连续按键不依赖 SwiftUI 下一帧更新。
+            insertText(recalled, replacementRange: NSRange(location: 0, length: (string as NSString).length))
+            setSelectedRange(NSRange(location: previous ? 0 : (string as NSString).length, length: 0))
+            scrollRangeToVisible(selectedRange())
+            return
+        }
         let isReturn = event.keyCode == 36 || event.keyCode == 76 // Return / 小键盘 Enter
         // IME 组词中（如拼音选词确认）不拦截 Return；Shift+Return 换行。
         if isReturn, !hasMarkedText(), !event.modifierFlags.contains(.shift) {
@@ -542,6 +564,24 @@ final class NewPiComposerInnerTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    /// 用 TextKit 的实际显示行判断边界，长文本自动换行时也保留正常光标移动。
+    func isAtHistoryBoundary(previous: Bool) -> Bool {
+        let selection = selectedRange()
+        let length = (string as NSString).length
+        guard selectedRanges.count == 1, selection.length == 0, selection.location <= length else { return false }
+        if length == 0 { return true }
+        guard let layoutManager, let textContainer else { return false }
+        layoutManager.ensureLayout(for: textContainer)
+        if selection.location == length, layoutManager.extraLineFragmentTextContainer != nil {
+            return !previous
+        }
+        let glyph = layoutManager.glyphIndexForCharacter(at: min(selection.location, length - 1))
+        var line = NSRange()
+        _ = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &line)
+        return previous ? line.location == 0
+            : NSMaxRange(line) == layoutManager.numberOfGlyphs && layoutManager.extraLineFragmentTextContainer == nil
     }
 
     override func draw(_ dirtyRect: NSRect) {

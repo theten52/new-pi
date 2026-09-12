@@ -562,7 +562,7 @@ struct NewPiAgentStatusBar: View {
                 cacheHitRateText: cacheHitRateText, contextText: contextText,
                 tokenRateText: tokenRateText, lastTurnInputTokens: lastTurnInputTokens,
                 lastTurnOutputTokens: lastTurnOutputTokens))
-            .frame(width: 44, height: 24)
+            .frame(width: 60, height: 24)
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
         }
@@ -636,6 +636,9 @@ final class NewPiUsageOpener: NSButton {
         title = "用量"
         isBordered = false
         font = .systemFont(ofSize: 11)
+        image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular))
+        imagePosition = .imageLeading
         contentTintColor = .secondaryLabelColor
         target = self
         action = #selector(openUsage)

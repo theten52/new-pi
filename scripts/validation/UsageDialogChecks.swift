@@ -91,7 +91,11 @@ private struct UsageBarFixture: View {
                     unavailable.forEach { print("SKIP: \($0)") }
                     exit(2)
                 }
-                print("PASS: usage dialog native mouse/keyboard/IME/AX/layout/dynamic data; synthetic windows only")
+                if ProcessInfo.processInfo.environment["NEWPI_USAGE_OPENER_ONLY"] == "1" {
+                    print("PASS: usage opener only; full dialog interaction checks not run")
+                } else {
+                    print("PASS: usage dialog native mouse/keyboard/IME/AX/layout/dynamic data; synthetic windows only")
+                }
                 exit(0)
             } catch {
                 print("FAIL: \(error)")
@@ -106,6 +110,31 @@ private struct UsageBarFixture: View {
     }
 
     private static func run() async throws {
+        // 图标小改动只验证按钮，不激活窗口、不申请录屏或运行整套交互截图。
+        if ProcessInfo.processInfo.environment["NEWPI_USAGE_OPENER_ONLY"] == "1" {
+            let host = NSHostingView(rootView: UsageBarFixture(model: UsageFixture()))
+            host.frame = NSRect(x: 0, y: 0, width: 480, height: 36)
+            let window = makeWindow(content: host)
+            defer { window.close() }
+            for dark in [false, true] {
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                host.layoutSubtreeIfNeeded()
+                try await pause()
+                guard let button = find(NewPiUsageOpener.self, in: host), let cell = button.cell else {
+                    throw Failure(description: "缺少生产用量按钮")
+                }
+                try require(button.image != nil && button.imagePosition == .imageLeading, "用量前显示柱状图标")
+                try require(button.title == "用量" && button.accessibilityLabel() == "用量", "文字和辅助功能名称不重复图标")
+                let imageRect = cell.imageRect(forBounds: button.bounds)
+                let titleRect = cell.titleRect(forBounds: button.bounds)
+                try require(imageRect.width > 0 && imageRect.height > 0 && button.bounds.contains(imageRect), "图标布局非空且未裁切")
+                try require(titleRect.width >= ("用量" as NSString).size(withAttributes: [.font: button.font!]).width
+                    && button.bounds.contains(titleRect) && imageRect.maxX <= titleRect.minX, "图标在文字前且标签完整")
+                try require(button.presentation.panel == nil, "检查图标不打开弹窗")
+            }
+            print("PASS: usage opener light/dark layout; no activation, screen capture or global events")
+            return
+        }
         let zero = NewPiUsageDialogData(lastTurnInputTokens: 0, lastTurnOutputTokens: 0)
         try require(zero.metrics[0].1 == "0" && zero.metrics[1].1 == "0", "明确的零 token 不是未知数据")
         let unknown = NewPiUsageDialogData(usageText: "累计值不能借给本轮", lastTurnInputTokens: -1)

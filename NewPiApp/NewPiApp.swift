@@ -1832,10 +1832,16 @@ struct ChatRoomDetailView: View {
                     NewPiComposerTextView(
                         text: $draft.text,
                         placeholder: runtime.isRunning ? "写下你的补充，Return 发送插话…" : "向聊天室发送消息…",
-                        onSubmit: sendUserMessage
+                        onSubmit: sendUserMessage,
+                        onRecallHistory: { previous, currentText in
+                            draft.text = currentText
+                            return draft.recallHistory(previous: previous) {
+                                runtime.messages.filter(\.isUserMessage).map(\.content)
+                            }
+                        }
                     )
                     .frame(height: NewPiComposerScrollView.fixedHeight)
-                    .help("Return 发送，Shift+Return 换行；发言中发送 = 插话")
+                    .help("Return 发送，Shift+Return 换行；首行 ↑ / 末行 ↓ 取回历史输入；发言中发送 = 插话")
 
                     HStack(spacing: 12) {
                         Text(runtime.isRunning ? "发言中可插话" : "Return 发送 · Shift+Return 换行")
