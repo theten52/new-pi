@@ -151,6 +151,13 @@ NEWPI_EXPECT_FILTERED_NOTIFICATIONS=1 bash scripts/validation/check-chatroom-per
 
 ## 历史冷加载与锚点恢复
 
+### Session 错误轮次回归
+
+`bash scripts/validation/check-transcript-error-order.sh` 直接提取生产 `rebuildTranscript` 及 ID/错误恢复方法，
+验证取消/错误提示不随下一轮移动、压缩前缀不重复、同轮错误 ID/顺序保持，以及分支截断和 live 快照。
+运行时是轻量替身，不启动 AgentSession、不操作用户历史、不调用模型；不验证真实取消事件调度或重启持久化。
+`NEWPI_ERROR_ORDER_REVISION=3344483` 可运行旧版失败对照（只在临时目录取历史源，不切分支）。
+
 `bash scripts/validation/check-transcript-cold-load.sh` 编译真实 Coordinator、HTML 工厂、聊天室适配器和 WKWebView，使用临时生成的 500 条带代码块历史。
 对比前后的命令：
 
@@ -244,6 +251,17 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 - `layout`：检查正式普通会话 1200/900pt 的主要控件边界和输入区，结束时恢复原窗口尺寸；不截图、不写草稿。
 
 2026-09-12 最新一轮结果及未覆盖项见[收尾验收记录](../docs/dev-notes/2026-09-12-workbench-acceptance.md)。
+
+## 附件补充验收
+
+附件补充验收：`bash scripts/validation/check-attachment-processing.sh` 使用生产图片处理代码，
+生成真实 PNG/JPEG 验证解码、原样保留、缩放、预算和临时文件入口；不访问用户图片、剪贴板或模型。
+本机16项通过；provider图片说明编码另在Core包目录运行 `swift test --filter ImageAttachmentNoteEncodingTests`（6项通过）。
+
+`NativeSidebarChecks` 的实验性 `attachment` 模式尝试真实文件面板选择生成PNG并移除，要求空输入、无已有附件。
+**当前本机在系统路径文本框焦点定位处失败（exit 1）**，不要把该模式列为已通过或可靠的常规验收入口。
+它只确认附件按钮能打开文件面板；失败清理会取消面板并删除自己的临时图片。不会发送、使用剪贴板或更改模型。
+完整选择/移除、预览和拖放仍需人工验收，详见[收尾记录](../docs/dev-notes/2026-09-12-workbench-acceptance.md)。
 
 ## 共用审批 UI 验证
 

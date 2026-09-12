@@ -54,8 +54,8 @@ private struct NativeSidebarChecks {
 
     @MainActor static func run() async throws {
         guard CommandLine.arguments.count == 3,
-                            ["inspect", "check", "composer-inspect", "composer", "navigation", "navigation-inspect", "layout"].contains(CommandLine.arguments[2]) else {
-                        throw Failure(message: "参数：指定 NewPi.app 路径 inspect|check|composer-inspect|composer|navigation-inspect|navigation|layout")
+                            ["inspect", "check", "composer-inspect", "composer", "navigation", "navigation-inspect", "layout", "attachment"].contains(CommandLine.arguments[2]) else {
+                        throw Failure(message: "参数：指定 NewPi.app 路径 inspect|check|composer-inspect|composer|navigation-inspect|navigation|layout|attachment")
         }
         try require(AXIsProcessTrusted(), "辅助功能已授权（本程序不请求权限）")
         let executable = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
@@ -69,6 +69,10 @@ private struct NativeSidebarChecks {
             throw Failure(message: "无主窗口")
         }
         func controls() -> [AXUIElement] { descendants(window) }
+        if CommandLine.arguments[2] == "attachment" {
+            try await checkAttachment(app: app, root: root, window: window)
+            return
+        }
         if CommandLine.arguments[2] == "layout" {
             var original = frame(window).size
             defer {
@@ -183,6 +187,111 @@ private struct NativeSidebarChecks {
         try require(controls().contains { CFEqual($0, editor) }, "输入框 AX 身份不变")
         try require(string(editor, kAXValueAttribute) == draft, "现有输入内容不变（未写测试草稿）")
         print("PASS: 系统侧栏往返；过渡交由 macOS，本检查不测量动画帧率")
+    }
+
+    @MainActor private static func checkAttachment(app: NSRunningApplication, root: AXUIElement, window: AXUIElement) async throws {
+        func labels(_ element: AXUIElement) -> [String] {
+            [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute].map { string(element, $0) }
+        }
+        func buttons(_ element: AXUIElement) -> [AXUIElement] {
+            descendants(element).filter { string($0, kAXRoleAttribute) == "AXButton" }
+        }
+        func removals() -> [AXUIElement] { buttons(window).filter { labels($0).contains("移除该图片") } }
+        func picker() -> AXUIElement? {
+            descendants(root).first { element in
+                guard ["AXWindow", "AXSheet", "AXDialog"].contains(string(element, kAXRoleAttribute)), !CFEqual(element, window) else { return false }
+                let names = buttons(element).flatMap(labels)
+                return names.contains("Cancel") || names.contains("取消")
+            }
+        }
+        func wait(_ message: String, _ condition: () -> Bool) async throws {
+            for _ in 0..<50 {
+                if condition() { print("PASS: \(message)"); return }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            throw Failure(message: message)
+        }
+        func key(_ code: CGKeyCode, flags: CGEventFlags = []) async throws {
+            try require(app.isActive && picker() != nil, "键盘事件仅限目标App文件面板")
+            for down in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { throw Failure(message: "无法创建事件") }
+                event.flags = flags
+                event.postToPid(app.processIdentifier)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+        }
+        let editors = descendants(window).filter { string($0, kAXRoleAttribute) == "AXTextArea" }
+        guard editors.count == 1, let editor = editors.first,
+              let send = buttons(window).first(where: { labels($0).contains("发送消息") }),
+              let add = buttons(window).first(where: { labels($0).contains { $0.hasPrefix("添加图片") } }) else {
+            throw Failure(message: "缺少唯一普通会话输入或附件按钮")
+        }
+        try require(string(editor, kAXValueAttribute).isEmpty && attribute(send, kAXEnabledAttribute) as? Bool == false
+                    && removals().isEmpty && picker() == nil, "输入和附件为空，无现有文件面板")
+        let directory = URL(fileURLWithPath: "/private/tmp/newpi-ui").appendingPathComponent("attachment-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("NewPi-acceptance-only.png")
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 320, pixelsHigh: 160,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0), let data = bitmap.bitmapData else { throw Failure(message: "生成图片失败") }
+        for y in 0..<160 { for x in 0..<320 {
+            let offset = y * bitmap.bytesPerRow + x * 4
+            data[offset] = UInt8(x % 256); data[offset + 1] = UInt8(y); data[offset + 2] = 96; data[offset + 3] = 255
+        } }
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw Failure(message: "PNG编码失败") }
+        try png.write(to: file)
+        app.activate(options: [])
+        try await wait("目标App已激活") { app.isActive }
+        var selectedFixture = false
+        do {
+            // runModal 期间 AXPress 可能返回 cannotComplete；以实际面板出现作为后置断言。
+            print("ATTACHMENT OPEN AXResult=\(AXUIElementPerformAction(add, kAXPressAction as CFString).rawValue)")
+            try await wait("系统文件选择面板打开") { picker() != nil }
+            try await key(5, flags: [.maskCommand, .maskShift]) // ⌘⇧G，绝不操作主输入框。
+            var pathField: AXUIElement?
+            try await wait("文件面板前往路径输入框获得焦点") {
+                guard let focused = attribute(root, kAXFocusedUIElementAttribute), CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+                let field = focused as! AXUIElement
+                guard ["AXTextField", "AXComboBox"].contains(string(field, kAXRoleAttribute)),
+                        picker() != nil, !CFEqual(field, editor) else { return false }
+                pathField = field
+                return true
+            }
+            guard let pathField else { throw Failure(message: "无路径输入框") }
+            try require(AXUIElementSetAttributeValue(pathField, kAXValueAttribute as CFString, file.path as CFString) == .success, "选择测试PNG的完整路径")
+            try await key(36) // Return 仅用于已确认的文件面板路径框。
+            try await Task.sleep(for: .milliseconds(350))
+            guard let panel = picker(), let open = buttons(panel).first(where: {
+                labels($0).contains { ["Open", "打开", "Choose", "选择"].contains($0) }
+                    && attribute($0, kAXEnabledAttribute) as? Bool == true
+            }) else { throw Failure(message: "未找到可用的文件打开按钮") }
+            selectedFixture = true
+            try require(AXUIElementPerformAction(open, kAXPressAction as CFString) == .success, "文件面板确认选择（不发送消息）")
+            try await wait("测试附件缩略图的移除按钮出现") { picker() == nil && removals().count == 1 }
+            try require(attribute(send, kAXEnabledAttribute) as? Bool == true && string(editor, kAXValueAttribute).isEmpty,
+                        "仅图片草稿使发送启用，文本保持为空")
+            guard let remove = removals().first else { throw Failure(message: "缺少移除按钮") }
+            try require(AXUIElementPerformAction(remove, kAXPressAction as CFString) == .success, "真实移除图片按钮接受点击")
+            try await wait("附件清理完成，发送重新禁用") { removals().isEmpty && attribute(send, kAXEnabledAttribute) as? Bool == false }
+            selectedFixture = false
+            // 再打开并取消，验证取消路径不会创建草稿。
+            print("ATTACHMENT REOPEN AXResult=\(AXUIElementPerformAction(add, kAXPressAction as CFString).rawValue)")
+            try await wait("取消检查的文件面板可见") { picker() != nil }
+            guard let panel = picker(), let cancel = buttons(panel).first(where: { labels($0).contains { ["Cancel", "取消"].contains($0) } }) else { throw Failure(message: "缺少取消按钮") }
+            try require(AXUIElementPerformAction(cancel, kAXPressAction as CFString) == .success, "文件面板取消")
+            try await wait("取消后无新增附件") { picker() == nil && removals().isEmpty && attribute(send, kAXEnabledAttribute) as? Bool == false }
+        } catch {
+            if let panel = picker(), let cancel = buttons(panel).first(where: { labels($0).contains { ["Cancel", "取消"].contains($0) } }) {
+                _ = AXUIElementPerformAction(cancel, kAXPressAction as CFString)
+            }
+            if selectedFixture, removals().count == 1, let remove = removals().first {
+                _ = AXUIElementPerformAction(remove, kAXPressAction as CFString)
+            }
+            throw error
+        }
+        try require(string(editor, kAXValueAttribute).isEmpty, "结束后文本仍为空")
+        print("PASS: 正式App测试PNG选择/移除/取消；未发送、未读剪贴板。不是拖放或发送后预览验收")
     }
 
     @MainActor private static func checkComposer(app: NSRunningApplication, root: AXUIElement, window: AXUIElement, navigationCheck: Bool = false) async throws {

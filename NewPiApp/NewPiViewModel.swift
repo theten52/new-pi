@@ -1954,10 +1954,8 @@ final class NewPiViewModel: ObservableObject {
             return false
         })
 
-        // error 条目是 UI 层临时条目，不在 context.messages 里。若 rebuild 直接 removeAll，
-        // 紧随 agentEnd 的全量重建会把刚 append 的 error 抹掉，导致错误信息一闪而过。
-        // 因此在重建前把 error 条目抢救出来，重建后追加回 transcript 末尾。
-        let preservedErrors = runtime.transcript.filter { $0.kind == .error }
+        // error 不在 context.messages 中；保存原轮次顺序，不能统一追加到新一轮末尾。
+        let previousTranscript = runtime.transcript
 
         // 方案 A：保留前缀（被压缩的完整旧历史）时，撤掉 removeAll，改为截断到前缀末尾。
         if preservedPrefixCount > 0 {
@@ -2087,8 +2085,7 @@ final class NewPiViewModel: ObservableObject {
             }
         }
         runtime.liveMessageCount = messages.count
-        // 把抢救出来的 error 条目追加回末尾（保持错误信息可见，不被 rebuild 吞掉）。
-        runtime.transcript.append(contentsOf: preservedErrors)
+        runtime.transcript = restoringErrors(from: previousTranscript, into: runtime.transcript)
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
@@ -2115,6 +2112,36 @@ final class NewPiViewModel: ObservableObject {
             return streamingAssistantID
         }
         return UUID()
+    }
+
+    /// 将易失错误放回所属轮次末尾，而非整份文档末尾。用户/摘要 ID 由重建路径保留，
+    /// 即使取消时的临时 assistant 被快照替换，错误也不会跟着下一轮移动。
+    /// 压缩前缀可能已经含错误：先过滤再统一恢复，避免相同 ID 被重复追加。
+    /// 分支截去的轮次不再存在时，不把其错误嫁接到保留下来的其他轮次。
+    private func restoringErrors(
+        from previous: [NewPiTranscriptItem], into rebuilt: [NewPiTranscriptItem]
+    ) -> [NewPiTranscriptItem] {
+        var errorsByAnchor: [UUID?: [NewPiTranscriptItem]] = [:]
+        var anchor: UUID?
+        var seenErrors = Set<UUID>()
+        for item in previous {
+            if item.kind == .user || item.kind == .summary { anchor = item.id }
+            if item.kind == .error, seenErrors.insert(item.id).inserted {
+                errorsByAnchor[anchor, default: []].append(item)
+            }
+        }
+        var result: [NewPiTranscriptItem] = []
+        result.reserveCapacity(rebuilt.count + seenErrors.count)
+        anchor = nil
+        for item in rebuilt where item.kind != .error {
+            if item.kind == .user || item.kind == .summary {
+                result.append(contentsOf: errorsByAnchor.removeValue(forKey: anchor) ?? [])
+                anchor = item.id
+            }
+            result.append(item)
+        }
+        result.append(contentsOf: errorsByAnchor.removeValue(forKey: anchor) ?? [])
+        return result
     }
 
     private func cleanupEmptySessions() async {
