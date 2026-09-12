@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 
 // 授权后对已运行的 Debug App 做窄范围验收；不启动会话、不遍历 Web 正文。
-// inspect/check 不写草稿；composer 模式只在空输入时临时输入固定文本并恢复，不发送。
+// inspect/check/layout 不写草稿；composer/navigation 只在空输入时临时输入固定文本并恢复，不发送。
 private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
@@ -54,8 +54,8 @@ private struct NativeSidebarChecks {
 
     @MainActor static func run() async throws {
         guard CommandLine.arguments.count == 3,
-                            ["inspect", "check", "composer-inspect", "composer"].contains(CommandLine.arguments[2]) else {
-                        throw Failure(message: "参数：指定 NewPi.app 路径 inspect|check|composer-inspect|composer")
+                            ["inspect", "check", "composer-inspect", "composer", "navigation", "navigation-inspect", "layout"].contains(CommandLine.arguments[2]) else {
+                        throw Failure(message: "参数：指定 NewPi.app 路径 inspect|check|composer-inspect|composer|navigation-inspect|navigation|layout")
         }
         try require(AXIsProcessTrusted(), "辅助功能已授权（本程序不请求权限）")
         let executable = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
@@ -69,6 +69,45 @@ private struct NativeSidebarChecks {
             throw Failure(message: "无主窗口")
         }
         func controls() -> [AXUIElement] { descendants(window) }
+        if CommandLine.arguments[2] == "layout" {
+            var original = frame(window).size
+            defer {
+                if let size = AXValueCreate(.cgSize, &original) {
+                    print("RESTORE windowSize=\(AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, size).rawValue)")
+                }
+            }
+            for width: CGFloat in [1200, 900] {
+                var requested = CGSize(width: width, height: original.height)
+                guard let size = AXValueCreate(.cgSize, &requested) else { throw Failure(message: "无法构造尺寸") }
+                try require(AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, size) == .success, "设置 \(width)pt 窗口")
+                try await Task.sleep(for: .milliseconds(500))
+                try require(abs(frame(window).width - width) < 1, "窗口实际达到指定宽度")
+                let names = ["用量", "模型与思考级别", "发送消息", "更多操作"]
+                for name in names {
+                    guard let control = controls().first(where: { string($0, kAXDescriptionAttribute) == name }) else { throw Failure(message: "缺少\(name)") }
+                    try require(frame(window).contains(frame(control)), "\(Int(width))pt：\(name)在窗口内")
+                }
+                guard let model = controls().first(where: { string($0, kAXDescriptionAttribute) == "模型与思考级别" }),
+                      let send = controls().first(where: { string($0, kAXDescriptionAttribute) == "发送消息" }),
+                      let editor = controls().first(where: { string($0, kAXRoleAttribute) == "AXTextArea" }) else { throw Failure(message: "缺少输入区") }
+                try require(frame(model).maxX < frame(send).minX && frame(editor).width > 400 && abs(frame(editor).height - 78) < 1,
+                            "输入区四行高度和模型/主按钮无碰撞")
+            }
+            return
+        }
+        if CommandLine.arguments[2] == "navigation-inspect" {
+            guard let navigation = controls().first(where: { string($0, kAXDescriptionAttribute) == "工作区导航" }) else {
+                throw Failure(message: "缺少导航区")
+            }
+            let buttons = descendants(navigation).filter { string($0, kAXRoleAttribute) == "AXButton" }
+            for (index, button) in buttons.enumerated() {
+                let texts = descendants(button).flatMap { [string($0, kAXValueAttribute), string($0, kAXDescriptionAttribute), string($0, kAXHelpAttribute)] }
+                let roomCandidate = !texts.contains { $0.contains("条消息") }
+                    && texts.contains { value in ["讨论", "投票", "执行", "评审", "完成"].contains { value.contains($0) } }
+                print("NAV index=\(index) selected=\(attribute(button, kAXSelectedAttribute) as? Bool ?? false) session=\(texts.contains { $0.contains("条消息") }) roomCandidate=\(roomCandidate) frame=\(frame(button))")
+            }
+            return
+        }
         if CommandLine.arguments[2] == "composer-inspect" {
             for element in controls() where ["AXTextArea", "AXMenuButton", "AXButton"].contains(string(element, kAXRoleAttribute)) {
                 let name = string(element, kAXDescriptionAttribute)
@@ -81,8 +120,8 @@ private struct NativeSidebarChecks {
             }
             return
         }
-        if CommandLine.arguments[2] == "composer" {
-            try await checkComposer(app: app, root: root, window: window)
+        if ["composer", "navigation"].contains(CommandLine.arguments[2]) {
+            try await checkComposer(app: app, root: root, window: window, navigationCheck: CommandLine.arguments[2] == "navigation")
             return
         }
         func toolbarControls() -> [AXUIElement] {
@@ -146,24 +185,25 @@ private struct NativeSidebarChecks {
         print("PASS: 系统侧栏往返；过渡交由 macOS，本检查不测量动画帧率")
     }
 
-    @MainActor private static func checkComposer(app: NSRunningApplication, root: AXUIElement, window: AXUIElement) async throws {
+    @MainActor private static func checkComposer(app: NSRunningApplication, root: AXUIElement, window: AXUIElement, navigationCheck: Bool = false) async throws {
         func controls() -> [AXUIElement] { descendants(window) }
         func named(_ name: String) -> AXUIElement? {
             controls().first { string($0, kAXDescriptionAttribute) == name }
         }
         let editors = controls().filter { string($0, kAXRoleAttribute) == "AXTextArea" }
         try require(editors.count == 1, "只有一个输入框，避免误操作保活的隐藏面板")
-        guard let editor = editors.first, let model = named("模型与思考级别"), let send = named("发送消息") else {
+        guard var editor = editors.first, let model = named("模型与思考级别"), var send = named("发送消息") else {
             throw Failure(message: "当前不是可测试的普通会话")
         }
         try require(string(editor, kAXValueAttribute).isEmpty && named("停止生成") == nil,
                     "输入为空且当前会话未运行；不覆盖已有草稿")
         try require(attribute(send, kAXEnabledAttribute) as? Bool == false, "初始发送禁用，无待发文本或附件")
-          try require(attribute(model, kAXEnabledAttribute) as? Bool == true, "模型菜单可操作")
-          guard let navigation = named("工作区导航"), frame(navigation).width > 100,
+                try require(attribute(model, kAXEnabledAttribute) as? Bool == true, "模型菜单可操作")
+                guard let navigation = named("工作区导航"), frame(navigation).width > 100,
               frame(window).intersects(frame(navigation)) else { throw Failure(message: "请先展开侧栏") }
         try require(!descendants(root).contains { ["AXMenu", "AXSheet"].contains(string($0, kAXRoleAttribute)) }, "无已打开的菜单或表单")
         let modelBefore = string(model, kAXValueAttribute)
+        var returnToSession: AXUIElement?
         let marker = "NewPi 界面验收草稿（不发送）"
         var expected = marker
         var ownedTexts: Set<String> = [marker]
@@ -204,6 +244,18 @@ private struct NativeSidebarChecks {
             descendants(root).contains { string($0, kAXValueAttribute) == "用量明细" || string($0, kAXDescriptionAttribute) == "用量明细" }
         }
         func cleanup() async throws {
+            if let original = returnToSession {
+                guard AXUIElementPerformAction(original, kAXPressAction as CFString) == .success else {
+                    throw Failure(message: "无法返回原Session，保留其测试草稿，不清理其他输入")
+                }
+                try await wait("清理前已返回原Session") { attribute(original, kAXSelectedAttribute) as? Bool == true && named("模型与思考级别") != nil }
+                guard let restored = controls().first(where: { string($0, kAXRoleAttribute) == "AXTextArea" }), let restoredSend = named("发送消息") else {
+                    throw Failure(message: "返回后缺少输入框，保留测试草稿")
+                }
+                editor = restored
+                send = restoredSend
+                returnToSession = nil
+            }
             if openMenuPresent() || usagePresent() { try await key(53) }
             let current = string(editor, kAXValueAttribute)
             if current.isEmpty { return }
@@ -226,6 +278,36 @@ private struct NativeSidebarChecks {
             try await key(0, text: marker)
             try await wait("真实键盘输入已同步，发送按钮启用") {
                 string(editor, kAXValueAttribute) == marker && attribute(send, kAXEnabledAttribute) as? Bool == true
+            }
+            if navigationCheck {
+                guard let nav = named("工作区导航") else { throw Failure(message: "缺少导航区") }
+                let buttons = descendants(nav).filter { string($0, kAXRoleAttribute) == "AXButton" }
+                let selected = buttons.filter { attribute($0, kAXSelectedAttribute) as? Bool == true }
+                try require(selected.count == 1, "原会话唯一选中，可安全返回")
+                guard let original = selected.first else { throw Failure(message: "缺少原会话") }
+                let rooms = buttons.filter { button in
+                    let texts = descendants(button).flatMap { [string($0, kAXValueAttribute), string($0, kAXDescriptionAttribute), string($0, kAXHelpAttribute)] }
+                    return frame(button).height > 40 && frame(nav).contains(frame(button))
+                        && !texts.contains { $0.contains("条消息") }
+                        && texts.contains { value in ["讨论", "投票", "执行", "评审", "完成"].contains { value.contains($0) } }
+                }
+                guard let target = rooms.first else { throw Failure(message: "没有可唯一定位类型的可见聊天室行，不猜坐标") }
+                let originalEditor = editor
+                returnToSession = original
+                try require(AXUIElementPerformAction(target, kAXPressAction as CFString) == .success, "选择真实聊天室条目（不发言）")
+                try await wait("聊天室详情实际显示") { named("聊天室操作") != nil && named("模型与思考级别") == nil }
+                try require(AXUIElementPerformAction(original, kAXPressAction as CFString) == .success, "选择原Session条目")
+                try await wait("原Session重新显示") { attribute(original, kAXSelectedAttribute) as? Bool == true && named("模型与思考级别") != nil }
+                let restoredEditors = controls().filter { string($0, kAXRoleAttribute) == "AXTextArea" }
+                try require(restoredEditors.count == 1, "返回后只有原Session输入框")
+                guard let restored = restoredEditors.first, let restoredSend = named("发送消息") else { throw Failure(message: "缺少恢复输入框") }
+                editor = restored
+                send = restoredSend
+                returnToSession = nil
+                try await wait("正式Session→聊天室→Session：非空草稿恢复") { string(editor, kAXValueAttribute) == marker }
+                try require(!CFEqual(originalEditor, editor), "输入框确实重建，不是原实例隐藏再显示")
+                try focusEditor()
+                try await wait("重建后输入框获得焦点") { isEditorFocused() }
             }
             let beforeFrame = frame(editor)
             func sidebar() -> AXUIElement? {
@@ -265,7 +347,9 @@ private struct NativeSidebarChecks {
                 try await key(0, text: " ·继续")
                 try await wait("\(name) 关闭后可继续输入且原草稿保留") { string(editor, kAXValueAttribute) == expected }
             }
-            try require(string(model, kAXValueAttribute) == modelBefore, "模型与思考级别未改变")
+            // 跨类型导航会重建菜单，不能拿已卸载的 AX 对象校验当前模型。
+            try require(named("模型与思考级别").map { string($0, kAXValueAttribute) } == modelBefore,
+                        "当前模型与思考级别未改变")
         } catch {
             try await cleanup()
             throw error

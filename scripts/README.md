@@ -236,6 +236,15 @@ host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/idea
 	测试结束核验空输入与发送禁用；原有撤销历史不清除，因此 undo 栈可能包含测试编辑。
 	运行期间请勿同时操作目标窗口；不代表真实输入法候选确认、跨会话草稿、模型切换或全部键盘路线通过。
 
+收尾实机验收还可使用 `NativeSidebarChecks` 的以下模式（同样在 App 路径后指定）：
+- `navigation-inspect`：只读报告导航行的选中状态、类型候选与几何，不输出标题。
+- `navigation`：沿用 `composer` 空输入守卫，临时输入 Session 草稿，选择首个可见聊天室候选，
+	核验聊天室详情确实出现，再通过原选中 Session 行返回。断言输入框重建、草稿恢复、当前模型值不变；
+	随后执行菜单/续写及测试文本清理。不会编辑聊天室草稿或推进流程。需当前 UI 为中文、侧栏展开，运行期间不要同时操作。
+- `layout`：检查正式普通会话 1200/900pt 的主要控件边界和输入区，结束时恢复原窗口尺寸；不截图、不写草稿。
+
+2026-09-12 最新一轮结果及未覆盖项见[收尾验收记录](../docs/dev-notes/2026-09-12-workbench-acceptance.md)。
+
 ## 共用审批 UI 验证
 
 `bash scripts/validation/check-approval-ui.sh` 编译真实 `NewPiApprovalContent`，通过独立 Accessibility 进程操作按钮/菜单并验证回调范围：
