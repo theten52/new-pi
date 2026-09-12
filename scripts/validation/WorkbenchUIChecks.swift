@@ -578,7 +578,7 @@ struct WorkbenchUIChecks {
             model.hasMetrics = populated
             try await settle(web)
             try press(try findButton("用量", in: host), label: "用量")
-            try await eventually("真实用量 popover 可见", unavailable: true) { try usagePopover(excluding: window) != nil }
+            try await eventually("真实用量居中对话框可见", unavailable: true) { try usagePopover(excluding: window) != nil }
             guard let popover = try usagePopover(excluding: window), let content = popover.contentView else {
                 throw Unavailable("按压后未从公开 AX 找到用量弹层窗口")
             }
@@ -586,21 +586,21 @@ struct WorkbenchUIChecks {
                 $0.frame.width > 0 && $0.frame.height > 0 && popover.frame.contains($0.frame)
             }
             for title in titles {
-                try require(nodes.contains { $0.texts.contains(title) }, "用量 popover 可见指标：\(title)")
+                try require(nodes.contains { $0.texts.contains(title) }, "用量对话框可见指标：\(title)")
             }
             if populated {
                 for value in WorkbenchModel.metrics {
-                    try require(nodes.contains { $0.texts.contains(value) }, "用量 popover 显示传入值：\(value)")
+                    try require(nodes.contains { $0.texts.contains(value) }, "用量对话框显示传入值：\(value)")
                 }
             } else {
                 // 同一文字可能同时暴露 label/value，按真实 frame 去重，不把容器重复算成指标。
                 let emptyFrames = Set(nodes.filter { $0.texts.contains("暂无数据") }.map { NSStringFromRect($0.frame) })
-                try require(emptyFrames.count == 5, "用量 popover 五项暂无数据（实际 \(emptyFrames.count)）")
+                try require(emptyFrames.count == 7, "用量对话框七项暂无数据（实际 \(emptyFrames.count)）")
                 try require(!nodes.contains { !$0.texts.isDisjoint(with: Set(WorkbenchModel.metrics)) },
                     "无数据时不残留上次指标")
             }
-            try press(try findButton("用量", in: host), label: "用量（关闭）")
-            try await eventually("用量 popover 已关闭", unavailable: true) { try usagePopover(excluding: window) == nil }
+            try press(try findButton("关闭用量明细", in: content), label: "关闭用量明细")
+            try await eventually("用量对话框已关闭", unavailable: true) { try usagePopover(excluding: window) == nil }
         }
         model.hasMetrics = true
         try await settle(web)
@@ -867,7 +867,7 @@ struct WorkbenchUIChecks {
             let before = Set(NSApp.windows.filter(\.isVisible).map(ObjectIdentifier.init))
             try await click(point, in: anchor, window: window)
             var popover: NSWindow?
-            try await eventually("真实鼠标：用量 popover 打开") {
+            try await eventually("真实鼠标：用量居中对话框打开") {
                 popover = NSApp.windows.first { candidate in
                     candidate.isVisible && !before.contains(ObjectIdentifier(candidate)) && candidate.contentView.map {
                         publicTexts($0).contains("用量明细")
@@ -886,8 +886,10 @@ struct WorkbenchUIChecks {
                 try require(texts.contains("暂无数据") && !WorkbenchModel.metrics.contains(where: texts.contains),
                             "用量弹层无数据时不残留旧指标")
             }
-            try await click(point, in: anchor, window: window)
-            try await eventually("真实鼠标：用量 popover 关闭") { !popup.isVisible }
+            guard let dialog = content as? NewPiUsageBackdrop else { throw Failure("用量不是窗口级居中对话框") }
+            let close = dialog.closeButton
+            try await click(NSPoint(x: close.bounds.midX, y: close.bounds.midY), in: close, window: popup)
+            try await eventually("真实鼠标：用量对话框关闭") { !popup.isVisible }
         }
         model.hasMetrics = true
         print("PASS: native mouse send/stop/usage interactions; no AX permission, direct callbacks or model requests")

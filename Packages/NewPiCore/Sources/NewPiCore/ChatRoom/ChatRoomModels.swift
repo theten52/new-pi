@@ -332,6 +332,9 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
     /// 「处理详情」组（对齐 session 的按时间顺序交错展示）。nil = 旧格式/单条发言。
     public var speechID: String?
     public var termination: ChatRoomSpeechTermination?
+    /// 本段请求使用的模型快照；旧历史缺失时保持 nil，不从角色当前配置补写。
+    public var provider: String?
+    public var modelID: String?
     public var phase: ChatRoomPhase
     public var candidates: [CandidateOption]?  // 讨论末尾的候选方案
     public var toolCalls: [ChatRoomToolCall]?
@@ -346,6 +349,8 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         reasoningContent: String? = nil,
         speechID: String? = nil,
         termination: ChatRoomSpeechTermination? = nil,
+        provider: String? = nil,
+        modelID: String? = nil,
         phase: ChatRoomPhase,
         candidates: [CandidateOption]? = nil,
         toolCalls: [ChatRoomToolCall]? = nil,
@@ -359,6 +364,8 @@ public struct ChatRoomMessage: Codable, Identifiable, Sendable {
         self.reasoningContent = reasoningContent
         self.speechID = speechID
         self.termination = termination
+        self.provider = provider
+        self.modelID = modelID
         self.phase = phase
         self.candidates = candidates
         self.toolCalls = toolCalls
@@ -395,10 +402,16 @@ public struct ChatRoomToolResult: Codable, Sendable, Equatable {
     public var toolCallID: String
     public var output: String
     public var isError: Bool
+    /// nil = 旧历史/未知；空数组不代表 bash/MCP/子代理没有修改文件。
+    public var fileChanges: [ToolFileChange]?
+    public var durationSeconds: Double?
     
-    public init(toolCallID: String, output: String, isError: Bool = false) {
+    public init(toolCallID: String, output: String, isError: Bool = false,
+                fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil) {
         self.toolCallID = toolCallID
         self.output = output
         self.isError = isError
+        self.fileChanges = fileChanges
+        self.durationSeconds = durationSeconds
     }
 }

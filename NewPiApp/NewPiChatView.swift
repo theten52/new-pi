@@ -13,7 +13,9 @@ struct NewPiChatView: View {
         Group {
             if viewModel.keptAliveRuntimes.isEmpty {
                 // 未开项目 / 无任何会话时，保留"Open a project / Start a session"引导。
-                NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil,
+                    onSuggestion: { prompt in Task { await viewModel.fillSuggestedDraft(prompt) } },
+                    suggestionsEnabled: !viewModel.isSwitchingSession)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ZStack {
@@ -60,12 +62,14 @@ struct NewPiSessionPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .trailing) {
-                if runtime.transcript.isEmpty {
+                if runtime.transcript.isEmpty && runtime.pendingToolApproval == nil {
                     if viewModel.isSwitchingSession {
                         ProgressView("正在加载会话…")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil)
+                        NewPiChatEmptyStateView(hasProject: viewModel.projectURL != nil,
+                            onSuggestion: { prompt in draft.fillSuggestion(prompt) },
+                            suggestionsEnabled: draft.text.isEmpty && draft.attachments.isEmpty)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else {
@@ -82,6 +86,16 @@ struct NewPiSessionPanel: View {
                         restoreEntry: ScrollPositionStore.shared.entry(for: runtime.sessionID),
                         onFork: { index in
                             Task { await viewModel.forkFromMessage(index: index) }
+                        },
+                        onRetry: { id in
+                            viewModel.retryError(id: id, on: runtime)
+                        },
+                        approval: transcriptApproval,
+                        onApproval: { requestID, decision in
+                            viewModel.respondToTranscriptApproval(requestID: requestID, decision: decision, on: runtime)
+                        },
+                        approvalIsCurrent: { [request = runtime.pendingToolApproval] in
+                            viewModel.isActiveRuntime(runtime) && request != nil && runtime.pendingToolApproval == request
                         }
                     )
                     .overlay(alignment: .bottom) {
@@ -148,15 +162,24 @@ struct NewPiSessionPanel: View {
 
     /// 轮对话色调已上移为 NewPiViewModel.transcriptTintHues（流式直连路径共用）。
 
+    private var transcriptApproval: NewPiTranscriptApproval? {
+        guard let request = runtime.pendingToolApproval, let directory = viewModel.projectURL else { return nil }
+        return NewPiTranscriptApproval(runtimeIdentity: runtime.approvalRuntimeID.uuidString,
+            request: request, workingDirectory: directory)
+    }
+
     private var chatComposer: some View {
         VStack(spacing: 6) {
             NewPiAgentStatusBar(
                 presentation: viewModel.agentStatusPresentation,
+                detailText: runtime.turnSummaryText,
                 usageText: runtime.totalUsage.newPiCompactText,
                 lastTurnUsageText: runtime.lastTurnUsage.newPiCompactText,
                 cacheHitRateText: runtime.totalUsage.newPiCacheHitRateText,
                 contextText: viewModel.contextUsageText(for: runtime.lastTurnUsage),
-                tokenRateText: viewModel.tokenRateText
+                tokenRateText: viewModel.tokenRateText,
+                lastTurnInputTokens: runtime.lastTurnUsage.totalInputTokens > 0 ? runtime.lastTurnUsage.totalInputTokens : nil,
+                lastTurnOutputTokens: runtime.lastTurnUsage.outputTokens > 0 ? runtime.lastTurnUsage.outputTokens : nil
             )
 
             NewPiComposerSurface {

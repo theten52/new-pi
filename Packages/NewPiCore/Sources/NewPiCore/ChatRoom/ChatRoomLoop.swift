@@ -506,6 +506,8 @@ public final class ChatRoomLoop {
                 roleID: role.id,
                 content: "",
                 speechID: speechID,
+                provider: engine.model.provider,
+                modelID: engine.model.modelID,
                 phase: runtime.chatroom.currentPhase
             ))
         }
@@ -555,7 +557,9 @@ public final class ChatRoomLoop {
                 appendToolResult(ChatRoomToolResult(
                     toolCallID: id,
                     output: result.content,
-                    isError: result.isError
+                    isError: result.isError,
+                    fileChanges: result.fileChanges,
+                    durationSeconds: result.durationSeconds
                 ))
             case .messageEnd(.assistant(let assistant)):
                 buffer.completeMessage()
@@ -563,6 +567,8 @@ public final class ChatRoomLoop {
                 mutateCurrentSegment { message in
                     message.content = assistant.text
                     message.reasoningContent = assistant.reasoningContent.isEmpty ? nil : assistant.reasoningContent
+                    message.provider = assistant.provider
+                    message.modelID = assistant.modelID
                 }
                 for call in assistant.toolCalls {
                     appendToolCall(ChatRoomToolCall(id: call.id, name: call.name,
@@ -751,6 +757,8 @@ public final class ChatRoomLoop {
         )
 
         // 兼容 provider 路径也使用显式发言身份和合并器；中断时保留可见内容。
+        // 读取已构造 provider 的真实配置，profileID 不等于 provider 标识。
+        let modelSnapshot = provider.modelSnapshot
         let liveMessageID = UUID().uuidString
         let buffer = ChatRoomSpeechBuffer(runtime: runtime, speechID: liveMessageID)
         defer { buffer.finish() }
@@ -759,6 +767,8 @@ public final class ChatRoomLoop {
             chatroomID: runtime.chatroom.id,
             roleID: role.id,
             content: "",
+            provider: modelSnapshot?.provider,
+            modelID: modelSnapshot?.modelID,
             phase: runtime.chatroom.currentPhase
         ))
         let liveIndex = runtime.messages.count - 1
@@ -1065,6 +1075,9 @@ public struct ChatRoomLLMResponse: Sendable {
 // MARK: - ChatRoom LLM Provider 协议
 
 public protocol ChatRoomLLMProvider: Sendable {
+    /// 本实例实际请求使用的固定配置；仅供消息元数据，不从可变角色反查。
+    var modelSnapshot: ModelConfig? { get }
+
     func chat(
         systemPrompt: String,
         messages: [ChatRoomLLMMessage]
@@ -1081,6 +1094,9 @@ public protocol ChatRoomLLMProvider: Sendable {
 }
 
 public extension ChatRoomLLMProvider {
+    /// 保持旧自定义 provider / mock 源码兼容；未知模型不编造。
+    var modelSnapshot: ModelConfig? { nil }
+
     /// 默认实现：无事件，转发 chat——只实现 chat 的类型（测试 mock）由此满足要求。
     func chatWithEvents(
         systemPrompt: String,

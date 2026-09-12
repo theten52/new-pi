@@ -40,10 +40,17 @@ public enum AgentEvent: Sendable {
 public struct ToolResult: Sendable, Equatable {
     public var content: String
     public var isError: Bool
+    /// 仅本次工具实际写入的文件记录，不是工作区差异。
+    public var fileChanges: [ToolFileChange]
+    /// 单调时钟测得的执行耗时；未执行/未知为 nil，不含审批等待。
+    public var durationSeconds: Double?
 
-    public init(content: String, isError: Bool = false) {
+    public init(content: String, isError: Bool = false, fileChanges: [ToolFileChange] = [],
+                durationSeconds: Double? = nil) {
         self.content = content
         self.isError = isError
+        self.fileChanges = fileChanges
+        self.durationSeconds = durationSeconds
     }
 }
 

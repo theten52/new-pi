@@ -8,4 +8,12 @@ import Foundation
 final class NewPiComposerDraft: ObservableObject {
     @Published var text = ""
     @Published var attachments: [DraftImageAttachment] = []
+
+    /// 建议只进入空草稿，不覆盖文本、图片或触发发送。
+    @discardableResult
+    func fillSuggestion(_ prompt: String) -> Bool {
+        guard text.isEmpty, attachments.isEmpty, !prompt.isEmpty else { return false }
+        text = prompt
+        return true
+    }
 }

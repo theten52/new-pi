@@ -74,11 +74,24 @@ public struct SessionTranscriptError: Sendable, Codable, Equatable, Identifiable
     public let id: UUID
     public let message: String
     public let timestamp: Date
+    public var provider: String?
+    public var modelID: String?
+    public var errorTitle: String?
+    /// 仅展示元数据；旧错误缺省 nil，不推断可重试。
+    public var retryState: String?
+    public var retryLeafID: String?
 
-    public init(id: UUID = UUID(), message: String, timestamp: Date = Date()) {
+    public init(id: UUID = UUID(), message: String, timestamp: Date = Date(),
+                provider: String? = nil, modelID: String? = nil, errorTitle: String? = nil,
+                retryState: String? = nil, retryLeafID: String? = nil) {
         self.id = id
         self.message = message
         self.timestamp = timestamp
+        self.provider = provider
+        self.modelID = modelID
+        self.errorTitle = errorTitle
+        self.retryState = retryState
+        self.retryLeafID = retryLeafID
     }
 }
 

@@ -517,6 +517,8 @@ struct NewPiModelPickerMenu: View {
 /// 输入区的静态任务状态；用量明细按需展开，模型菜单保留给旧调用方。
 struct NewPiAgentStatusBar: View {
     let presentation: NewPiAgentStatusPresentation
+    /// 主状态后的辅助信息；窄栏优先压缩，不挤占状态与用量。
+    var detailText: String? = nil
     /// 累计用量文本（如 "↑12.3k ↓4.5k"）；nil 时显示暂无数据。
     var usageText: String? = nil
     /// 最近一轮用量文本。
@@ -529,8 +531,9 @@ struct NewPiAgentStatusBar: View {
     var tokenRateText: String? = nil
     /// 模型选择菜单；nil 时隐藏（如 spike 窗口）。
     var modelPicker: NewPiModelPickerMenu? = nil
-
-    @State private var isUsagePresented = false
+    /// 最近一轮的输入/输出 token；不能传会话累计值，不解析 usageText 猜测。
+    var lastTurnInputTokens: Int? = nil
+    var lastTurnOutputTokens: Int? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -542,28 +545,26 @@ struct NewPiAgentStatusBar: View {
                 .foregroundStyle(presentation.foregroundColor)
                 .help(presentation.label)
                 .layoutPriority(1)
+            if let detailText {
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(detailText)
+                    .layoutPriority(-1)
+            }
             Spacer(minLength: 0)
             if let modelPicker {
                 modelPicker
             }
-            Button {
-                isUsagePresented.toggle()
-            } label: {
-                Text("用量")
-                    .font(.caption)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 3)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
+            NewPiUsageButton(data: NewPiUsageDialogData(
+                usageText: usageText, lastTurnUsageText: lastTurnUsageText,
+                cacheHitRateText: cacheHitRateText, contextText: contextText,
+                tokenRateText: tokenRateText, lastTurnInputTokens: lastTurnInputTokens,
+                lastTurnOutputTokens: lastTurnOutputTokens))
+            .frame(width: 44, height: 24)
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
-            .accessibilityLabel("用量")
-            .accessibilityHint("显示本会话用量明细")
-            .help("显示本会话用量明细")
-            .popover(isPresented: $isUsagePresented, arrowEdge: .bottom) {
-                usageDetails
-            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -571,32 +572,525 @@ struct NewPiAgentStatusBar: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var usageDetails: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("用量明细")
-                .font(.headline)
-            usageRow("累计用量", value: usageText, detail: "本会话累计 token（↑ 输入 / ↓ 输出）")
-            usageRow("最近一轮", value: lastTurnUsageText, detail: "最近一轮 token（↑ 输入 / ↓ 输出）")
-            usageRow("缓存命中率", value: cacheHitRateText, detail: "命中缓存的输入 token / 总输入 token")
-            usageRow("上下文占用", value: contextText, detail: "调用方提供的当前上下文占用")
-            usageRow("输出速率", value: tokenRateText, detail: "流式文本估算的 token/秒")
-        }
-        .padding(16)
-        .frame(width: 320, alignment: .leading)
+}
+
+/// 只接收展示快照，不持有会话、运行时或发送/停止回调。
+struct NewPiUsageDialogData: Equatable {
+    var usageText: String? = nil
+    var lastTurnUsageText: String? = nil
+    var cacheHitRateText: String? = nil
+    var contextText: String? = nil
+    var tokenRateText: String? = nil
+    var lastTurnInputTokens: Int? = nil
+    var lastTurnOutputTokens: Int? = nil
+
+    static func display(_ text: String?) -> String {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "暂无数据" }
+        return text
     }
 
-    private func usageRow(_ title: String, value: String?, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(NewPiWorkbenchStyle.secondaryText)
-            Text(value.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? "暂无数据")
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(NewPiWorkbenchStyle.primaryText)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+    private func tokens(_ value: Int?) -> String {
+        guard let value, value >= 0 else { return "暂无数据" }
+        return value.formatted(.number.grouping(.automatic))
+    }
+
+    var metrics: [(String, String)] {
+        [("输入 tokens · 最近一轮", tokens(lastTurnInputTokens)),
+         ("输出 tokens · 最近一轮", tokens(lastTurnOutputTokens)),
+         ("缓存命中率", Self.display(cacheHitRateText)),
+         ("上下文占用", Self.display(contextText))]
+    }
+
+    var summaries: [(String, String)] {
+        [("累计用量", Self.display(usageText)), ("最近一轮", Self.display(lastTurnUsageText)),
+         ("输出速率", Self.display(tokenRateText))]
+    }
+}
+
+/// 原生按钮直接提供所属 window；独立状态栏也可用，不需要 root/environment 接线。
+private struct NewPiUsageButton: NSViewRepresentable {
+    let data: NewPiUsageDialogData
+
+    func makeNSView(context: Context) -> NewPiUsageOpener {
+        NewPiUsageOpener(frame: .zero)
+    }
+
+    func updateNSView(_ view: NewPiUsageOpener, context: Context) {
+        view.data = data
+        view.presentation.update(data)
+    }
+
+    static func dismantleNSView(_ view: NewPiUsageOpener, coordinator: ()) {
+        view.presentation.dismiss(restoreFocus: false)
+    }
+}
+
+final class NewPiUsageOpener: NSButton {
+    var data = NewPiUsageDialogData()
+    let presentation = NewPiUsagePresentation()
+    private weak var mouseResponder: NSResponder?
+    private var trackingMouse = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        title = "用量"
+        isBordered = false
+        font = .systemFont(ofSize: 11)
+        contentTintColor = .secondaryLabelColor
+        target = self
+        action = #selector(openUsage)
+        toolTip = "显示本会话用量明细"
+        setAccessibilityLabel("用量")
+        setAccessibilityIdentifier("newpi.usage.open")
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var acceptsFirstResponder: Bool { !trackingMouse }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        // 在 NSButton tracking 可能改变焦点前保存。绝不 endEditing/unmarkText。
+        mouseResponder = window?.firstResponder
+        trackingMouse = true
+        defer { trackingMouse = false; mouseResponder = nil }
+        super.mouseDown(with: event)
+    }
+
+    @objc private func openUsage() {
+        presentation.present(from: self, data: data, restoring: mouseResponder ?? window?.firstResponder)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if presentation.parent != nil, window !== presentation.parent {
+            presentation.dismiss(restoreFocus: false)
         }
-        .help(detail)
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        presentation.dismiss(restoreFocus: false)
+    }
+}
+
+/// 每个打开按钮拥有自己的短生命周期控制器；同一个实际 window 最多一个用量面板。
+/// 非激活子面板让父 NSTextView 保持 firstResponder/marked text；没有 runModal，后台生成继续。
+@MainActor
+final class NewPiUsagePresentation: NSObject {
+    private(set) weak var parent: NSWindow?
+    private weak var opener: NSButton?
+    private weak var previousResponder: NSResponder?
+    private weak var hiddenContent: NSView?
+    private var contentWasHidden = false
+    private var previousAXChildren: [Any]?
+    private var eventMonitor: Any?
+    private var blur: NSVisualEffectView?
+    private var dimTint: NewPiUsageDimView?
+    private var contentPostedFrameChanges = false
+    private var contentPostedBoundsChanges = false
+    private(set) var panel: NewPiUsagePanel?
+
+    func present(from button: NSButton, data: NewPiUsageDialogData, restoring responder: NSResponder?) {
+        guard panel == nil, let window = button.window, window.isVisible, window.alphaValue > 0,
+              !button.isHiddenOrHasHiddenAncestor, !button.visibleRect.isEmpty,
+              let content = window.contentView else { return }
+        // 保活容器不显示也不能被一次 AX 操作意外打开；不枚举 NSApp/keyWindow。
+        guard !window.isMiniaturized, !(window is NSPanel) else { return }
+        if let existing = window.childWindows?.first(where: { $0 is NewPiUsagePanel }) {
+            existing.makeKey()
+            return
+        }
+        parent = window
+        opener = button
+        previousResponder = responder
+        hiddenContent = content
+        contentWasHidden = content.isAccessibilityHidden()
+        previousAXChildren = window.accessibilityChildren()
+        // 在父窗口内部取样正文；透明子面板只负责卡片、键盘焦点和输入隔离。
+        let blur = NSVisualEffectView()
+        blur.material = .hudWindow
+        blur.blendingMode = .withinWindow
+        blur.state = .active
+        blur.appearance = NSAppearance(named: .darkAqua)
+        blur.setAccessibilityHidden(true)
+        let dimTint = NewPiUsageDimView()
+        dimTint.setAccessibilityHidden(true)
+        content.addSubview(blur, positioned: .above, relativeTo: nil)
+        content.addSubview(dimTint, positioned: .above, relativeTo: blur)
+        self.blur = blur
+        self.dimTint = dimTint
+        contentPostedFrameChanges = content.postsFrameChangedNotifications
+        contentPostedBoundsChanges = content.postsBoundsChangedNotifications
+        content.postsFrameChangedNotifications = true
+        content.postsBoundsChangedNotifications = true
+        let dialog = NewPiUsagePanel(contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        dialog.owner = self
+        dialog.isReleasedWhenClosed = false
+        dialog.isOpaque = false
+        dialog.backgroundColor = .clear
+        dialog.hasShadow = false
+        dialog.hidesOnDeactivate = false
+        dialog.isFloatingPanel = false
+        dialog.animationBehavior = .none
+        dialog.appearanceSource = window
+        dialog.tabbingMode = .disallowed
+        dialog.collectionBehavior = [.fullScreenAuxiliary]
+        dialog.setAccessibilityLabel("用量明细")
+        dialog.setAccessibilitySubrole(.dialog)
+        dialog.setAccessibilityModal(true)
+        let backdrop = NewPiUsageBackdrop(data: data)
+        backdrop.owner = self
+        dialog.contentView = backdrop
+        dialog.setAccessibilityChildren([backdrop.dialog])
+        dialog.setAccessibilityCloseButton(backdrop.closeButton)
+        panel = dialog
+        synchronize()
+        content.setAccessibilityHidden(true)
+        window.setAccessibilityChildren([dialog])
+        window.addChildWindow(dialog, ordered: .above)
+        dialog.makeKeyAndOrderFront(nil)
+        dialog.makeFirstResponder(backdrop.closeButton)
+        NSAccessibility.post(element: dialog, notification: .created)
+        NSAccessibility.post(element: backdrop.closeButton, notification: .focusedUIElementChanged)
+
+        let center = NotificationCenter.default
+        for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
+            center.addObserver(self, selector: #selector(parentChanged), name: name, object: content)
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(parentChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        for name in [NSWindow.didResizeNotification, NSWindow.didMoveNotification,
+                     NSWindow.didChangeOcclusionStateNotification, NSWindow.didEndLiveResizeNotification] {
+            center.addObserver(self, selector: #selector(parentChanged), name: name, object: window)
+        }
+        for name in [NSWindow.willCloseNotification, NSWindow.willMiniaturizeNotification] {
+            center.addObserver(self, selector: #selector(parentClosed), name: name, object: window)
+        }
+        // 仅过滤本 window/panel 的事件；没有静态回调、强捕获或全局 modal session。
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged,
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown,
+            .otherMouseUp, .scrollWheel, .leftMouseDragged]) { [weak self] event in
+            let discard = MainActor.assumeIsolated {
+                guard let self else { return false }
+                return self.filter(event) == nil
+            }
+            return discard ? nil : event
+        }
+    }
+
+    func update(_ data: NewPiUsageDialogData) {
+        guard let backdrop = panel?.contentView as? NewPiUsageBackdrop else { return }
+        backdrop.update(data)
+        synchronize()
+    }
+
+    @objc private func parentChanged() { synchronize() }
+    @objc private func parentClosed() { dismiss(restoreFocus: false) }
+
+    private func synchronize() {
+        guard let parent, let panel, let content = parent.contentView else { return }
+        guard parent.isVisible, !parent.isMiniaturized, opener?.window === parent,
+              opener?.isHiddenOrHasHiddenAncestor == false else {
+            dismiss(restoreFocus: false)
+            return
+        }
+        // fullSizeContentView 的 bounds 包含标题栏时使用 contentLayoutRect，避免覆盖系统窗口边缘。
+        let rect = content.convert(content.bounds, to: nil).intersection(parent.contentLayoutRect)
+        let overlayRect = content.convert(rect, from: nil)
+        blur?.frame = overlayRect
+        blur?.isHidden = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        dimTint?.frame = overlayRect
+        dimTint?.needsDisplay = true
+        let screenRect = parent.convertToScreen(rect)
+        if panel.frame != screenRect { panel.setFrame(screenRect, display: true) }
+        panel.contentView?.needsLayout = true
+    }
+
+    private func filter(_ event: NSEvent) -> NSEvent? {
+        guard let parent, let panel else { return event }
+        let belongs = event.window === parent || event.window === panel
+            || (event.window == nil && panel.isKeyWindow)
+        guard belongs else { return event }
+        switch event.type {
+        case .keyDown:
+            if event.keyCode == 53 { dismiss(); return nil }
+            if event.keyCode == 48 {
+                panel.makeFirstResponder((panel.contentView as? NewPiUsageBackdrop)?.closeButton)
+            } else if event.keyCode == 49 || event.keyCode == 36 {
+                // 唯一可操作焦点是关闭；Return 绝不到达底层发送/停止。
+                dismiss()
+            } else {
+                (panel.contentView as? NewPiUsageBackdrop)?.scroll(keyCode: event.keyCode)
+            }
+            return nil
+        case .keyUp, .flagsChanged: return nil
+        default:
+            // 子窗口覆盖内容区；额外阻挡发往父 toolbar/旧输入框的事件。
+            return event.window === parent ? nil : event
+        }
+    }
+
+    func dismiss(restoreFocus: Bool = true) {
+        guard let dialog = panel else { return }
+        let window = parent
+        let restore = previousResponder
+        let button = opener
+        let wasKey = dialog.isKeyWindow
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        eventMonitor = nil
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        // 只移除本控制器持有的两层，不枚举删除业务方或其他控制器的 subviews。
+        blur?.removeFromSuperview()
+        dimTint?.removeFromSuperview()
+        blur = nil
+        dimTint = nil
+        hiddenContent?.postsFrameChangedNotifications = contentPostedFrameChanges
+        hiddenContent?.postsBoundsChangedNotifications = contentPostedBoundsChanges
+        hiddenContent?.setAccessibilityHidden(contentWasHidden)
+        window?.setAccessibilityChildren(previousAXChildren)
+        previousAXChildren = nil
+        panel = nil
+        dialog.owner = nil
+        (dialog.contentView as? NewPiUsageBackdrop)?.owner = nil
+        window?.removeChildWindow(dialog)
+        dialog.orderOut(nil)
+        dialog.close()
+        parent = nil
+        opener = nil
+        previousResponder = nil
+        hiddenContent = nil
+        if restoreFocus, wasKey, let window, window.isVisible {
+            window.makeKey()
+            if let view = restore as? NSView, view.window === window {
+                // 未变的 responder 不重复 resign/become，保留输入法组合态与选区。
+                if window.firstResponder !== view { window.makeFirstResponder(view) }
+                NSAccessibility.post(element: view, notification: .focusedUIElementChanged)
+            } else if let button, button.window === window {
+                window.makeFirstResponder(button)
+                NSAccessibility.post(element: button, notification: .focusedUIElementChanged)
+            }
+        }
+    }
+}
+
+final class NewPiUsagePanel: NSPanel {
+    weak var owner: NewPiUsagePresentation?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { owner?.dismiss() }
+    override func accessibilityPerformCancel() -> Bool { owner?.dismiss(); return true }
+}
+
+/// draw 使用真实原生像素；不依赖会影响布局的 SwiftUI overlay 或隐式动画。
+class NewPiUsageRoundedSurface: NSView {
+    var radius: CGFloat = 8
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius)
+        NSColor(NewPiWorkbenchStyle.surface).setFill()
+        path.fill()
+        let highContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            || effectiveAppearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua,
+                .accessibilityHighContrastDarkAqua]) == .accessibilityHighContrastAqua
+            || effectiveAppearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua,
+                .accessibilityHighContrastDarkAqua]) == .accessibilityHighContrastDarkAqua
+        (highContrast ? NSColor.labelColor : NSColor(NewPiWorkbenchStyle.line)).setStroke()
+        path.lineWidth = highContrast ? 2 : 1
+        path.stroke()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
+final class NewPiUsageMetricCard: NewPiUsageRoundedSurface {
+    let titleField = NSTextField(wrappingLabelWithString: "")
+    let valueField = NSTextField(wrappingLabelWithString: "")
+
+    init(title: String, value: String) {
+        super.init(frame: .zero)
+        titleField.stringValue = title
+        titleField.font = .systemFont(ofSize: 11)
+        titleField.textColor = .secondaryLabelColor
+        valueField.stringValue = value
+        valueField.font = .monospacedDigitSystemFont(ofSize: 24, weight: .medium)
+        valueField.lineBreakMode = .byCharWrapping
+        addSubview(titleField)
+        addSubview(valueField)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func height(for width: CGFloat) -> CGFloat {
+        32 + NewPiUsageBackdrop.height(titleField, width: width - 28)
+            + NewPiUsageBackdrop.height(valueField, width: width - 28)
+    }
+
+    override func layout() {
+        super.layout()
+        let width = max(1, bounds.width - 28)
+        let titleHeight = NewPiUsageBackdrop.height(titleField, width: width)
+        titleField.frame = NSRect(x: 14, y: 13, width: width, height: titleHeight)
+        valueField.frame = NSRect(x: 14, y: titleField.frame.maxY + 5, width: width,
+            height: NewPiUsageBackdrop.height(valueField, width: width))
+    }
+}
+
+final class NewPiUsageBackdrop: NSView {
+    weak var owner: NewPiUsagePresentation?
+    let dialog = NewPiUsageRoundedSurface()
+    let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭用量明细")!,
+        target: nil, action: nil)
+    let scrollView = NSScrollView()
+    private let titleField = NSTextField(labelWithString: "用量明细")
+    private let separator = NSBox()
+    private let document = NewPiUsageFlippedView()
+    private let note = NSTextField(wrappingLabelWithString: "当前会话的真实用量。输入、输出卡片仅表示最近一轮；未返回的指标显示暂无数据。")
+    private var cards: [NewPiUsageMetricCard] = []
+    private var summaries: [(NSTextField, NSTextField)] = []
+    private var data: NewPiUsageDialogData
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    init(data: NewPiUsageDialogData) {
+        self.data = data
+        super.init(frame: .zero)
+        addSubview(dialog)
+        dialog.radius = 14
+        dialog.setAccessibilityElement(true)
+        dialog.setAccessibilityRole(.group)
+        dialog.setAccessibilityLabel("用量明细")
+        titleField.font = .systemFont(ofSize: 15, weight: .semibold)
+        dialog.addSubview(titleField)
+        separator.boxType = .separator
+        dialog.addSubview(separator)
+        closeButton.isBordered = false
+        closeButton.target = self
+        closeButton.action = #selector(closeUsage)
+        closeButton.setAccessibilityLabel("关闭用量明细")
+        closeButton.setAccessibilityIdentifier("newpi.usage.close")
+        closeButton.toolTip = "关闭用量明细（Escape）"
+        dialog.addSubview(closeButton)
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = document
+        dialog.addSubview(scrollView)
+        note.font = .systemFont(ofSize: 12)
+        note.textColor = .secondaryLabelColor
+        document.addSubview(note)
+        for (title, value) in data.metrics {
+            let card = NewPiUsageMetricCard(title: title, value: value)
+            cards.append(card)
+            document.addSubview(card)
+        }
+        for (title, value) in data.summaries {
+            let label = NSTextField(wrappingLabelWithString: title)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            let field = NSTextField(wrappingLabelWithString: value)
+            field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            summaries.append((label, field))
+            document.addSubview(label)
+            document.addSubview(field)
+        }
+        dialog.setAccessibilityChildren([titleField, closeButton, scrollView])
+        // 无过渡/位移动画，reduced motion 不需要额外分支；低透明度偏好也有不透明兜底。
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(accessibilityChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func closeUsage() { owner?.dismiss() }
+    @objc private func accessibilityChanged() { needsLayout = true; dialog.needsDisplay = true }
+
+    func update(_ data: NewPiUsageDialogData) {
+        guard self.data != data else { return }
+        self.data = data
+        for (card, metric) in zip(cards, data.metrics) { card.valueField.stringValue = metric.1 }
+        for (fields, summary) in zip(summaries, data.summaries) { fields.1.stringValue = summary.1 }
+        needsLayout = true
+        NSAccessibility.post(element: dialog, notification: .layoutChanged)
+    }
+
+    static func height(_ field: NSTextField, width: CGFloat) -> CGFloat {
+        ceil(field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: max(1, width), height: 100_000)).height ?? 20)
+    }
+
+    override func layout() {
+        super.layout()
+        let width = max(1, min(600, bounds.width - 40))
+        let inner = max(1, width - 48)
+        let cardWidth = max(1, (inner - 12) / 2)
+        note.frame = NSRect(x: 24, y: 16, width: inner, height: Self.height(note, width: inner))
+        var y = note.frame.maxY + 20
+        for row in 0..<2 {
+            let height = max(cards[row * 2].height(for: cardWidth), cards[row * 2 + 1].height(for: cardWidth))
+            for column in 0..<2 {
+                cards[row * 2 + column].frame = NSRect(x: 24 + CGFloat(column) * (cardWidth + 12),
+                    y: y, width: cardWidth, height: height)
+            }
+            y += height + 12
+        }
+        y += 4
+        for (label, field) in summaries {
+            label.frame = NSRect(x: 24, y: y, width: inner, height: Self.height(label, width: inner))
+            field.frame = NSRect(x: 24, y: label.frame.maxY + 4, width: inner, height: Self.height(field, width: inner))
+            y = field.frame.maxY + 14
+        }
+        let bodyHeight = y + 10
+        let height = max(64, min(bodyHeight + 62, bounds.height * 0.8))
+        dialog.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2,
+            width: width, height: height)
+        titleField.frame = NSRect(x: 22, y: 21, width: max(1, width - 90), height: 22)
+        closeButton.frame = NSRect(x: width - 52, y: 16, width: 30, height: 30)
+        separator.frame = NSRect(x: 1, y: 61, width: max(1, width - 2), height: 1)
+        scrollView.frame = NSRect(x: 0, y: 62, width: width, height: max(1, height - 62))
+        document.frame = NSRect(x: 0, y: 0, width: width, height: bodyHeight)
+        cards.forEach { $0.needsLayout = true; $0.needsDisplay = true }
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        return dialog.frame.contains(local) ? super.hitTest(point) : self
+    }
+    override func mouseDown(with event: NSEvent) {
+        if !dialog.frame.contains(convert(event.locationInWindow, from: nil)) { owner?.dismiss() }
+    }
+
+    func scroll(keyCode: UInt16) {
+        let clip = scrollView.contentView
+        let maximum = max(0, document.bounds.height - clip.bounds.height)
+        let delta: CGFloat
+        switch keyCode {
+        case 125: delta = 40
+        case 126: delta = -40
+        case 121: delta = clip.bounds.height * 0.8
+        case 116: delta = -clip.bounds.height * 0.8
+        case 119: delta = maximum
+        case 115: delta = -maximum
+        default: return
+        }
+        clip.scroll(to: NSPoint(x: 0, y: min(maximum, max(0, clip.bounds.minY + delta))))
+        scrollView.reflectScrolledClipView(clip)
+    }
+}
+
+private final class NewPiUsageFlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class NewPiUsageDimView: NSView {
+    override var isOpaque: Bool { false }
+    override func draw(_ dirtyRect: NSRect) {
+        let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        NSColor(srgbRed: 0.09, green: 0.13, blue: 0.11, alpha: opaque ? 1 : 0.4).setFill()
+        bounds.fill(using: .sourceOver)
     }
 }
 

@@ -561,6 +561,10 @@ struct NewPiRootView: View {
 
     private var headerActions: some View {
         HStack(spacing: 14) {
+            NewPiChangesButton(
+                directory: selectedChatroom.map { URL(fileURLWithPath: $0.projectPath, isDirectory: true) } ?? viewModel.projectURL,
+                refreshToken: viewModel.isStreaming ? 1 : viewModel.transcript.count
+            )
             if let chatroom = selectedChatroom {
                 Menu {
                     Button("导出 Markdown…") {
@@ -676,10 +680,6 @@ struct NewPiRootView: View {
             Button("好", role: .cancel) { exportError = nil }
         } message: {
             Text(exportError ?? "")
-        }
-        .sheet(item: $viewModel.pendingToolApproval) { request in
-            NewPiToolApprovalSheet(viewModel: viewModel, request: request)
-                .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showingCreateChatroom) {
             CreateChatRoomView(viewModel: viewModel) { chatroom in
@@ -1631,9 +1631,10 @@ struct ChatRoomDetailView: View {
         }
         .background(NewPiWorkbenchStyle.surface)
         // 历史消息在控制器创建时加载；runningTask 不随视图显隐取消——审批 continuation
-        // 由控制器持有的 approvalManager 承载，切走时挂起、切回时审批 sheet 自动重弹。
+        // 由控制器持有的 approvalManager 承载，切走时挂起、切回时内联卡自动恢复。
         // 发言收尾的落底对齐在渲染器 JS 侧完成（forkLock 翻转时的 RAF 追平）。
-        .onAppear { controller.refreshWorkingDirectory() }
+        .onAppear { controller.refreshWorkingDirectory(); docController.setVisible(true) }
+        .onDisappear { docController.setVisible(false) }
         .alert(
             "聊天室提示",
             isPresented: Binding(
@@ -1644,15 +1645,6 @@ struct ChatRoomDetailView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(controller.flowError ?? "")
-        }
-        .sheet(item: pendingApprovalItem) { approval in
-            ChatRoomApprovalSheet(
-                approval: approval,
-                chatroom: runtime.chatroom,
-                onApprove: { scope in approvalManager.approve(id: approval.id, scope: scope) },
-                onReject: { approvalManager.reject(id: approval.id) }
-            )
-            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showingEditConfig) {
             EditChatRoomView(
@@ -1667,14 +1659,6 @@ struct ChatRoomDetailView: View {
         }
     }
 
-    /// 待审批项（取队首；审批完成后自动弹出下一个）
-    private var pendingApprovalItem: Binding<ChatRoomApprovalManager.PendingApproval?> {
-        Binding(
-            get: { approvalManager.pendingApprovals.first },
-            set: { _ in }
-        )
-    }
-    
     // MARK: - 阶段与角色栏
 
     private var phaseTitle: String {
@@ -1761,6 +1745,12 @@ struct ChatRoomDetailView: View {
         // 支持 speechID 详情组；messageIndex 为 nil，因此聊天室不显示 Fork 按钮。
         let snapshot = controller.transcriptSnapshot()
         let chatroomUUID = UUID(uuidString: runtime.chatroom.id)
+        let pending = approvalManager.pendingApprovals.first
+        let approval = pending.map {
+            NewPiTranscriptApproval(runtimeIdentity: String(describing: ObjectIdentifier(approvalManager)),
+                request: $0.request, workingDirectory: URL(fileURLWithPath: runtime.chatroom.projectPath),
+                role: $0.roleName.isEmpty ? "未知角色" : $0.roleName, isRoom: true)
+        }
         return ZStack(alignment: .bottom) {
             NewPiTranscriptDocumentView(
                 transcript: snapshot.items,
@@ -1770,7 +1760,17 @@ struct ChatRoomDetailView: View {
                 controller: docController,
                 tintHues: snapshot.tintHues,
                 restoreEntry: chatroomUUID.flatMap { ScrollPositionStore.shared.entry(for: $0) },
-                onFork: nil
+                onFork: nil,
+                approval: approval,
+                onApproval: { requestID, decision in
+                    guard let pending, approvalManager.pendingApprovals.first?.id == requestID,
+                          approvalManager.pendingApprovals.first?.request == pending.request else { return }
+                    if decision.approved { approvalManager.approve(id: requestID, scope: decision.scope) }
+                    else { approvalManager.reject(id: requestID) }
+                },
+                approvalIsCurrent: {
+                    pending != nil && approvalManager.pendingApprovals.first?.request == pending?.request
+                }
             )
             .overlay(alignment: .bottom) {
                 if !docController.isNearBottom {
@@ -1820,7 +1820,10 @@ struct ChatRoomDetailView: View {
             NewPiAgentStatusBar(
                 presentation: chatroomStatusPresentation,
                 usageText: runtime.usage.newPiCompactText,
-                contextText: chatroomContextText
+                contextText: chatroomContextText,
+                // ChatRoomMessage 尚无逐条 usage；绝不把累计值伪装成最近一轮。
+                lastTurnInputTokens: nil,
+                lastTurnOutputTokens: nil
             )
 
             NewPiComposerSurface {

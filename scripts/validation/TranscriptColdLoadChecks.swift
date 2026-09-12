@@ -30,6 +30,14 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     var shellMS = 0.0
     var nativeMS = 0.0
     var started = ContinuousClock.now
+    var retryMessageCount = 0
+    var retrySubframeCount = 0
+    var forkMessageCount = 0
+    var forkSubframeCount = 0
+    var approvalMessages: [[String: Any]] = []
+    var approvalSubframeCount = 0
+    var captureOnlyApprovalMessages = false
+    var copiedTexts: [String] = []
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
@@ -37,7 +45,7 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         super.init()
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        for name in ["uiTiming", "scrollState", "turnOffsets", "rendererError"] {
+        for name in ["uiTiming", "scrollState", "turnOffsets", "rendererError", "retryError", "fork", "transcriptApproval", "copyText"] {
             config.userContentController.add(self, name: name)
         }
         config.userContentController.addUserScript(WKUserScript(source: """
@@ -85,6 +93,23 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "copyText" {
+            if let text = message.body as? String { copiedTexts.append(text) }
+            return // 合成复制测试不写用户剪贴板。
+        }
+        if message.name == "transcriptApproval" {
+            if let body = message.body as? [String: Any] { approvalMessages.append(body) }
+            if !message.frameInfo.isMainFrame { approvalSubframeCount += 1 }
+            if captureOnlyApprovalMessages { return }
+        }
+        if message.name == "retryError" {
+            retryMessageCount += 1
+            if !message.frameInfo.isMainFrame { retrySubframeCount += 1 }
+        }
+        if message.name == "fork" {
+            forkMessageCount += 1
+            if !message.frameInfo.isMainFrame { forkSubframeCount += 1 }
+        }
         if message.name == "uiTiming", let body = message.body as? [String: Any] {
             if body["firstTextFrameRunID"] != nil {
                 coordinator.userContentController(userContentController, didReceive: message)
@@ -99,7 +124,7 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
 
     func close() {
-        for name in ["uiTiming", "scrollState", "turnOffsets", "rendererError"] {
+        for name in ["uiTiming", "scrollState", "turnOffsets", "rendererError", "retryError", "fork", "transcriptApproval", "copyText"] {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: name)
         }
         webView.navigationDelegate = nil
@@ -130,6 +155,10 @@ struct TranscriptColdLoadChecks {
 
     @MainActor
     static func run() async throws {
+        try await checkTranscriptApprovalEndToEnd()
+        if ProcessInfo.processInfo.environment["NEWPI_APPROVAL_E2E_ONLY"] == "1" { return }
+        try await checkMetadataAndRetryBridge()
+        try await checkTranscriptActionsBridge()
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: temp) }
         let disk = ChatRoomStore(baseDirectory: temp)

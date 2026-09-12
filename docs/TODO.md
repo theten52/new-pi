@@ -1,16 +1,29 @@
 # NewPi Development TODOs
 
-当前待办与已完成项索引。2026-09-12 清理历史状态；`open` / `deferred` 表示仍需处理，
+当前待办与已完成项索引。2026-09-13 核对工作台最新代码与日志；`open` / `deferred` 表示仍需处理，
 `待验收` 表示已有实现但未确认满足原始体验要求，`待复核` 不等于问题仍存在。
 旧设计和审查证据保留在链接文档中，不能直接当作当前 backlog；分类入口见 [文档索引](README.md)。
 
 ## UI 后续 — 2026-09-12 A 文档工作台
 
+### 2026-09-13 用户决定与交互修正
+
+- **文件编辑快照暂停修改**：用户明确表示该功能之后可能移除；保持现状，不继续扩展捕获、差异或历史快照能力，也不自行删除已有记录。本轮复制去重未修改快照逻辑。
+- **回答复制去重已实现**：有最终回答 footer 时顶部仅保留原有 Fork，底部保留「复制回答」；流式/中断/中间回答及摘要无 footer 时继续提供顶部复制，用户消息不变。状态切换与元数据更新不会重复或丢失复制入口。
+- **设置 Escape 已实现**：独立 Settings 窗口原先没有取消关闭处理；现通过窗口 responder chain 正常关闭，五个 Provider/模板编辑取消按钮显式绑定 Escape。优先取消当前子 sheet/组合输入，不保存编辑弹窗草稿；主设置已即时应用的选项不回滚。没有全局键盘监听。
+- **本轮验证**：复制 DOM 227 条断言及 cold 回归通过；Settings Escape 139 条真实事件合成检查通过；完整 Debug build 通过。真实 IME 候选窗、菜单 tracking、完整 Settings ViewModel 集成仍待人工确认。本轮未提交、未打包，`dist` 不含这次复制/设置修正。
+- **六项当前结论**：失败恢复（Session 安全最新节点）、顶部只读 Git diff、三建议、真实消息元数据、随文审批均已接入；步骤/结果摘要仅完成工具执行统计，计划总步数/百分比/测试通过数未实现。Room 重试未实现；用量居中弹窗已接入，未知数据不补造。代码接入不等于整款 App 人工验收全部关闭。
+
 ### BACKLOG-WORKBENCH-PROTOTYPE-GAPS — 原型功能缺口
 
-- **状态**：open。A 阅读面/输入区/导航外壳已接入，**原型并未全部实现**；六场景逐项核对见[差距审计](dev-notes/2026-09-12-prototype-production-gap-audit.md)。
-- **未实现**：连接失败卡与真实重试/失败状态；改动入口与真实 diff；空态三条建议；正文日期/时间/用户头像行及模型徽章；有真实数据依据的步骤/完成摘要。
-- **设计偏差**：审批仍为模态 sheet，不是原型内联卡；等待时不能编辑底层输入。已有风险/授权能力保留，但不能视为原型交互已交付。
+- **状态（09-13 后续）**：用量居中对话框、Session/room 随文审批及只读拟执行预览、回答底部复制/查看改动与真实结果条均已接入，**implemented / 待用户验收**；不再将固定审批位置列为未完成。改动捕获仍是部分覆盖，原型像素与整款 App 验收仍 open。当前依据见[弹窗、审批与结果记录](dev-notes/2026-09-13-workbench-dialogs-and-results.md)；[再次对照](dev-notes/2026-09-13-prototype-presentation-review.md)与[六项实施记录](dev-notes/2026-09-12-workbench-six-features.md)保留历史，不当作最新缺口表。
+- **失败卡与重试**：仅普通 Session 的最新、已持久化且锚点/快照仍有效的 `available` 错误可显式领取；保存 `retrying/recovered/unavailable` 状态，不重复追加用户或执行历史工具。重试首个请求仅裁掉末尾 aborted/error assistant 的请求投影，磁盘原文保留；旧错误、取消、未完成工具不自动重试。VM 同步防双击、结束串行 await 后才解锁。原型 error 是 Session，**不宣称聊天室失败恢复已交付**。
+- **真实改动**：Session/room header 共用 `NewPiChangesButton`，读取所选目录所属的整个 Git root，分别展示 staged/unstaged diff 与 untracked 文本预览；包含用户原有修改，只读、无撤销/回滚，不冒充本轮 Agent 独占。超时/输出有上限、链接安全与外部 hooks/filter 等禁用已接入。
+- **空态三建议**：仅填空草稿，不发送、不覆盖文本（含纯空白）或图片；初始无 runtime 时仅显式点击创建 Session 并填稿，不请求模型。
+- **用量对话框**：`NewPiUsagePresentation` 属于打开按钮实际窗口，居中圆角、最大 600pt；四卡片为最近一轮输入/输出、缓存命中率、上下文，另有累计/最近一轮/速率三摘要，缺数据不造值。父 content 顶层 `.withinWindow` 模糊与 dim、透明子面板；关闭/背景/Escape、焦点与 marked text 保留、AX 模态隔离已接入，后台生成不暂停。浅深合成截图已查看，原生 blur 不等于 CSS 3px，不称 pixel-perfect。
+- **审批**：`NewPiTranscriptApproval` → Coordinator 独立待发态 → HTML `.ti-approval`，位于正文并同批保锚；父 Session/room 原生 dock 已移除。runtime/request/nonce、main-frame、可见性和当前回调守卫限制一次领取；高危仅 once，room 无 forever。`ToolChangePreview` 对 write/edit/write_file 提供根内、nofollow、64 KiB 有界只读预览，明确尚未执行、文件可能变化及不可用原因；等待时仍可编辑草稿。
+- **元数据与结果**：协议徽章及重复主状态已纠偏；最终回答 footer 显示原文复制、查看改动及实际工具成功/失败/未完成数、已记录耗时、编辑记录次数/唯一路径数。Session 按用户轮次、room 按角色发言隔离，partial/intermediate 不冒充 final。`ToolFileChange` 仅捕获新发生的内置 write/edit/write_file 成功编辑；无变化为 []，旧记录缺失保持 nil，不回读当前文件补历史。bash/子代理/MCP 不覆盖，**不是全部 Agent-only changes**，也不造规划总步骤或测试通过数。
+- **验证与待办**：已读 `remaining-core-v2.log`：串行 392 tests / 96 suites PASS（含 Labs，无 tracked-only 结论）；`remaining-dom.log`：54断言、19语义、4组零几何差、8组样式，无 SKIP；`cold-debug-agent-final.log`：生产桥接合成回归与500条历史恢复，heightReads/anchorErrorPX 均0；`usage-dialog-blur-final.log`：712 PASS / 0 FAIL / 0 SKIP。`remaining-final-build/retry/draft/room.log` 已有成功结束记录；`remaining-final-actions.log` 当前读取末尾中断，无汇总，不能沿用旧493。额外 Core+Coordinator 端到端新测试尚无本轮运行结果，待 main 回填；默认并行 logger 隔离问题未关闭。全端点、逐测试结果计数、普通旧历史追溯补齐、完整 App/VoiceOver/原型像素仍未覆盖；当前 Release/提交/推送状态不能从旧包或上述日志推断。
 - **不重复建设**：代码/回答复制、三种外观模式、模型/思考菜单、用量、附件、滚动与聊天室真实阶段能力已存在。模拟数字不照搬，也不能据此取消对应真实功能缺口。
 
 ### BACKLOG-ATTACHMENT-PREVIEW-ASPECT — 已发送图片放大比例
@@ -22,14 +35,15 @@
 
 ### BACKLOG-DOCUMENT-WORKBENCH-ACCEPTANCE — 生产 UI 人工验收与最终验证回填
 
-- **状态**：阶段 1、阶段 2 已实施 / 待用户验收，不关闭本项。第一批阅读列、共用输入区、静态状态与真实可空用量 popover 已调整；第二批 root-only 共享分栏、自定义侧栏、项目卡片/统一条目、唯一身份 header 与实际发言角色横滚栏已接入，不改输入、阶段、steering、审批/权限或单文档架构。
+- **状态**：阶段 1、阶段 2 已实施 / 待用户验收，不关闭本项。第一批阅读列、共用输入区与静态状态已调整，用量后续升级为窗口内居中对话框；第二批 root-only 共享分栏、自定义侧栏、项目卡片/统一条目、唯一身份 header 与实际发言角色横滚栏已接入。后续审批改为随文呈现，既有阶段、steering、权限语义与单文档架构保留。
 - **第一批验证（历史）**：WK 19 语义、4 final geometry 零差、浅深 × 900/701/700/480 的 8 组样式/对比度、composer marked text 与完整 Debug build 已报告通过；无页面焦点的键盘样式 SKIP 保留。统一横向 24 后复跑及 cold/performance 数据已回填，不是第二批性能重跑。
 - **独立组件 probe**：早期 900/620 × 浅深合成截图为 **PARTIAL，9 项 AX SKIP**，不追溯改成 PASS；后续真实鼠标模式在 900/620 × 浅深四组 strict 全部通过，覆盖送停、草稿及用量开关。曾出现的焦点超时已增加诊断，后续未复现，根因未确定。
 - **第二批 FULL_WINDOW**：1200/900 × 浅深 × session/room 共 8 组布局/草稿、独立真实 keyDown 与 Web DOM 检查已通过；固定列表与同一 document fixture，room 仅变 header/role，不是 `ChatRoomFlowController` 业务验收。host detail 左边界约 234pt（含 macOS 容器边距），不证明玻璃截图正确。
 - **视觉状态**：独立 cacheDisplay + WK snapshot 的 Tahoe 玻璃侧栏仍无有效像素；用户后续主动授权后，正式 App 深色普通会话的完整玻璃截图已取得并查看，900/1200pt 布局通过。未完成原型同内容对照与全部外观/聊天室场景，不称完全还原。
 - **正式 App 已验收**：恢复系统侧栏按钮及其过渡（不再使用显式自定义按钮），构建与 AX 开关往返通过；历史会话用量五项展示、非空临时草稿经侧栏往返保持、模型菜单/用量弹层 Escape 关闭后焦点恢复与续写通过。临时草稿已清空，未发送、未切模型；controller 守卫构建验证已回填。
+- **后续补齐**：失败卡/Session 重试、Git 改动、三建议、消息元数据与摘要继续保留；用量对话框、随文审批/预览、回答级结果入口已实施。最新 Debug 构建和冷恢复日志已回填，但合成窗口/桥接验证不是整款 App 用户验收，不能沿用上行历史验收关闭本项。详见[当前记录](dev-notes/2026-09-13-workbench-dialogs-and-results.md)。
 - **仍需**：项目/会话/聊天室切换时的草稿与滚动恢复、聊天室 header/角色栏及 phase/插话/停止、模型实际切换与运行中禁用、附件与真实 IME、浅色/系统高对比及 VoiceOver。已验证的菜单关闭焦点不代表完整键盘路线通过。
-- **范围**：侧栏“未全面调整”仅为阶段 1 历史范围；第二批已接入、仍待实机视觉验收。设置页面/导航未重写，真实 diff 面板未实现，原型 demo 不进入生产；八项对照与证据见 [实施与验收记录](dev-notes/2026-09-12-document-workbench-ui.md)。
+- **范围**：侧栏“未全面调整”仅为阶段 1 历史范围；第二批已接入、仍待实机视觉验收。设置页面/导航未重写；header Git diff 仍是独立的全工作区视图，不能与审批拟执行预览或回答内已捕获编辑记录混同；均不提供回滚。原型 demo 不进入生产；前两批八项对照与证据见 [实施与验收记录](dev-notes/2026-09-12-document-workbench-ui.md)。
 
 ### BACKLOG-NAVIGATION-DRAFT — 视图重建丢失输入草稿
 
@@ -166,7 +180,7 @@
 
 ## 功能状态 — 待办与已完成项
 
-> 2026-09-12 展示更新：下表 `BACKLOG-TOKEN-BAR` 的内联用量/tooltip/Divider 描述保留为历史实施记录；当前为静态主状态与五项可空用量 popover，数据逻辑未改，交互待验收见上方工作台条目。
+> 2026-09-13 展示更新：下表 `BACKLOG-TOKEN-BAR` 的内联用量/tooltip/Divider 描述保留为历史实施记录；当前为静态主状态与窗口内居中用量对话框（四卡片＋三摘要，真实可空数据）。实现、验证与待验收边界见上方工作台条目。
 
 | ID | Item | Status | Priority | Notes |
 |---|---|---|---|---|

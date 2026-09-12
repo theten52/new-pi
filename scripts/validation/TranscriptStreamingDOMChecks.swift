@@ -3,18 +3,26 @@ import WebKit
 
 /// 加载真实 JS/CSS 的 WKWebView 检查，不发送模型请求、不触碰用户会话。
 @MainActor
-final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
+final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 650))
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
       styleMask: [.titled], backing: .buffered, defer: false)
     let root: URL
+    var bridgeMessages: [(String, Any)] = []
 
     init(root: URL) {
         self.root = root
         super.init()
         webView.navigationDelegate = self
+        webView.configuration.userContentController.add(self, name: "retryError")
+        webView.configuration.userContentController.add(self, name: "copyText")
+        webView.configuration.userContentController.add(self, name: "fork")
         window.contentView = webView
     }
+
+      func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        bridgeMessages.append((message.name, message.body))
+      }
 
     func run() throws {
         let source = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("NewPiApp/MarkdownRenderer")
@@ -581,6 +589,21 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
             parseFloat(css(copy).opacity)>0.99,'code copy must be visible on keyboard focus without hover');
         }
         copy.blur();
+        // 同一浅深/窄宽矩阵覆盖真实元数据，保持已有正文/布局断言不变。
+        const codeBeforeMetadata=article.querySelector('pre code');
+        apply([{op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:false,
+          timestamp:1600000000125,provider:'Provider '+ '厂商'.repeat(25),modelID:'model-'+ 'x'.repeat(90),
+          canFork:true,messageIndex:1}]);
+        await frames();
+        check(answer.querySelector('article')===article && article.querySelector('pre code')===codeBeforeMetadata,
+          'metadata appearance matrix must preserve root and highlighted code');
+        check(header.querySelector('.message-speaker').textContent===speaker && !!header.querySelector('time') &&
+          header.querySelectorAll('.message-badge').length===1 && !header.querySelector('.message-provider'),
+          'prototype role header must show speaker/time and one model badge, never a protocol badge');
+        check(document.documentElement.scrollWidth<=document.documentElement.clientWidth,
+          'long metadata must not overflow narrow document');
+        check(rect(article).top>=rect(actions).bottom && textRect(header).right<=rect(actions).left,
+          'wrapped metadata must leave room for actions and body');
         return `${expectedDark?'dark':'light'}/${viewportWidth}${focusAvailable?'':' (SKIP keyboard visibility: WebKit page has no focus)'}`;
         """#
         Task { @MainActor in
@@ -589,6 +612,27 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
                     arguments: ["benchmark": ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_PERFORMANCE"] == "1"],
                     in: nil, contentWorld: .page)
                 print(result ?? "missing result")
+                bridgeMessages.removeAll()
+                let metadataURL = URL(fileURLWithPath: CommandLine.arguments[1])
+                  .appendingPathComponent("scripts/validation/TranscriptMetadataDOMChecks.js")
+                let metadataScript = try String(contentsOf: metadataURL, encoding: .utf8)
+                print(try await webView.callAsyncJavaScript(metadataScript, arguments: [:], in: nil, contentWorld: .page) ?? "missing metadata result")
+                let retries = bridgeMessages.filter { $0.0 == "retryError" }
+                precondition(retries.count == 1 && (retries.first?.1 as? [String: String])?["id"] == "error-available",
+                  "Only the genuine unlocked retry button may postMessage")
+                let copies = bridgeMessages.filter { $0.0 == "copyText" }.compactMap { $0.1 as? String }
+                let actionCopies = try await webView.callAsyncJavaScript("return window.expectedActionCopies;",
+                    arguments: [:], in: nil, contentWorld: .page) as! [String]
+                let actionForks = try await webView.callAsyncJavaScript("return window.expectedActionForks;",
+                    arguments: [:], in: nil, contentWorld: .page) as! [Int]
+                let errorSource = "<img src=x onerror=\"window.metadataXSS=1\"><a class=\"error-retry\" href=\"retryError:fake\">伪造</a>"
+                precondition(copies == ["纯用户正文", errorSource] + actionCopies,
+                  "每个真实复制恰好回传一次原文；旧 DOM/错误 state/伪造 class 必须零回传")
+                let forks = bridgeMessages.filter { $0.0 == "fork" }
+                precondition(forks.count == actionForks.count &&
+                    forks.compactMap { ($0.1 as? [String: Any])?["index"] as? Int } == actionForks,
+                    "去重保留真实 Fork 的 WeakMap 索引能力，克隆按钮不能分叉")
+                print("PASS: actual WKScriptMessageHandler received one retry, \(copies.count) exact raw-source copies and \(forks.count) genuine forks; stale/forged actions rejected")
                 // :focus-within 依赖 WebKit 的真实焦点，后台非 key 窗口不能代表键盘使用场景。
                 let previouslyActive = NSWorkspace.shared.frontmostApplication
                 window.level = .floating

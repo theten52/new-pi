@@ -27,14 +27,23 @@ extension Color {
 
 struct NewPiChatEmptyStateView: View {
     var hasProject: Bool
+    var onSuggestion: ((String) -> Void)? = nil
+    var suggestionsEnabled = true
+
+    static let suggestions: [(title: String, icon: String, prompt: String)] = [
+        ("理解项目结构", "folder", "请先梳理这个项目的结构和主要入口。"),
+        ("检查最近的改动", "doc.text.magnifyingglass", "检查最近的代码改动，先列出风险，不修改文件。"),
+        ("一起定位问题", "bubble.left", "帮我定位一个问题：")
+    ]
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 14) {
             Image(systemName: hasProject ? "text.bubble" : "folder")
                 .font(.system(size: 30, weight: .light))
                 .foregroundStyle(NewPiWorkbenchStyle.accent)
                 .padding(.bottom, 8)
-            Text(hasProject ? "从一个问题开始" : "选择你的工作项目")
+            Text(hasProject ? "今天，我们从哪里开始？" : "选择你的工作项目")
                 .font(.title2.weight(.medium))
             Text(hasProject
                 ? "在已有会话中输入任务，或从侧边栏新建会话。一起理解代码、定位问题，再逐步完成修改。"
@@ -42,9 +51,31 @@ struct NewPiChatEmptyStateView: View {
                 .foregroundStyle(.secondary)
                 .lineSpacing(5)
                 .frame(maxWidth: 420)
+            if hasProject, let onSuggestion {
+                ForEach(Self.suggestions, id: \.title) { suggestion in
+                    Button {
+                        onSuggestion(suggestion.prompt)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: suggestion.icon)
+                            Text(suggestion.title)
+                            Spacer()
+                            Image(systemName: "arrow.up.right")
+                        }
+                        .padding(12)
+                        .frame(maxWidth: 420, alignment: .leading)
+                        .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NewPiWorkbenchStyle.line) }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!suggestionsEnabled)
+                    .help(suggestionsEnabled ? "仅填入草稿，不会自动发送" : "已有草稿，请先处理当前输入")
+                }
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(32)
+        }
         .background(NewPiWorkbenchStyle.surface)
     }
 }

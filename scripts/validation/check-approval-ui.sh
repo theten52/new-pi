@@ -1,5 +1,6 @@
 #!/bin/bash
-# macOS 图形会话 + 辅助功能权限；无模型请求/真实工具。
+# macOS 图形会话 + 辅助功能权限；仅旧 NewPiApprovalContent 组件校验，
+# 不代表正式单文档审批接线通过。正文接线由 TranscriptActionsBridgeChecks 覆盖。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"

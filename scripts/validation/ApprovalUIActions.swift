@@ -45,4 +45,4 @@ if mode == "high" {
     }
     _ = AXUIElementPerformAction(choice!, kAXPressAction as CFString)
 }
-print("PASS AX \(mode)")
+print("PASS AX component-only \(mode) (not transcript routing)")

@@ -3,6 +3,19 @@ import NewPiCore
 import SwiftUI
 import WebKit
 
+/// 易失展示态；不落盘、不进入模型上下文。DOM UUID 由 Coordinator 按运行身份与请求映射。
+struct NewPiTranscriptApproval: Sendable, Equatable {
+    let runtimeIdentity: String
+    let request: ToolApprovalRequest
+    let workingDirectory: URL
+    var role: String? = nil
+    var isRoom = false
+
+    var scopes: [ApprovalScope] {
+        request.dangerLevel == .high ? [.once] : isRoom ? [.once, .session] : [.once, .session, .forever]
+    }
+}
+
 /// 单文档 transcript 的原生侧控制器（BACKLOG-SINGLE-DOC，Phase 2）。
 /// 原生只发意图（jumpTo / scrollToBottom / restoreAnchor），滚动位置与布局完全由文档自持；
 /// isNearBottom / 滚动锚点 / turn offsets 均由 JS 侧上报（原生不计算任何滚动几何）。
@@ -95,6 +108,12 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     var restoreEntry: ScrollPositionStore.Entry?
     /// 分叉意图回传（点击某条消息的 Fork 按钮时触发，参数为 messageIndex）。
     var onFork: ((Int) -> Void)?
+    /// 仅表达重试意图；运行时负责重试与草稿隔离。
+    var onRetry: ((UUID) -> Void)? = nil
+    var approval: NewPiTranscriptApproval? = nil
+    var onApproval: ((String, ApprovalDecision) -> Void)? = nil
+    /// 每次领取及异步预览返回时重新读取真实 runtime，不能只信 SwiftUI 的上一帧。
+    var approvalIsCurrent: (() -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller)
@@ -106,6 +125,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "fork")
+        configuration.userContentController.add(context.coordinator, name: "retryError")
+        configuration.userContentController.add(context.coordinator, name: "transcriptApproval")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
@@ -123,6 +144,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         context.coordinator.sessionID = storeKey
         context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.onFork = onFork
+        context.coordinator.onRetry = onRetry
+        context.coordinator.onApproval = onApproval
+        context.coordinator.approvalIsCurrent = approvalIsCurrent
+        context.coordinator.updateApproval(approval, after: transcript.last?.id)
         context.coordinator.attach(webView)
         context.coordinator.setVisible(isVisible)
         context.coordinator.loadShell()
@@ -131,18 +156,26 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onFork = onFork
+        context.coordinator.onRetry = onRetry
+        context.coordinator.onApproval = onApproval
+        context.coordinator.approvalIsCurrent = approvalIsCurrent
+        // 不受 liveDriven 内容独占影响；隐藏时仍立即撤销旧权限。
         context.coordinator.setVisible(isVisible)
+        context.coordinator.updateApproval(approval, after: transcript.last?.id, flushImmediately: false)
         context.coordinator.apply(
             transcript: transcript,
             isStreaming: isStreaming,
             streamingBubbleComplete: streamingBubbleComplete,
             tintHues: tintHues
         )
+        context.coordinator.flushPresentation()
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "fork")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "retryError")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "transcriptApproval")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
@@ -177,6 +210,59 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         var pendingRestoreEntry: ScrollPositionStore.Entry?
         /// 分叉意图回传（由视图在 make/update 时注入）。
         var onFork: ((Int) -> Void)?
+        var onRetry: ((UUID) -> Void)?
+        var onApproval: ((String, ApprovalDecision) -> Void)?
+        var approvalIsCurrent: (() -> Bool)?
+        private var latestApproval: NewPiTranscriptApproval?
+        private struct ApprovalIdentity: Hashable {
+            let runtime: String
+            let request: String
+        }
+        private var approvalIDs: [ApprovalIdentity: UUID] = [:]
+        private var approvalID = UUID()
+        private var approvalNonce = UUID()
+        private var approvalAfter: UUID?
+        private var approvalDirty = false
+        private var approvalClaimed = false
+        private var previewTask: Task<Void, Never>?
+        private var pendingPreview: [String: Any]?
+
+        func updateApproval(_ approval: NewPiTranscriptApproval?, after: UUID?, flushImmediately: Bool = true) {
+            guard latestApproval != approval else { return }
+            let sameRequest = latestApproval?.runtimeIdentity == approval?.runtimeIdentity
+                && latestApproval?.request.id == approval?.request.id
+            latestApproval = approval
+            if let approval {
+                let identity = ApprovalIdentity(runtime: approval.runtimeIdentity, request: approval.request.id)
+                let id = approvalIDs[identity] ?? UUID()
+                approvalIDs[identity] = id
+                approvalID = id
+            }
+            approvalNonce = UUID()
+            // 固定在请求出现时的正文位置，插话不会把审批搬到新的 user 后面。
+            if !sameRequest { approvalAfter = liveDriven ? latestSnapshot?.items.last?.id ?? after : after }
+            approvalClaimed = false
+            previewTask?.cancel()
+            previewTask = nil
+            pendingPreview = nil
+            approvalDirty = true
+            if flushImmediately { flushPending() }
+        }
+
+        func flushPresentation() { flushPending() }
+
+        private func approvalOp() -> [String: Any] {
+            guard let approval = latestApproval, !approvalClaimed else { return ["op": "approval"] }
+            var op: [String: Any] = ["op": "approval", "id": approvalID.uuidString,
+                "nonce": approvalNonce.uuidString, "requestID": approval.request.id,
+                "toolName": approval.request.toolName, "summary": approval.request.summary,
+                "risk": approval.request.dangerLevel.displayName,
+                "reason": approval.request.dangerReason ?? "", "role": approval.role ?? "",
+                "directory": approval.workingDirectory.path,
+                "scopes": approval.scopes.map(\.rawValue), "isRoom": approval.isRoom]
+            if let approvalAfter { op["afterID"] = approvalAfter.uuidString }
+            return op
+        }
         private var didApplyRestore = false
         /// PIN-PROBE：最近一次上报的 JS 滚动意图（变化才记日志）。
         private var lastReportedIntent: String?
@@ -226,11 +312,18 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         func setVisible(_ visible: Bool) {
             guard isVisible != visible else { return }
             isVisible = visible
+            if !visible {
+                previewTask?.cancel()
+                previewTask = nil
+                pendingPreview = nil
+            }
             if visible { flushPending() }
         }
 
         func detach() {
             cancelFrameProbe()
+            previewTask?.cancel()
+            approvalNonce = UUID()
             pageGeneration += 1
             isPageLoaded = false
             isSending = false
@@ -309,6 +402,14 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let snapshot = pendingSnapshot {
                 pendingSnapshot = nil
                 applyLoaded(snapshot)
+            } else if approvalDirty {
+                approvalDirty = false
+                let ops: [[String: Any]] = needsReset ? [["op": "reset"], approvalOp()] : [approvalOp()]
+                needsReset = false
+                send(ops: ops)
+            } else if let preview = pendingPreview {
+                pendingPreview = nil
+                if approvalIsCurrent?() == true, !approvalClaimed { send(ops: [preview]) }
             } else if let intent = pendingScrollIntent {
                 pendingScrollIntent = nil
                 send(ops: [intent])
@@ -350,6 +451,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
             lastSignatures = newSignatures
             lastOrder = newOrder
+            if approvalDirty {
+                approvalDirty = false
+                ops.append(approvalOp())
+            }
 
             // 全局 fork 锁：会话正在流式时，forkFromMessage 有 guard !isStreaming 会静默丢弃，
             // 历史条目的 Fork 按钮应在流式期间一并禁用，避免点了无反馈（FORK-LOCK-GLOBAL）。
@@ -385,7 +490,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 pendingScrollIntent = nil
                 ops.append(intent)
             }
-            guard !ops.isEmpty else { return }
+            guard !ops.isEmpty else { flushPending(); return }
             send(ops: ops)
         }
 
@@ -408,6 +513,15 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             let forkIndex: Int?
             let speaker: String?
             let command: String?
+            let timestamp: Date?
+            let provider: String?
+            let modelID: String?
+            let errorTitle: String?
+            let retryState: String?
+            let fileChanges: [ToolFileChange]?
+            let durationSeconds: Double?
+            let answerState: String?
+            let resultScopeID: String?
             let attachments: [MessageAttachment]
             let body: String
         }
@@ -416,6 +530,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             Signature(kind: item.kind, streaming: streaming, tint: tint,
                 detailTurnID: item.detailTurnID, forkIndex: item.canFork ? item.messageIndex : nil,
                 speaker: item.speaker, command: item.toolCommand,
+                timestamp: item.timestamp, provider: item.provider, modelID: item.modelID,
+                errorTitle: item.errorTitle, retryState: item.retryState,
+                fileChanges: item.fileChanges, durationSeconds: item.durationSeconds,
+                answerState: item.answerState, resultScopeID: item.resultScopeID,
                 attachments: item.attachments, body: item.body)
         }
 
@@ -431,6 +549,17 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
             // 发言者名字（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言专用，session 路径不下发。
             if let speaker = item.speaker { op["speaker"] = speaker }
+            // 毫秒 epoch 保留真实时间精度；缺失不填当前时间，JS 按文档固定时区展示。
+            if let timestamp = item.timestamp { op["timestamp"] = timestamp.timeIntervalSince1970 * 1000 }
+            if let provider = item.provider { op["provider"] = provider }
+            if let modelID = item.modelID { op["modelID"] = modelID }
+            if let errorTitle = item.errorTitle { op["errorTitle"] = errorTitle }
+            if let retryState = item.retryState { op["retryState"] = retryState }
+            if let changes = item.fileChanges { op["fileChanges"] = Self.changePayload(changes) }
+            if let seconds = item.durationSeconds, seconds.isFinite, seconds >= 0 { op["durationSeconds"] = seconds }
+            if let state = item.answerState { op["answerState"] = state }
+            if let scope = item.resultScopeID { op["resultScopeID"] = scope }
+            op["coverageNotice"] = ToolFileChange.coverageNotice
             // 可 fork 条目的分叉能力元数据（JS 侧据此显示 Fork 按钮）。
             if item.canFork, let messageIndex = item.messageIndex {
                 op["canFork"] = true
@@ -469,6 +598,57 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         }
 
         // MARK: - JS 通道
+
+        private static func changePayload(_ changes: [ToolFileChange]) -> Any {
+            guard let data = try? JSONEncoder().encode(changes),
+                  let value = try? JSONSerialization.jsonObject(with: data) else { return [] as [String] }
+            return value
+        }
+
+        /// 只接收原生下发能力；模型 HTML/class/dataset 都不是授权来源。
+        private func receiveApproval(_ body: [String: Any]) {
+            guard let approval = latestApproval, !approvalClaimed,
+                  approvalIsCurrent?() == true,
+                  body["id"] as? String == approvalID.uuidString,
+                  body["nonce"] as? String == approvalNonce.uuidString,
+                  body["requestID"] as? String == approval.request.id,
+                  let action = body["action"] as? String else { return }
+            if action == "preview" {
+                guard previewTask == nil else { return }
+                let nonce = approvalNonce
+                let generation = pageGeneration
+                previewTask = Task { [weak self] in
+                    let result = await Task.detached(priority: .userInitiated) {
+                        await ToolChangePreview.make(request: approval.request, workingDirectory: approval.workingDirectory)
+                    }.value
+                      guard let self, !Task.isCancelled, self.pageGeneration == generation,
+                          self.approvalNonce == nonce else { return }
+                      self.previewTask = nil
+                      guard
+                          self.latestApproval == approval, self.approvalNonce == nonce,
+                          !self.approvalClaimed, self.isVisible, self.approvalIsCurrent?() == true else { return }
+                    self.pendingPreview = ["op": "approvalPreview", "id": self.approvalID.uuidString,
+                        "nonce": nonce.uuidString, "message": result.message,
+                        "fileChanges": Self.changePayload(result.fileChanges)]
+                    self.flushPending()
+                }
+                return
+            }
+            let decision: ApprovalDecision
+            if action == "deny" { decision = .deny }
+            else if action == "approve", let raw = body["scope"] as? String,
+                    let scope = ApprovalScope(rawValue: raw), approval.scopes.contains(scope) {
+                decision = ApprovalDecision(approved: true, scope: scope)
+            } else { return }
+            guard let onApproval else { return }
+            approvalClaimed = true
+            previewTask?.cancel()
+            previewTask = nil
+            pendingPreview = nil
+            approvalDirty = true
+            onApproval(approval.request.id, decision)
+            flushPending()
+        }
 
         private func send(ops: [[String: Any]]) {
             guard let webView, isPageLoaded else { return }
@@ -549,6 +729,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             lastOrder = []
             lastForkLocked = nil
             pendingSnapshot = latestSnapshot
+            approvalDirty = true
+            approvalNonce = UUID()
+            previewTask?.cancel()
+            previewTask = nil
+            pendingPreview = nil
         }
 
         // MARK: - WKNavigationDelegate
@@ -595,15 +780,35 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
+            case "transcriptApproval":
+                guard message.frameInfo.isMainFrame, isVisible, isPageLoaded,
+                      let webView, message.webView === webView,
+                      let body = message.body as? [String: Any] else { return }
+                receiveApproval(body)
             case "copyText":
                 guard let text = message.body as? String else { return }
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
             case "fork":
-                guard let body = message.body as? [String: Any],
-                      let index = (body["index"] as? NSNumber)?.intValue else { return }
+                guard message.frameInfo.isMainFrame, isVisible, let webView, message.webView === webView,
+                    let body = message.body as? [String: Any],
+                    let index = (body["index"] as? NSNumber)?.intValue,
+                    let snapshot = latestSnapshot, !snapshot.isStreaming,
+                    snapshot.items.contains(where: { $0.canFork && $0.messageIndex == index }) else { return }
                 onFork?(index)
+            case "retryError":
+                // 不信任 HTML 链接、DOM dataset 或已派发但过时的页面状态。
+                // 隐藏/待投递期间也以最新运行时快照判断，而不是 lastSignatures。
+                    guard message.frameInfo.isMainFrame, isVisible, let webView,
+                      message.webView === webView,
+                      let body = message.body as? [String: Any],
+                      let rawID = body["id"] as? String, let id = UUID(uuidString: rawID),
+                      let snapshot = latestSnapshot, !snapshot.isStreaming,
+                      snapshot.items.contains(where: {
+                          $0.id == id && $0.kind == .error && $0.retryState == "available"
+                      }), let onRetry else { return }
+                onRetry(id)
             case "rendererError":
                 NewPiLogger.error(
                     category: "app",

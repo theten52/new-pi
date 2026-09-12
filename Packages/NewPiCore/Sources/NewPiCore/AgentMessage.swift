@@ -133,19 +133,26 @@ public struct ToolResultMessage: Sendable, Codable, Equatable {
     public var content: String
     public var isError: Bool
     public var timestamp: Date
+    /// 展示/持久化专用，不进入 provider 的工具输出；旧历史缺省 nil。
+    public var fileChanges: [ToolFileChange]?
+    public var durationSeconds: Double?
 
     public init(
         toolCallID: String,
         toolName: String,
         content: String,
         isError: Bool,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        fileChanges: [ToolFileChange]? = nil,
+        durationSeconds: Double? = nil
     ) {
         self.toolCallID = toolCallID
         self.toolName = toolName
         self.content = content
         self.isError = isError
         self.timestamp = timestamp
+        self.fileChanges = fileChanges
+        self.durationSeconds = durationSeconds
     }
 }
 

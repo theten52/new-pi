@@ -73,7 +73,8 @@ struct ChatRoomTranscriptAdapter {
             }
 
             if message.isUserMessage {
-                items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content))
+                items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content,
+                    timestamp: message.timestamp))
                 continue
             }
 
@@ -126,7 +127,12 @@ struct ChatRoomTranscriptAdapter {
                     body: body,
                     detailTurnID: chatroomToolCalls.isEmpty ? nil : speechKey,
                     speaker: roleName,
-                    streamingOverride: isLiveSegment && liveSpeech?.phase == .text
+                    streamingOverride: isLiveSegment && liveSpeech?.phase == .text,
+                    timestamp: message.timestamp,
+                    provider: message.provider,
+                    modelID: message.modelID,
+                    answerState: !chatroomToolCalls.isEmpty ? "intermediate" : lastInterruptedSegments[speechKey] != nil ? "incomplete" : isLiveSpeech ? nil : "final",
+                    resultScopeID: message.roleID + ":" + speechKey
                 ))
                 tintHues[messageID] = Self.hue(for: message.roleID)
             }
@@ -141,7 +147,9 @@ struct ChatRoomTranscriptAdapter {
                     ),
                     body: result?.output ?? "",
                     toolCommand: Self.truncate(call.arguments),
-                    detailTurnID: speechKey
+                    detailTurnID: speechKey,
+                    fileChanges: result?.fileChanges, durationSeconds: result?.durationSeconds,
+                    resultScopeID: message.roleID + ":" + speechKey
                 ))
             }
             if lastInterruptedSegments[speechKey] == message.id, let termination = message.termination {

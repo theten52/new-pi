@@ -19,6 +19,9 @@ public actor AgentSession {
         var completedAssistant: AssistantMessage?
         var interruptedAssistant: AssistantMessage?
         var stopped = false
+        var failed = false
+        var acceptedUser = false
+        var retryErrorID: UUID?
 
         init(model: ModelConfig) { self.model = model }
     }
@@ -71,6 +74,24 @@ public actor AgentSession {
     }
 
     public func prompt(_ message: AgentMessage) {
+        startRun(message)
+    }
+
+    /// 原子领取最新失败锚点。拒绝运行中、旧轮次、取消及结果不完整的工具阶段。
+    /// 不 fork、不删历史、不隐式追加 Continue 用户消息。
+    public func retry(errorID: UUID) throws {
+        guard runTask == nil else { throw AgentError.invalidState("会话仍在运行，不能重复重试。") }
+        guard let record = transcriptErrors().last, record.error.id == errorID,
+              record.error.retryState == "available", retryAnchorIsValid(record) else {
+            throw AgentError.invalidState("此错误已过期或不处于安全的模型请求边界，不能重试。")
+        }
+        guard updateTranscriptError(errorID, retryState: "retrying") else {
+            throw AgentError.invalidState("无法保存重试状态，已停止重试；请检查会话存储。")
+        }
+        startRun(nil, retryRecord: record)
+    }
+
+    private func startRun(_ message: AgentMessage?, retryRecord: AnchoredSessionTranscriptError? = nil) {
         RequestLatencyContext.current?.mark(.promptReceived)
         if let previous = runErrorState, !previous.stopped {
             previous.stopped = true
@@ -78,7 +99,12 @@ public actor AgentSession {
         }
         runTask?.cancel()
         let errorState = RunErrorState(model: config.model)
+        errorState.retryErrorID = retryRecord?.error.id
+        errorState.anchorEntryID = retryRecord?.entryID
+        if case .user = message { errorState.acceptedUser = true }
+        if retryRecord != nil { errorState.acceptedUser = true }
         runErrorState = errorState
+        if let message {
         let promptSummary: String = switch message {
         case let .user(user):
             "user: \(NewPiLogFormat.truncate(user.content, maxLength: 500))"
@@ -98,6 +124,7 @@ public actor AgentSession {
             tools=\(NewPiLogFormat.describeToolRegistry(config.tools))
             """
         )
+        }
         runTask = Task {
             defer {
                 if runErrorState === errorState {
@@ -115,12 +142,10 @@ public actor AgentSession {
                 return await self.dequeueSteering()
             }
 
-            for await event in loop.run(
-                prompt: message,
-                context: context,
-                config: config,
-                steeringProvider: steeringProvider
-            ) {
+            let events = message.map {
+                loop.run(prompt: $0, context: context, config: config, steeringProvider: steeringProvider)
+            } ?? loop.resume(context: context, config: config, steeringProvider: steeringProvider)
+            for await event in events {
                 // 取消/被替换的 run 不得再提交旧快照或向下一轮投递迟到事件。
                 guard runErrorState === errorState, !errorState.stopped else { break }
                 var event = event
@@ -134,6 +159,7 @@ public actor AgentSession {
                     errorState.completedAssistant = assistant
                 }
                 if case let .error(error) = event {
+                    errorState.failed = true
                     preserveReceivedAssistant(errorState, reason: error == .aborted ? .aborted : .error)
                 }
                 if case let .contextSnapshot(snapshot) = event {
@@ -152,10 +178,10 @@ public actor AgentSession {
                     // 若变慢会阻塞后续事件向 UI 的投递（疑似回复慢的根因之一）。
                     let persistStart = Date()
                     persistIfNeeded()
-                    if let persisted = persistenceContext {
+                    if errorState.acceptedUser, let persisted = persistenceContext {
                         errorState.anchorEntryID = persisted.branch(from: persistenceLeafID).last { entry in
                             if case .user = entry.message { return true }
-                            return entry.type == .compaction
+                            return false
                         }?.id
                         persistPendingTranscriptErrors(errorState)
                     }
@@ -186,6 +212,19 @@ public actor AgentSession {
                     break
                 }
                 // 诊断：事件从 loop 到 broadcast 的处理耗时（>0.2s 记日志）。
+                if case .agentEnd = event {
+                    if let id = errorState.retryErrorID {
+                        let completed: Bool
+                        if case let .assistant(assistant) = context.messages.last {
+                            completed = assistant.stopReason == .stop && assistant.toolCalls.isEmpty
+                        } else { completed = false }
+                        updateTranscriptError(id, retryState: !errorState.failed && completed ? "recovered" : "unavailable")
+                    }
+                    // 结束事件可见时即释放领取锁；旧任务的 defer 不得清掉新运行。
+                    errorState.stopped = true
+                    runTask = nil
+                    runErrorState = nil
+                }
                 let broadcastStart = Date()
                 broadcast(event, errorState: errorState)
                 let broadcastElapsed = Date().timeIntervalSince(broadcastStart)
@@ -231,6 +270,7 @@ public actor AgentSession {
         NewPiLogger.info(category: "agent-session", message: "Agent abort requested")
         guard let state = runErrorState, !state.stopped else { return }
         state.stopped = true
+        state.failed = true
         runTask?.cancel()
         // 先定型保存已交付给 UI 的内容，再发错误/结束事件；不依赖取消后的流继续被消费。
         preserveReceivedAssistant(state, reason: .aborted)
@@ -238,6 +278,7 @@ public actor AgentSession {
             await approvalGate.cancelAll()
         }
         broadcast(.error(.aborted), errorState: state)
+        if let id = state.retryErrorID { updateTranscriptError(id, retryState: "unavailable") }
         broadcast(.agentEnd, errorState: state)
     }
 
@@ -394,7 +435,64 @@ public actor AgentSession {
 
     public func transcriptErrors() -> [AnchoredSessionTranscriptError] {
         guard let persisted = persistenceContext else { return [] }
-        return SessionManager.transcriptErrors(from: persisted, leafID: persistenceLeafID)
+        let records = SessionManager.transcriptErrors(from: persisted, leafID: persistenceLeafID)
+        return records.map { record in
+            var error = record.error
+            if error.retryState == "available",
+               (record.error.id != records.last?.error.id || !retryAnchorIsValid(record)) {
+                error.retryState = "unavailable"
+                error.errorTitle = "\(error.errorTitle ?? "请求失败")（上下文已变化，无法安全重试）"
+            }
+            // 冷恢复不能假称仍在重试，也不能自动重放可能已执行的工具。
+            if error.retryState == "retrying", runErrorState?.retryErrorID != error.id {
+                error.retryState = "unavailable"
+                error.errorTitle = "重试已中断，无法安全继续"
+            }
+            return AnchoredSessionTranscriptError(entryID: record.entryID, error: error)
+        }
+    }
+
+    private func retryAnchorIsValid(_ record: AnchoredSessionTranscriptError) -> Bool {
+        guard record.error.retryLeafID == persistenceLeafID,
+              let persisted = persistenceContext,
+              let user = persisted.branch(from: persistenceLeafID).last(where: {
+                  if case .user = $0.message { return true }; return false
+              }), user.id == record.entryID,
+              context.messages == SessionManager.messages(from: persisted, leafID: persistenceLeafID),
+              context.messages.contains(where: { if case .user = $0 { return true }; return false }) else { return false }
+        return hasCompleteToolResults
+    }
+
+    private var hasCompleteToolResults: Bool {
+        var pending = Set<String>()
+        for message in context.messages {
+            switch message {
+            case let .assistant(assistant):
+                pending.formUnion(assistant.toolCalls.map(\.id))
+            case let .toolResult(result): pending.remove(result.toolCallID)
+            case .user, .compactionSummary:
+                if !pending.isEmpty { return false }
+            }
+        }
+        return pending.isEmpty
+    }
+
+    @discardableResult
+    private func updateTranscriptError(_ id: UUID, retryState: String) -> Bool {
+        guard var persisted = persistenceContext else { return false }
+        for index in persisted.entries.indices {
+            guard let errorIndex = persisted.entries[index].transcriptErrors?.firstIndex(where: { $0.id == id }) else { continue }
+            persisted.entries[index].transcriptErrors?[errorIndex].retryState = retryState
+        }
+        persistenceContext = persisted
+        guard let fileURL = persistenceFileURL else { return false }
+        do {
+            try jsonlStore.save(persisted, to: fileURL)
+            return true
+        } catch {
+            NewPiLogger.error(category: "agent-session", message: "Failed to persist retry state", details: error.localizedDescription)
+            return false
+        }
     }
 
     /// 保存已消费的正文/思考。完整 messageEnd 优先，未完成输出没有可安全执行的工具调用或思考签名。
@@ -461,7 +559,15 @@ public actor AgentSession {
         if case let .error(error) = event, let state = errorState ?? runErrorState {
             // abort 的即时事件与循环取消收尾可能报告同一个错误；同一run只保存/展示一次。
             guard state.seenMessages.insert(error.localizedDescription).inserted else { return }
-            state.pending.append(SessionTranscriptError(message: error.localizedDescription))
+            let retryable: Bool
+            if case .llmFailed = error {
+                retryable = state.acceptedUser && state.anchorEntryID != nil && hasCompleteToolResults
+            } else { retryable = false }
+            state.pending.append(SessionTranscriptError(
+                message: error.localizedDescription, provider: state.model.provider, modelID: state.model.modelID,
+                errorTitle: error.transcriptTitle,
+                retryState: retryable ? "available" : "unavailable", retryLeafID: persistenceLeafID
+            ))
             persistPendingTranscriptErrors(state)
         }
         for continuation in eventContinuations.values {
@@ -471,6 +577,25 @@ public actor AgentSession {
 
     private func removeContinuation(_ id: UUID) {
         eventContinuations[id] = nil
+    }
+}
+
+extension AgentError {
+    /// 只根据真实错误线索分类，未知异常不冒充网络故障。
+    public var transcriptTitle: String {
+        switch self {
+        case .aborted: return "已停止"
+        case .invalidState: return "请求状态异常"
+        case .toolNotFound, .toolBlocked: return "工具执行受阻"
+        case let .llmFailed(message):
+            let text = message.lowercased()
+            if text.contains("401") || text.contains("403") || text.contains("unauthorized") || text.contains("authentication") { return "身份验证失败" }
+            if text.contains("429") { return "请求过于频繁" }
+            if text.contains("连接超时") || text.contains("timed out") { return "连接超时" }
+            if text.contains("连接失败") || text.contains("nsurlerrordomain") { return "连接失败" }
+            if text.contains("http") { return "服务请求失败" }
+            return "模型请求失败"
+        }
     }
 }
 
