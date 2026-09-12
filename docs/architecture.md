@@ -49,6 +49,10 @@ JSONL 首行为 header，后续为带 `id` / `parentID` 的树形 entry，支持
 
 `~/.new-pi/agent/sessions/<project-hash>/<timestamp>_<uuid>.jsonl`
 
+运行错误作为所属用户/摘要 entry 的可选 `transcriptErrors` 展示元数据保存，不进入 AgentMessage 或模型上下文。
+AgentSession 在错误广播前保存，冷恢复按当前分支还原到原轮次；压缩隐藏原轮次时显示在摘要前。
+旧文件兼容与失败重试边界见[错误持久化记录](dev-notes/2026-09-12-session-error-persistence.md)。
+
 ## Extension model
 
 `NewPiExtension` 已定义，但当前仅要求 `id` 和 `displayName`；`NewPiMarkdownSkill`

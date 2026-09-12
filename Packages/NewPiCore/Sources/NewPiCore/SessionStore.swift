@@ -69,6 +69,29 @@ public struct SessionHeader: Sendable, Codable, Equatable {
     }
 }
 
+/// 仅用于转录展示的运行错误，不参与 AgentMessage / provider 上下文。
+public struct SessionTranscriptError: Sendable, Codable, Equatable, Identifiable {
+    public let id: UUID
+    public let message: String
+    public let timestamp: Date
+
+    public init(id: UUID = UUID(), message: String, timestamp: Date = Date()) {
+        self.id = id
+        self.message = message
+        self.timestamp = timestamp
+    }
+}
+
+public struct AnchoredSessionTranscriptError: Sendable, Equatable {
+    public let entryID: String
+    public let error: SessionTranscriptError
+
+    public init(entryID: String, error: SessionTranscriptError) {
+        self.entryID = entryID
+        self.error = error
+    }
+}
+
 public struct SessionEntry: Sendable, Codable, Equatable, Identifiable {
     public enum EntryType: String, Sendable, Codable {
         case message
@@ -85,6 +108,8 @@ public struct SessionEntry: Sendable, Codable, Equatable, Identifiable {
     public var modelProvider: String?
     public var modelID: String?
     public var compactionSummary: String?
+    /// 归属于此用户轮次的错误；旧 JSONL 缺省为 nil，消息树和索引均不改变。
+    public var transcriptErrors: [SessionTranscriptError]?
 
     public init(
         id: String = String(UUID().uuidString.prefix(8)).lowercased(),
@@ -94,7 +119,8 @@ public struct SessionEntry: Sendable, Codable, Equatable, Identifiable {
         message: AgentMessage? = nil,
         modelProvider: String? = nil,
         modelID: String? = nil,
-        compactionSummary: String? = nil
+        compactionSummary: String? = nil,
+        transcriptErrors: [SessionTranscriptError]? = nil
     ) {
         self.id = String(id)
         self.parentID = parentID
@@ -104,6 +130,7 @@ public struct SessionEntry: Sendable, Codable, Equatable, Identifiable {
         self.modelProvider = modelProvider
         self.modelID = modelID
         self.compactionSummary = compactionSummary
+        self.transcriptErrors = transcriptErrors
     }
 }
 

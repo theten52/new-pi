@@ -17,12 +17,17 @@ path = 'NewPiApp/NewPiViewModel.swift'
 source = subprocess.check_output(['git', '-C', str(root), 'show', revision+':'+path], text=True) if revision else (root/path).read_text()
 types = source[source.index('enum NewPiToolState:'):source.index('struct NewPiProviderListItem:')]
 helpers = source[source.index('private func detailTurnID('):source.index('enum NewPiAgentActivity:')]
+helpers = helpers.replace('private func makeTranscriptItems(', 'func makeTranscriptItems(', 1)
 methods = source[source.index('    private func rebuildTranscript('):source.index('    private func cleanupEmptySessions()')]
 methods = methods.replace('    private func rebuildTranscript(', '    func rebuildTranscript(', 1)
 (tmp/'Production.swift').write_text('import Foundation\nimport NewPiCore\n'+types+helpers+'\nfinal class RebuildHarness {\nvar activeRuntime: SessionRuntime?\nvar transcript: [NewPiTranscriptItem] = []\nfunc commitLiveTranscript(on runtime: SessionRuntime) { if let live = runtime.liveTranscript { runtime.transcript = live; runtime.liveTranscript = nil } }\n'+methods+'\n}\n')
 print('ERROR ORDER SOURCE:', revision or 'working tree')
 PY
-xcrun swiftc -swift-version 6 -parse-as-library -I "$BIN/Modules" \
+set --
+if [[ -z "${NEWPI_ERROR_ORDER_REVISION:-}" ]]; then
+  set -- -D PERSISTED_ERRORS
+fi
+xcrun swiftc -swift-version 6 -parse-as-library "$@" -I "$BIN/Modules" \
   "$TMP/Production.swift" "$ROOT/scripts/validation/TranscriptErrorOrderChecks.swift" \
   "$BIN"/NewPiCore.build/*.o -o "$TMP/check"
 "$TMP/check"

@@ -311,7 +311,8 @@ private func isDetailGroupItem(_ assistant: AssistantMessage) -> Bool {
 /// 无需保留既有条目的 id）。
 private func makeTranscriptItems(
     from messages: [AgentMessage],
-    entryIDs: [String]
+    entryIDs: [String],
+    errors: [AnchoredSessionTranscriptError] = []
 ) -> [NewPiTranscriptItem] {
     var items: [NewPiTranscriptItem] = []
     items.reserveCapacity(messages.count)
@@ -394,7 +395,40 @@ private func makeTranscriptItems(
             items.append(NewPiTranscriptItem(kind: .summary, body: summary, messageIndex: index, sessionEntryID: entryID))
         }
     }
-    return items
+    return mergingPersistedTranscriptErrors(errors, into: items)
+}
+
+/// 冷恢复时将错误放到所属用户轮次末尾，不注入模型消息。
+/// 压缩已隐藏原用户条目时，将其错误留在摘要前，避免丢失或错挂到新轮次。
+private func mergingPersistedTranscriptErrors(
+    _ errors: [AnchoredSessionTranscriptError], into items: [NewPiTranscriptItem]
+) -> [NewPiTranscriptItem] {
+    guard !errors.isEmpty else { return items }
+    let visibleAnchors = Set(items.compactMap { item in
+        item.kind == .user || item.kind == .summary ? item.sessionEntryID : nil
+    })
+    var byAnchor: [String: [NewPiTranscriptItem]] = [:]
+    var compacted: [NewPiTranscriptItem] = []
+    var seen = Set(items.map(\.id))
+    for record in errors where seen.insert(record.error.id).inserted {
+        let item = NewPiTranscriptItem(id: record.error.id, kind: .error, body: record.error.message)
+        if visibleAnchors.contains(record.entryID) {
+            byAnchor[record.entryID, default: []].append(item)
+        } else if items.contains(where: { $0.kind == .summary }) {
+            compacted.append(item)
+        }
+    }
+    var result = compacted
+    var anchor: String?
+    for item in items {
+        if item.kind == .user || item.kind == .summary {
+            if let anchor { result.append(contentsOf: byAnchor.removeValue(forKey: anchor) ?? []) }
+            anchor = item.sessionEntryID
+        }
+        result.append(item)
+    }
+    if let anchor { result.append(contentsOf: byAnchor.removeValue(forKey: anchor) ?? []) }
+    return result
 }
 
 /// 判定某条消息是否属于「组内条目」（用于预计算 turn 是否有组内条目）。
@@ -1307,13 +1341,14 @@ final class NewPiViewModel: ObservableObject {
 
                 let messages = await session.context.messages
                 let entryIDs = await session.branchEntryIDs()
+                let errors = await session.transcriptErrors()
                 let branchPointCount = await session.branchPointCount()
                 let usage = accumulateUsage(from: messages)
                 return BuiltSessionPayload(
                     session: session,
                     header: header,
                     fileURL: sessionFileURL,
-                    transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs),
+                    transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs, errors: errors),
                     branchPointCount: branchPointCount,
                     isForkedBranch: branchPointCount > 0,
                     liveMessageCount: messages.count,

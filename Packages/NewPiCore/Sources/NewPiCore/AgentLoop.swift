@@ -191,7 +191,16 @@ public struct AgentLoop: Sendable {
         var lastTextDeltaAt: Date?
         var lastThinkingDeltaAt: Date?
 
-        let llmMessages = context.messages
+        // 中断时保留的思考仅供历史展示，不作为完整 reasoning/signature 回放给 provider。
+        // 只有思考、没有正文的中断条目也不生成空 assistant 请求消息。
+        let llmMessages = context.messages.compactMap { message -> AgentMessage? in
+            guard case var .assistant(assistant) = message,
+                  assistant.stopReason == .aborted || assistant.stopReason == .error else { return message }
+            assistant.reasoningContent = ""
+            assistant.reasoningSignature = ""
+            guard !assistant.text.isEmpty || !assistant.toolCalls.isEmpty else { return nil }
+            return .assistant(assistant)
+        }
         let toolDefinitions = config.tools.map(\.definition)
 
         NewPiLogger.debug(

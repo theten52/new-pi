@@ -78,6 +78,46 @@ final class SessionRuntime {
         runtime.transcript = [u1, a1, u2, a2]
         harness.rebuildTranscript(from: messages, entryIDs: ["u1", "a1", "u2", "a2"], on: runtime)
         try require(runtime.transcript.map(\.id) == [u1.id, a1.id, u2.id, a2.id], "无错误会话重建顺序不变")
+        #if PERSISTED_ERRORS
+        // 真正经过磁盘编码/解码，再调用生产冷恢复工厂，不依赖旧内存 transcript。
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("session.jsonl")
+        var saved = SessionManager.rebuildContext(from: messages, header: SessionHeader(workingDirectory: directory))
+        let savedError = SessionTranscriptError(id: error1.id, message: error1.body)
+        saved.entries[0].transcriptErrors = [savedError]
+        try JSONLSessionStore().save(saved, to: file)
+        let loaded = try JSONLSessionStore().load(from: file)
+        let loadedMessages = SessionManager.messages(from: loaded)
+        let ids = SessionManager.messageEntries(from: loaded, leafID: loaded.leafID).map(\.0.id)
+        let records = SessionManager.transcriptErrors(from: loaded, leafID: loaded.leafID)
+        let cold = makeTranscriptItems(from: loadedMessages, entryIDs: ids, errors: records)
+        try require(cold.map(\.body) == [u1.body, a1.body, error1.body, u2.body, a2.body], "JSONL冷恢复：错误仍显示在第一轮末尾")
+        try require(cold.filter { $0.kind == .error }.map(\.id) == [error1.id], "错误ID跨磁盘恢复稳定")
+        runtime.transcript = cold
+        harness.rebuildTranscript(from: loadedMessages, entryIDs: ids, on: runtime)
+        try require(runtime.transcript.map(\.id) == cold.map(\.id), "重启恢复后再次重建不搬移或重复错误")
+        var compacted = loaded
+        var leaf = compacted.leafID
+        SessionManager.syncMessages([.compactionSummary("摘要"), .user("新轮次")], into: &compacted, leafID: &leaf)
+        let compactedItems = makeTranscriptItems(from: SessionManager.messages(from: compacted),
+            entryIDs: SessionManager.messageEntries(from: compacted, leafID: leaf).map(\.0.id),
+            errors: SessionManager.transcriptErrors(from: compacted, leafID: leaf))
+        try require(compactedItems.map(\.body) == [error1.body, "摘要", "新轮次"], "压缩隐藏原轮次时旧错误保留在摘要之前")
+        let partialMessage = AssistantMessage(text: "已经输出的正文", reasoningContent: "中断前思考",
+            provider: "test", modelID: "test", stopReason: .aborted)
+        var partialSession = SessionManager.rebuildContext(from: [.user("取消轮次"), .assistant(partialMessage), .user("后续轮次")],
+            header: SessionHeader(workingDirectory: directory))
+        partialSession.entries[0].transcriptErrors = [savedError]
+        try JSONLSessionStore().save(partialSession, to: file)
+        let partialReloaded = try JSONLSessionStore().load(from: file)
+        let partialItems = makeTranscriptItems(from: SessionManager.messages(from: partialReloaded),
+            entryIDs: SessionManager.messageEntries(from: partialReloaded, leafID: partialReloaded.leafID).map(\.0.id),
+            errors: SessionManager.transcriptErrors(from: partialReloaded, leafID: partialReloaded.leafID))
+        try require(partialItems.contains { $0.kind == .thinking(isStreaming: false) && $0.body == "中断前思考" }, "重启后中断思考可展示")
+        try require(partialItems.filter { $0.kind == .user || $0.kind == .assistant || $0.kind == .error }.map(\.body)
+            == ["取消轮次", "已经输出的正文", error1.body, "后续轮次"], "冷恢复中断正文与错误同轮保留，不顺延到下一轮")
+        #endif
         print("PASS: 真实Session转录重建错误轮次回归；无模型/用户数据")
     }
 }
