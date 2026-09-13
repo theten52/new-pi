@@ -21,6 +21,11 @@
 
 **当前决策：单文档 Transcript 已采纳并成为唯一生产渲染路径；不再执行旧高度表方案或 NO-GO fallback。**
 
+**2026-09-14 路线复评**：当前不启动去掉 WebView 的全面原生 UI 迁移，继续采用
+SwiftUI／AppKit 外壳 + 单文档 WKWebView 正文。收益、成本与重新评估条件见
+[完全 Swift 原生 UI 技术路线评估](swift-native-route-assessment.md)；该评估不改变本 ADR，
+不代表已实施原生对照原型或新增性能测量。
+
 ### 当前源码入口与阅读边界
 
 本文是当前渲染决策入口；文档导航见 [`README.md`](./README.md)。以下入口按当前源码核对，
