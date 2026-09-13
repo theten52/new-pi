@@ -287,8 +287,10 @@ public final class ChatRoomLoop {
             content: content,
             phase: runtime.chatroom.currentPhase
         )
-        runtime.messages.append(message)
         try store.appendMessage(message, to: runtime.chatroom.id)
+
+        // 落盘成功才接受消息。否则 UI 保留草稿重试时，会重复追加内存中未保存的消息。
+        runtime.messages.append(message)
 
         // 发言进行中：同时进入 steering 队列，正在发言的模型在工具批次间即时看到
         if runtime.isRunning {
@@ -504,6 +506,8 @@ public final class ChatRoomLoop {
                 roleID: role.id,
                 content: "",
                 speechID: speechID,
+                provider: engine.model.provider,
+                modelID: engine.model.modelID,
                 phase: runtime.chatroom.currentPhase
             ))
         }
@@ -553,7 +557,11 @@ public final class ChatRoomLoop {
                 appendToolResult(ChatRoomToolResult(
                     toolCallID: id,
                     output: result.content,
-                    isError: result.isError
+                    isError: result.isError,
+                    fileChanges: result.fileChanges,
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 ))
             case .messageEnd(.assistant(let assistant)):
                 buffer.completeMessage()
@@ -561,6 +569,8 @@ public final class ChatRoomLoop {
                 mutateCurrentSegment { message in
                     message.content = assistant.text
                     message.reasoningContent = assistant.reasoningContent.isEmpty ? nil : assistant.reasoningContent
+                    message.provider = assistant.provider
+                    message.modelID = assistant.modelID
                 }
                 for call in assistant.toolCalls {
                     appendToolCall(ChatRoomToolCall(id: call.id, name: call.name,
@@ -703,12 +713,7 @@ public final class ChatRoomLoop {
 
     /// 聊天室引擎工具集：session 的 BuiltInTools（不含 SubAgent），edit 快照挂项目目录。
     static func chatroomTools(projectURL: URL, additional: [any AgentTool]) -> [any AgentTool] {
-        var tools: [any AgentTool] = [
-            ReadTool(),
-            WriteTool(),
-            EditTool(snapshotStore: .forProject(projectURL)),
-            BashTool(),
-        ]
+        var tools = BuiltInTools.codingTools(for: projectURL)
         tools.append(contentsOf: additional)
         return tools
     }
@@ -749,6 +754,8 @@ public final class ChatRoomLoop {
         )
 
         // 兼容 provider 路径也使用显式发言身份和合并器；中断时保留可见内容。
+        // 读取已构造 provider 的真实配置，profileID 不等于 provider 标识。
+        let modelSnapshot = provider.modelSnapshot
         let liveMessageID = UUID().uuidString
         let buffer = ChatRoomSpeechBuffer(runtime: runtime, speechID: liveMessageID)
         defer { buffer.finish() }
@@ -757,6 +764,8 @@ public final class ChatRoomLoop {
             chatroomID: runtime.chatroom.id,
             roleID: role.id,
             content: "",
+            provider: modelSnapshot?.provider,
+            modelID: modelSnapshot?.modelID,
             phase: runtime.chatroom.currentPhase
         ))
         let liveIndex = runtime.messages.count - 1
@@ -1063,6 +1072,9 @@ public struct ChatRoomLLMResponse: Sendable {
 // MARK: - ChatRoom LLM Provider 协议
 
 public protocol ChatRoomLLMProvider: Sendable {
+    /// 本实例实际请求使用的固定配置；仅供消息元数据，不从可变角色反查。
+    var modelSnapshot: ModelConfig? { get }
+
     func chat(
         systemPrompt: String,
         messages: [ChatRoomLLMMessage]
@@ -1079,6 +1091,9 @@ public protocol ChatRoomLLMProvider: Sendable {
 }
 
 public extension ChatRoomLLMProvider {
+    /// 保持旧自定义 provider / mock 源码兼容；未知模型不编造。
+    var modelSnapshot: ModelConfig? { nil }
+
     /// 默认实现：无事件，转发 chat——只实现 chat 的类型（测试 mock）由此满足要求。
     func chatWithEvents(
         systemPrompt: String,

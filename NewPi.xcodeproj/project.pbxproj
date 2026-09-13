@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA00002D0000000000000001 /* NewPiComposerDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00002D0000000000000001 /* NewPiComposerDraft.swift */; };
 		AA0000010000000000000001 /* NewPiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000010000000000000001 /* NewPiApp.swift */; };
 		AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000110000000000000001 /* NewPiLastProjectStore.swift */; };
 		AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000100000000000000001 /* NewPiChatScrollHelper.swift */; };
@@ -41,6 +42,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		BB00002D0000000000000001 /* NewPiComposerDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiComposerDraft.swift; sourceTree = "<group>"; };
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000260000000000000001 /* NewPiChatRoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomStore.swift; sourceTree = "<group>"; };
 		BB0000270000000000000001 /* NewPiChatRoomTranscriptAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomTranscriptAdapter.swift; sourceTree = "<group>"; };
@@ -101,6 +103,7 @@
 			children = (
 				BB0000010000000000000001 /* NewPiApp.swift */,
 				BB0000140000000000000001 /* NewPiChatView.swift */,
+				BB00002D0000000000000001 /* NewPiComposerDraft.swift */,
 				BB0000150000000000000001 /* NewPiUserMessageRail.swift */,
 				BB0000100000000000000001 /* NewPiChatScrollHelper.swift */,
 				BB0000110000000000000001 /* NewPiLastProjectStore.swift */,
@@ -222,6 +225,7 @@
 			files = (
 				AA0000010000000000000001 /* NewPiApp.swift in Sources */,
 				AA0000140000000000000001 /* NewPiChatView.swift in Sources */,
+				AA00002D0000000000000001 /* NewPiComposerDraft.swift in Sources */,
 				AA0000150000000000000001 /* NewPiUserMessageRail.swift in Sources */,
 				AA00000E0000000000000001 /* NewPiChatScrollHelper.swift in Sources */,
 				AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */,

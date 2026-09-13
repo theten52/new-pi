@@ -18,6 +18,8 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
     private let modelConfig: ModelConfig
     private let toolExecutor: ChatRoomToolExecutor
 
+    public var modelSnapshot: ModelConfig? { modelConfig }
+
     public init(provider: LLMProvider, modelConfig: ModelConfig, toolExecutor: ChatRoomToolExecutor) {
         self.provider = provider
         self.modelConfig = modelConfig
@@ -144,11 +146,7 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                 }
                 let result = try await toolExecutor.execute(toolCall: toolCall)
                 if let onEvent {
-                    await onEvent(.toolFinished(ChatRoomToolResult(
-                        toolCallID: toolCall.id,
-                        output: result.output,
-                        isError: result.isError
-                    )))
+                    await onEvent(.toolFinished(result))
                 }
                 allToolResults.append(result)
 
@@ -156,7 +154,11 @@ public struct ChatRoomLLMProviderImpl: ChatRoomLLMProvider {
                     toolCallID: toolCall.id,
                     toolName: toolCall.name,
                     content: result.output,
-                    isError: result.isError
+                    isError: result.isError,
+                    fileChanges: result.fileChanges,
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 )))
             }
 

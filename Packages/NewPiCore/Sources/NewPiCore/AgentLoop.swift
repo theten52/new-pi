@@ -11,6 +11,19 @@ public struct AgentLoop: Sendable {
         config: AgentLoopConfig,
         steeringProvider: (@Sendable () async -> AgentMessage?)? = nil
     ) -> AsyncStream<AgentEvent> {
+        runImpl(prompt: prompt, context: context, config: config, steeringProvider: steeringProvider)
+    }
+
+    /// 只从已验证的消息边界继续请求；不追加用户消息、不执行历史工具声明。
+    func resume(context: AgentContext, config: AgentLoopConfig,
+                steeringProvider: (@Sendable () async -> AgentMessage?)? = nil) -> AsyncStream<AgentEvent> {
+        runImpl(prompt: nil, context: context, config: config, steeringProvider: steeringProvider)
+    }
+
+    private func runImpl(
+        prompt: AgentMessage?, context: AgentContext, config: AgentLoopConfig,
+        steeringProvider: (@Sendable () async -> AgentMessage?)?
+    ) -> AsyncStream<AgentEvent> {
         AsyncStream { continuation in
             let task = Task {
                 // 注意：必须在 do 块外声明，否则 catch 分支只能看到 run 开始前的
@@ -30,7 +43,7 @@ public struct AgentLoop: Sendable {
                     continuation.yield(.agentStart)
                     RequestLatencyContext.current?.mark(.agentStarted)
 
-                    try appendMessage(prompt, to: &context, continuation: continuation)
+                    if let prompt { try appendMessage(prompt, to: &context, continuation: continuation) }
                     // 增量持久化：用户消息一到就落盘，避免生成途中切换 session 时
                     // 连已提交的用户输入都丢失（后续每轮完成也会再发一次快照）。
                     continuation.yield(.contextSnapshot(context))
@@ -73,7 +86,8 @@ public struct AgentLoop: Sendable {
                         let assistant = try await streamAssistant(
                             context: context,
                             config: config,
-                            continuation: continuation
+                            continuation: continuation,
+                            omittingTrailingInterruptedAssistants: prompt == nil && turnIndex == 1
                         )
                         if assistant.stopReason == .length {
                             // 截断可见性：此前 max_tokens 截断（StopReason.length）静默发生，
@@ -113,6 +127,8 @@ public struct AgentLoop: Sendable {
                                 continuation: continuation,
                                 messageSink: &context.messages
                             )
+                            // 已完成工具先提交，后续 provider 失败可直接使用结果，不重跑工具。
+                            continuation.yield(.contextSnapshot(context))
 
                             if let steeringProvider,
                                let steeringMessage = await steeringProvider() {
@@ -136,6 +152,11 @@ public struct AgentLoop: Sendable {
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
                     continuation.finish()
+                } catch let error as URLError where error.code == .cancelled {
+                    continuation.yield(.error(.aborted))
+                    continuation.yield(.contextSnapshot(context))
+                    continuation.yield(.agentEnd)
+                    continuation.finish()
                 } catch let error as AgentError {
                     NewPiLogger.error(
                         category: "agent-loop",
@@ -143,6 +164,12 @@ public struct AgentLoop: Sendable {
                         details: error.localizedDescription
                     )
                     continuation.yield(.error(error))
+                    continuation.yield(.contextSnapshot(context))
+                    continuation.yield(.agentEnd)
+                    continuation.finish()
+                } catch let error as URLError {
+                    let title = error.code == .timedOut ? "连接超时" : "连接失败"
+                    continuation.yield(.error(.llmFailed("\(title)：\(error.localizedDescription)")))
                     continuation.yield(.contextSnapshot(context))
                     continuation.yield(.agentEnd)
                     continuation.finish()
@@ -178,7 +205,8 @@ public struct AgentLoop: Sendable {
     private func streamAssistant(
         context: AgentContext,
         config: AgentLoopConfig,
-        continuation: AsyncStream<AgentEvent>.Continuation
+        continuation: AsyncStream<AgentEvent>.Continuation,
+        omittingTrailingInterruptedAssistants: Bool = false
     ) async throws -> AssistantMessage {
         var text = ""
         var reasoningContent = ""
@@ -191,7 +219,28 @@ public struct AgentLoop: Sendable {
         var lastTextDeltaAt: Date?
         var lastThinkingDeltaAt: Date?
 
-        let llmMessages = context.messages
+        // 仅 resume 首次请求裁掉连续的失败/取消尾部，避免 Anthropic 将 partial 视为 prefill。
+        // 只改请求投影：历史/磁盘仍保留原文，遇到用户、工具结果或其他完整消息即停止。
+        // 后续工具轮与普通 next-user 请求沿用既有历史语义，不合成用户消息。
+        var requestMessages = context.messages[...]
+        if omittingTrailingInterruptedAssistants {
+            while case let .assistant(assistant) = requestMessages.last,
+                  assistant.stopReason == .error || assistant.stopReason == .aborted,
+                  assistant.toolCalls.isEmpty {
+                requestMessages.removeLast()
+            }
+        }
+
+        // 中断时保留的思考仅供历史展示，不作为完整 reasoning/signature 回放给 provider。
+        // 只有思考、没有正文的中断条目也不生成空 assistant 请求消息。
+        let llmMessages = requestMessages.compactMap { message -> AgentMessage? in
+            guard case var .assistant(assistant) = message,
+                  assistant.stopReason == .aborted || assistant.stopReason == .error else { return message }
+            assistant.reasoningContent = ""
+            assistant.reasoningSignature = ""
+            guard !assistant.text.isEmpty || !assistant.toolCalls.isEmpty else { return nil }
+            return .assistant(assistant)
+        }
         let toolDefinitions = config.tools.map(\.definition)
 
         NewPiLogger.debug(
@@ -497,9 +546,9 @@ public struct AgentLoop: Sendable {
                 )
             }
 
+            let startedAt = ContinuousClock.now
             do {
-                let startedAt = Date()
-                let result = try await tool.execute(
+                var result = try await tool.execute(
                     id: call.id,
                     arguments: call.arguments,
                     context: toolContext,
@@ -507,7 +556,8 @@ public struct AgentLoop: Sendable {
                         continuation.yield(.toolExecutionUpdate(id: call.id, message: progress.message))
                     }
                 )
-                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                result.durationSeconds = ToolExecutionTiming.seconds(since: startedAt)
+                let elapsedMs = Int((result.durationSeconds ?? 0) * 1000)
                 NewPiLogger.info(
                     category: "tool",
                     message: result.isError ? "Tool finished with error" : "Tool finished",
@@ -523,7 +573,11 @@ public struct AgentLoop: Sendable {
                     toolCallID: call.id,
                     toolName: call.name,
                     content: result.content,
-                    isError: result.isError
+                    isError: result.isError,
+                    fileChanges: result.fileChanges,
+                    durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport,
+                    testReport: result.testReport
                 )
             } catch {
                 NewPiLogger.error(
@@ -535,13 +589,16 @@ public struct AgentLoop: Sendable {
                     error=\(error.localizedDescription)
                     """
                 )
-                let result = ToolResult(content: error.localizedDescription, isError: true)
+                let result = ToolResult(content: error.localizedDescription, isError: true,
+                    durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
                 continuation.yield(.toolExecutionEnd(id: call.id, name: call.name, result: result))
                 return ToolResultMessage(
                     toolCallID: call.id,
                     toolName: call.name,
                     content: error.localizedDescription,
-                    isError: true
+                    isError: true,
+                    fileChanges: [],
+                    durationSeconds: result.durationSeconds
                 )
             }
         }

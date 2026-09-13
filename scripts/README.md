@@ -151,6 +151,13 @@ NEWPI_EXPECT_FILTERED_NOTIFICATIONS=1 bash scripts/validation/check-chatroom-per
 
 ## 历史冷加载与锚点恢复
 
+### Session 错误轮次回归
+
+`bash scripts/validation/check-transcript-error-order.sh` 直接提取生产 `rebuildTranscript` 及 ID/错误恢复方法，
+验证取消/错误提示不随下一轮移动、压缩前缀不重复、同轮错误 ID/顺序保持，以及分支截断和 live 快照。
+运行时是轻量替身，不启动 AgentSession、不操作用户历史、不调用模型；不验证真实取消事件调度或重启持久化。
+`NEWPI_ERROR_ORDER_REVISION=3344483` 可运行旧版失败对照（只在临时目录取历史源，不切分支）。
+
 `bash scripts/validation/check-transcript-cold-load.sh` 编译真实 Coordinator、HTML 工厂、聊天室适配器和 WKWebView，使用临时生成的 500 条带代码块历史。
 对比前后的命令：
 
@@ -166,6 +173,96 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 探针使用真实生产源码，只有诊断 logger/metrics 替换为空实现，滚动 sessionID 为 nil，不写用户滚动位置。
 文件读取紧接着 fixture 写入，可能命中 OS 页缓存；不能作为真实磁盘冷读或整个 App 的首屏性能结论。
 
+## 文档工作台真实组件 probe（2026-09-12）
+
+仓库根目录运行 `NEWPI_WORKBENCH_UI=1 bash scripts/validation/check-transcript-cold-load.sh`。
+该模式选择 `WorkbenchUIChecks.swift`（`-Onone`），使用真实共享状态栏、composer 外壳/主按钮、生产 NSTextView、Coordinator 与 WKWebView；
+业务状态和指标为内存 fixture，不调用模型、不访问凭据或用户会话，不代表完整 App、侧边栏或聊天室阶段集成验收，也不是默认冷加载/性能模式。
+需要 macOS 图形登录会话；采用进程内公开 AppKit 接口，不请求系统辅助功能或屏幕录制权限。
+
+独立 component 模式：900/620 × 浅深四张 NSView + WK snapshot 合成截图默认写入 `/private/tmp/newpi-ui/`：
+`workbench-light.png`、`workbench-dark.png`、`workbench-narrow.png`、`workbench-narrow-dark.png`；可用 `NEWPI_UI_SNAPSHOTS` 改目录。
+本次交接结果为 **PARTIAL**：四张截图已生成，独立键盘/DOM 检查 PASS；`SwiftUI.AccessibilityNode` 未声明完整 `NSAccessibilityProtocol`，
+9 项 AX 按钮边界/用量 popover/disabled-send-stop 按压检查 **SKIP**，不能称按钮或用量点击通过，退出码 0 不等于全部通过。
+
+严格入口：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_UI_STRICT=1 bash scripts/validation/check-transcript-cold-load.sh`。
+实际 FAIL 总会非零退出；strict 下任何 SKIP 也失败，故上述 AX 限制仍在时 strict 会失败。
+
+第二批新增完整窗口选择：`NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_FULL_WINDOW=1 bash scripts/validation/check-transcript-cold-load.sh`。
+复用生产 `NewPiWorkbenchShell` / `Header` / `ProjectCard` / `SidebarEntry` / `RoleStrip`；固定 mock list 与上述同一 document fixture，
+room 模式只切换 header/role fixture，不运行真实 `ChatRoomFlowController`，不能验收聊天室阶段或 steering 业务。
+已报告 1200/900 × light/dark × session/room 共 8 组布局/草稿、独立真实 keyDown 与 Web DOM 检查通过；
+host 实测 detail 左边界约 234pt（含 macOS 容器边距；侧栏 min/ideal 226、max 250pt），不代表玻璃材质截图正确。
+
+全窗口产物为同目录下 `shell-{1200,900}-{light,dark}-{session,room}.png`，但**完整截图 UNVERIFIED**：
+根 NSView `cacheDisplay` + WK snapshot 在 macOS Tahoe 的玻璃侧栏区域空白，即使尝试实际 `NSSplitView` 子视图缓存仍无有效像素。
+生成 PNG 或退出码 0 不等于完整视觉捕获，未完成与原型同内容对照验收；玻璃缺口计入 SKIP/PARTIAL，strict 会因此失败。
+该轮无录屏权限，probe 本身不请求权限、不抓桌面；独立 component 模式的按钮/popover **9 项 AX SKIP** 仍需单独解决。
+
+第一批 WK/Debug 复跑及 cold/performance 数据已记录，不能当作第二批性能重跑；
+显式 toolbar 侧栏按钮后的完整 Debug build 和聊天室 controller 守卫最终复跑已通过。
+八项原型对照、人工验收清单及证据边界见 [实施记录](../docs/dev-notes/2026-09-12-document-workbench-ui.md)。
+
+### 原生鼠标送停与用量验证
+
+运行 `NEWPI_WORKBENCH_UI=1 NEWPI_WORKBENCH_INTERACTION=1 bash scripts/validation/check-transcript-cold-load.sh`。
+可追加 `NEWPI_WORKBENCH_FULL_WINDOW=1` 使用完整生产共享外壳；该模式只验证交互，不运行全尺寸截图矩阵。
+两种模式已实跑：窗口内真实鼠标事件触发送停，断言回调次数、禁用行为和草稿保留；用量 popover 实际开关，
+公开对象型可访问性 getter 核对五项传入值及无值时无旧数据。不直接调用 fixture 回调作为通过证据，不请求系统输入或录屏权限。
+
+完整窗口的侧栏 toolbar 按钮在独立宿主中仍无法定位，明确 SKIP；加 `NEWPI_WORKBENCH_UI_STRICT=1` 时因此失败。
+鼠标检查通过不等于旧 AX 按压检查或 VoiceOver 已通过，也不包括真实会话网络调用、聊天室阶段业务及全部外观组合。
+
+组件鼠标模式可附加 `NEWPI_WORKBENCH_INTERACTION_NARROW=1`（620pt，默认 900pt）与
+`NEWPI_WORKBENCH_INTERACTION_DARK=1`（深色，默认浅色）；NARROW 在 FULL_WINDOW 模式不生效。
+2026-09-12 后续实跑四种组合均在 strict 下通过：原生/WebKit 外观尺寸一致、阅读列无横向溢出、
+长模型名与 32×32 主按钮无碰撞，鼠标送停、草稿保持及用量有值/无值开关通过。
+焦点检查前及超时时打印 `FOCUS` 状态（应用激活结果、启动完成、key/main、可见性和前台 bundle ID）；
+保留 5s 焦点断言。此前两次焦点超时本轮未复现，不宣称已修复间歇性激活问题。
+
+### 正式 App 系统侧栏开关验证
+
+`scripts/validation/NativeSidebarChecks.swift` 检查真正 WindowGroup 中系统提供的侧栏按钮。
+需手动授权执行宿主辅助功能，并提前打开指定版本的 NewPi 普通会话、展开侧栏；不自动启动/退出应用，不请求权限，不截图。
+
+- 编译：`swiftc -parse-as-library scripts/validation/NativeSidebarChecks.swift -o /private/tmp/newpi-native-sidebar-checks`
+- 只读定位：`/private/tmp/newpi-native-sidebar-checks "$PWD/build/derived/Build/Products/Debug/NewPi.app" inspect`
+- 往返验收：`/private/tmp/newpi-native-sidebar-checks "$PWD/build/derived/Build/Products/Debug/NewPi.app" check`
+
+检查无旧自定义标识、仅一个系统开关，AXPress 收起/展开后恢复输入区布局与 AX 身份，现有文本保持。
+只识别 toolbar 内公开标识/英文或中文侧栏描述，未能唯一定位则失败，不猜坐标点击。
+不写草稿、调用模型或遍历 Web 正文；不验证动画帧率和 VoiceOver。系统收展可能正常更新窗口或滚动状态。
+源码保持在工作区内，临时目录只存编译产物，避免工作区外源码编辑授权。
+
+同一可执行文件新增两个显式模式（替换上述最后的 `check` 参数）：
+- `composer-inspect`：只读检查输入和菜单的 AX 属性，不打印草稿内容；属性未暴露时标为 `unavailable`，不误当作禁用。
+- `composer`：**会临时编辑输入框**。要求唯一输入框、空输入、发送禁用、当前会话未运行且侧栏展开；已有草稿/附件则中止。
+	经 AX 定位焦点后，仅向目标 App PID 投递键盘事件，输入固定文本；验证非空草稿经侧栏往返保持，
+	模型菜单及用量弹窗经 Escape 关闭后恢复焦点并可续写。不按 Return、不点击发送、不选模型、不使用剪贴板。
+	完成后仅清除与本次测试文本精确匹配的草稿；若检测到外部改动或 App 失去前台则报错，不覆盖用户输入。
+	测试结束核验空输入与发送禁用；原有撤销历史不清除，因此 undo 栈可能包含测试编辑。
+	运行期间请勿同时操作目标窗口；不代表真实输入法候选确认、跨会话草稿、模型切换或全部键盘路线通过。
+
+收尾实机验收还可使用 `NativeSidebarChecks` 的以下模式（同样在 App 路径后指定）：
+- `navigation-inspect`：只读报告导航行的选中状态、类型候选与几何，不输出标题。
+- `navigation`：沿用 `composer` 空输入守卫，临时输入 Session 草稿，选择首个可见聊天室候选，
+	核验聊天室详情确实出现，再通过原选中 Session 行返回。断言输入框重建、草稿恢复、当前模型值不变；
+	随后执行菜单/续写及测试文本清理。不会编辑聊天室草稿或推进流程。需当前 UI 为中文、侧栏展开，运行期间不要同时操作。
+- `layout`：检查正式普通会话 1200/900pt 的主要控件边界和输入区，结束时恢复原窗口尺寸；不截图、不写草稿。
+
+2026-09-12 最新一轮结果及未覆盖项见[收尾验收记录](../docs/dev-notes/2026-09-12-workbench-acceptance.md)。
+
+## 附件补充验收
+
+附件补充验收：`bash scripts/validation/check-attachment-processing.sh` 使用生产图片处理代码，
+生成真实 PNG/JPEG 验证解码、原样保留、缩放、预算和临时文件入口；不访问用户图片、剪贴板或模型。
+本机16项通过；provider图片说明编码另在Core包目录运行 `swift test --filter ImageAttachmentNoteEncodingTests`（6项通过）。
+
+`NativeSidebarChecks` 的实验性 `attachment` 模式尝试真实文件面板选择生成PNG并移除，要求空输入、无已有附件。
+**当前本机在系统路径文本框焦点定位处失败（exit 1）**，不要把该模式列为已通过或可靠的常规验收入口。
+它只确认附件按钮能打开文件面板；失败清理会取消面板并删除自己的临时图片。不会发送、使用剪贴板或更改模型。
+完整选择/移除、预览和拖放仍需人工验收，详见[收尾记录](../docs/dev-notes/2026-09-12-workbench-acceptance.md)。
+
 ## 共用审批 UI 验证
 
 `bash scripts/validation/check-approval-ui.sh` 编译真实 `NewPiApprovalContent`，通过独立 Accessibility 进程操作按钮/菜单并验证回调范围：
@@ -178,6 +275,24 @@ NEWPI_EXPECT_NO_UNUSED_HEIGHT=1 bash scripts/validation/check-transcript-cold-lo
 探针仅验证 UI 回调，不执行命令、不写授权；临时进程退出后清理。Core 的 `ChatRoomAuthorizationTests` 覆盖真正的授权记忆、隔离、撤销、取消、兼容工具与多角色引擎链路。
 
 ## 输出刷新期间输入草稿保护
+
+### 导航重建与草稿归属
+
+`bash scripts/validation/check-draft-navigation.sh` 提取生产草稿声明、初始化、绑定及 Session 提交守卫，
+用真实运行时/控制器和 NSTextView 验证强制重建后的 Session/Room 草稿隔离、图片保留、接受/拒绝发送与父级零通知。
+ViewModel 发送后端和 transcript 渲染是测试替身；不等于正式 App 导航、模型发送或图片采集验收。
+Session 不启动事件循环，聊天室用临时存储及空角色配置，不访问用户会话、不调用模型；需要 macOS 图形会话，不请求 AX 权限。
+
+`NEWPI_DRAFT_REVISION=61259c1 bash scripts/validation/check-draft-navigation.sh` 在临时目录提取旧版生产声明，
+会在 Room A→B→A 保留断言失败；不切分支、不覆盖工作区。仅用于相容版本的失败对照，非任意版本完整构建。
+生命周期边界见[修复记录](../docs/dev-notes/2026-09-12-navigation-draft-lifetime.md)。
+
+后续同一脚本还提取聊天室 `sendUserMessage`，走真实 controller/loop/store，验证临时消息路径不可写时
+草稿与内存历史保持、不落底；修复路径后空闲/运行中均只接受一次，并核对磁盘 ID 和空稿重复提交。
+Session 发送后端仍为替身，聊天室发送改用临时磁盘；不模拟部分写入/断电或真实网络。
+Core 定向入口：在 `Packages/NewPiCore/` 下执行 `swift test --filter ChatRoomUserSendTests`。
+
+### 流式刷新与输入法组词
 
 `NEWPI_EXPECT_DRAFT_FIX=1 bash scripts/validation/check-composer-streaming.sh` 用真实 SwiftUI `@State`、共用输入框和 AppKit NSTextInputClient 组词 API 模拟持续输出时的输入。
 覆盖普通文本/选区、未提交的中文拼音组词、空草稿多次组词、确认后发送、外部清空/恢复、同一事件循环内输入后立即发送及固定四行内部滚动。

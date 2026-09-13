@@ -411,6 +411,15 @@ public enum SessionManager {
         }
     }
 
+    /// 展示错误按当前分支提取，包括压缩屏障之前的历史；不参与 messages 投影。
+    public static func transcriptErrors(
+        from context: SessionContext, leafID: String?
+    ) -> [AnchoredSessionTranscriptError] {
+        context.branch(from: leafID).flatMap { entry in
+            (entry.transcriptErrors ?? []).map { AnchoredSessionTranscriptError(entryID: entry.id, error: $0) }
+        }
+    }
+
     public static func forkContext(_ context: SessionContext, at entryID: String) throws -> SessionContext {
         guard context.entries.contains(where: { $0.id == entryID }) else {
             throw AgentError.invalidState("Session entry not found: \(entryID)")

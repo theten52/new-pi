@@ -27,22 +27,62 @@ extension Color {
 
 struct NewPiChatEmptyStateView: View {
     var hasProject: Bool
+    var onSuggestion: ((String) -> Void)? = nil
+    var suggestionsEnabled = true
+    var projectName: String? = nil
+
+    static let suggestions: [(title: String, icon: String, prompt: String)] = [
+        ("理解项目结构", "folder", "请先梳理这个项目的结构和主要入口。"),
+        ("检查最近的改动", "doc.text.magnifyingglass", "检查最近的代码改动，先列出风险，不修改文件。"),
+        ("一起定位问题", "bubble.left", "帮我定位一个问题：")
+    ]
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 42))
+        ScrollView {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("n·")
+                .font(.system(size: 27, weight: .semibold, design: .rounded))
+                .foregroundStyle(NewPiWorkbenchStyle.accent)
+                .frame(width: 47, height: 47)
+                .background(NewPiWorkbenchStyle.accentSoft, in: RoundedRectangle(cornerRadius: 13))
+                .padding(.bottom, 11)
+            Text("NEW SESSION" + (projectName.map { " / \($0)" } ?? ""))
+                .font(.system(size: 11))
+                .tracking(2)
                 .foregroundStyle(.secondary)
-            Text(hasProject ? "Start a session" : "Open a project")
-                .font(.title3.weight(.semibold))
+            Text(hasProject ? "今天，我们从哪里开始？" : "选择你的工作项目")
+                .font(.system(size: 25, weight: .medium))
             Text(hasProject
-                ? "Ask NewPi to read, edit, or run commands in your project. Sessions are saved automatically."
-                : "Choose a project folder to load AGENTS.md, skills, and saved sessions.")
+                ? "项目已就绪。描述一个问题、一处改动，\n或者先一起理解这份代码。"
+                : "从侧边栏打开项目文件夹，加载项目指令、技能与已保存的会话。")
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .lineSpacing(5)
                 .frame(maxWidth: 420)
+            if hasProject, let onSuggestion {
+                ForEach(Self.suggestions, id: \.title) { suggestion in
+                    Button {
+                        onSuggestion(suggestion.prompt)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: suggestion.icon)
+                            Text(suggestion.title)
+                            Spacer()
+                            Image(systemName: "arrow.up.right")
+                        }
+                        .padding(12)
+                        .frame(maxWidth: 420, alignment: .leading)
+                        .background(NewPiWorkbenchStyle.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NewPiWorkbenchStyle.line) }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!suggestionsEnabled)
+                    .help(suggestionsEnabled ? "仅填入草稿，不会自动发送" : "已有草稿，请先处理当前输入")
+                }
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
+        .padding(32)
+        }
+        .background(NewPiWorkbenchStyle.surface)
     }
 }

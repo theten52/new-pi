@@ -14,10 +14,15 @@
 | [App 运行指南](../NewPiApp/README.md) | Xcode 运行、provider 配置与会话入口 |
 | [构建与校验脚本](../scripts/README.md) | App 打包及原生 UI/WebKit 校验；区别于核心包测试 |
 
+## 界面设计实验（非生产实现）
+
+- [主聊天界面 A/B 原型](design/ui-prototype/README.md)：可交互的文档工作台与轻量聊天方案，含六种演示场景、深浅色及窄窗口。尚未接入 App，不替代当前架构或已实现功能说明。
+
 ## 功能设计与实现记录
 
 | 文档 | 当前阅读定位 |
 |---|---|
+| [A 文档工作台 UI](dev-notes/2026-09-12-document-workbench-ui.md) | 用户已选 A；生产阅读面/共用输入区已调整，原型仍仅作设计对照；probe PARTIAL、最终复跑与人工验收边界 |
 | [Provider 配置](provider-config-design.md) | 配置设计与演进记录；示例类型不代替当前 Swift schema |
 | [审批权限](approval-permissions-design.md) | 审批设计与实现记录；“现状与痛点”为实施前背景，聊天室后续见下方授权记录 |
 | [API 指标](api-metrics-design.md) | 指标模型、请求时间线及实现边界 |

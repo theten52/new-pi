@@ -81,6 +81,8 @@ public struct ApprovalPolicy: Sendable, Equatable, Codable {
 
     public static let defaultToolBaseline: [String: ToolDangerLevel] = [
         "read": .low,
+        "read_test_report": .low,
+        "update_plan": .low, // 仅声明计划，无外部副作用。
         "write": .medium,
         "edit": .medium,
         "bash": .medium,
@@ -91,6 +93,10 @@ public struct ApprovalPolicy: Sendable, Equatable, Codable {
         if toolName.hasPrefix(MCPToolName.prefix) {
             // MCP 工具默认中风险，命中规则则升级。
             return .medium
+        }
+        // 旧配置字典没有新增工具时也使用默认分类；不改变其他工具的旧回退行为。
+        if toolName == "update_plan" || toolName == "read_test_report" {
+            return toolBaseline[toolName] ?? .low
         }
         return toolBaseline[toolName] ?? .medium
     }

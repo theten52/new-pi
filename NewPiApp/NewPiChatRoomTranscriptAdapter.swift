@@ -31,7 +31,7 @@ struct ChatRoomTranscriptAdapter {
         case .discussion: "讨论"
         case .voting: "投票"
         case .execution: "执行"
-        case .review: "Review"
+        case .review: "评审"
         case .completed: "完成"
         }
     }
@@ -56,11 +56,13 @@ struct ChatRoomTranscriptAdapter {
         for message in messages {
             // phase 切换处插分隔行（原 PhaseHeader 的文档内化，方案决策 4）：
             // id 以组内首条消息派生，插叙不漂移。
+            // ChatRoomMessage 没有历史轮次字段，不用当前 room.reviewRoundCount 回填。
             if message.phase != lastPhase {
                 items.append(NewPiTranscriptItem(
                     id: derivedID("phase-\(message.id)"),
                     kind: .system,
-                    body: "—— \(Self.phaseName(message.phase)) 阶段 ——"
+                    body: "\(Self.phaseName(message.phase))阶段",
+                    resultScopeID: "newpi:chatroom-phase"
                 ))
                 lastPhase = message.phase
             }
@@ -73,7 +75,8 @@ struct ChatRoomTranscriptAdapter {
             }
 
             if message.isUserMessage {
-                items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content))
+                items.append(NewPiTranscriptItem(id: messageID, kind: .user, body: message.content,
+                    timestamp: message.timestamp))
                 continue
             }
 
@@ -126,7 +129,12 @@ struct ChatRoomTranscriptAdapter {
                     body: body,
                     detailTurnID: chatroomToolCalls.isEmpty ? nil : speechKey,
                     speaker: roleName,
-                    streamingOverride: isLiveSegment && liveSpeech?.phase == .text
+                    streamingOverride: isLiveSegment && liveSpeech?.phase == .text,
+                    timestamp: message.timestamp,
+                    provider: message.provider,
+                    modelID: message.modelID,
+                    answerState: !chatroomToolCalls.isEmpty ? "intermediate" : lastInterruptedSegments[speechKey] != nil ? "incomplete" : isLiveSpeech ? nil : "final",
+                    resultScopeID: message.roleID + ":" + speechKey
                 ))
                 tintHues[messageID] = Self.hue(for: message.roleID)
             }
@@ -140,8 +148,11 @@ struct ChatRoomTranscriptAdapter {
                         state: result.map { .completed(isError: $0.isError) } ?? .running
                     ),
                     body: result?.output ?? "",
-                    toolCommand: Self.truncate(call.arguments),
-                    detailTurnID: speechKey
+                    toolCommand: Self.commandSummary(name: call.name, arguments: call.arguments),
+                    detailTurnID: speechKey,
+                    fileChanges: result?.fileChanges, durationSeconds: result?.durationSeconds,
+                    resultScopeID: message.roleID + ":" + speechKey,
+                    progressReport: result?.progressReport, testReport: result?.testReport
                 ))
             }
             if lastInterruptedSegments[speechKey] == message.id, let termination = message.termination {
@@ -157,6 +168,21 @@ struct ChatRoomTranscriptAdapter {
         let id = UUID()
         derivedIDs[key] = id
         return id
+    }
+
+    /// 只读取已知工具的结构化参数，不能把输出 prose 推断成计划或检查数量。
+    private static func commandSummary(name: String, arguments: String) -> String {
+        if let data = arguments.data(using: .utf8),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let key: String?
+            switch name {
+            case "bash": key = "command"
+            case "read", "write", "edit", "read_file", "write_file": key = "path"
+            default: key = nil
+            }
+            if let key, let value = object[key] as? String { return truncate(value) }
+        }
+        return truncate(arguments)
     }
 
     /// 工具参数摘要：压缩成单行并截断（对齐 newPiToolCommandSummary 的防超长思路）。

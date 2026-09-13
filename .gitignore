@@ -4,6 +4,8 @@ agent/
 **/.new-pi/agent/sessions/
 *.xcuserstate
 xcuserdata/
+# Xcode 为本地 Swift Package 自动生成的工作区与用户状态
+/Packages/NewPiCore/.swiftpm/xcode/
 .build/
 DerivedData/
 *.dmg

@@ -187,6 +187,12 @@ public struct WriteTool: AgentTool {
 
         onUpdate?(ToolProgress(message: "Writing \(fileURL.lastPathComponent)"))
 
+        let startedAt = ContinuousClock.now
+        let before = try ToolWriteCapture.read(fileURL, replacement: content)
+        if before.matches {
+            return ToolResult(content: "Unchanged \(path)",
+                durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
+        }
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -200,7 +206,10 @@ public struct WriteTool: AgentTool {
         }
         try FileManager.default.moveItem(at: tempURL, to: fileURL)
 
-        return ToolResult(content: "Wrote \(path) (\(content.utf8.count) bytes)")
+        return ToolResult(content: "Wrote \(path) (\(content.utf8.count) bytes)",
+            fileChanges: before.changes(path: fileURL.path, after: content,
+                patchPath: ToolFileChange.patchPath(for: fileURL, in: context.workingDirectory)),
+            durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
     }
 }
 
@@ -249,21 +258,21 @@ public struct EditTool: AgentTool {
 
         onUpdate?(ToolProgress(message: "Editing \(fileURL.lastPathComponent)"))
 
+        let startedAt = ContinuousClock.now
         let original = try String(contentsOf: fileURL, encoding: .utf8)
-        guard original.contains(oldString) else {
-            throw AgentError.invalidState("old_string not found in \(path)")
-        }
-
-        let occurrences = original.components(separatedBy: oldString).count - 1
-        guard occurrences == 1 else {
-            throw AgentError.invalidState("old_string must match exactly once, found \(occurrences) matches")
+        let updated = try ToolTextEdit.replacing(original, old: oldString, new: newString, path: path)
+        if original.utf8.elementsEqual(updated.utf8) {
+            return ToolResult(content: "Unchanged \(path)",
+                durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
         }
 
         let snapshotURL = try snapshotStore.snapshotBeforeEdit(sourceFile: fileURL)
-        let updated = original.replacingOccurrences(of: oldString, with: newString)
         try updated.write(to: fileURL, atomically: true, encoding: .utf8)
 
-        return ToolResult(content: "Edited \(path). Snapshot: \(snapshotURL.path)")
+        return ToolResult(content: "Edited \(path). Snapshot: \(snapshotURL.path)",
+            fileChanges: [.capture(path: fileURL.path, before: original, after: updated, beforeExists: true,
+                patchPath: ToolFileChange.patchPath(for: fileURL, in: context.workingDirectory))],
+            durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
     }
 }
 
@@ -417,6 +426,8 @@ public enum BuiltInTools {
             WriteTool(),
             EditTool(snapshotStore: .forProject(projectDirectory)),
             BashTool(),
+            UpdatePlanTool(),
+            ReadTestReportTool(),
         ]
     }
 

@@ -4,7 +4,7 @@ body {
   padding: 0;
   background: transparent;
   color: #24292f;
-  font: -apple-system-body;
+  font: 14px/1.85 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
   overflow: hidden;
 }
 
@@ -14,7 +14,8 @@ body {
   max-width: 100%;
   padding: 0;
   background: transparent;
-  font: -apple-system-body;
+  /* 必须显式覆盖 github-markdown-light 的 16px 与系统 body 字体简写。 */
+  font: 14px/1.85 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
   /* 终态光标绝对定位的包含块（offsetTop 也以它为基准） */
   position: relative;
 }
@@ -22,6 +23,16 @@ body {
 .markdown-body pre {
   white-space: pre;
   overflow-x: auto;
+}
+
+/* 流式与最终态复用同一代码排版，不依赖 markdown-block 包装层。 */
+.markdown-body code,
+.markdown-body tt,
+.markdown-body .highlight pre,
+.markdown-body pre,
+.markdown-body pre code,
+.markdown-body pre tt {
+  font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .markdown-body table {
@@ -44,22 +55,36 @@ body {
 }
 
 .markdown-body h2 {
-  font-size: 1.2em;
+  font-size: 20px;
+  line-height: 1.5;
   font-weight: 600;
-  margin: 0.8em 0 0.4em;
+  letter-spacing: -.5px;
+  margin: 23px 0 10px;
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .markdown-body h3 {
-  font-size: 1.1em;
+  font-size: 14px;
+  line-height: 1.7;
   font-weight: 600;
-  margin: 0.7em 0 0.3em;
+  margin: 22px 0 8px;
 }
+
+.markdown-body p { margin: 10px 0; }
+.markdown-body ul, .markdown-body ol { padding-left: 23px; margin: 10px 0; }
+.markdown-body li { padding-left: 3px; margin: 4px 0; }
+.markdown-body li + li { margin-top: 4px; }
+.markdown-body li > p { margin-top: 10px; }
+.markdown-body li::marker { color: var(--newpi-secondary, #56635a); }
+.markdown-body a { text-underline-offset: 3px; }
+.markdown-body :not(pre) > code { padding: 2px 4px; border-radius: 4px; color: var(--newpi-accent, #32654d); }
 
 /* 引用：左侧竖条 */
 .markdown-body blockquote {
-  margin: 0 0 16px;
-  padding: 0 0 0 12px;
-  border-left: 3px solid rgba(0, 0, 0, 0.15);
+  margin: 16px 0;
+  padding: 1px 0 1px 14px;
+  border-left: 2px solid var(--newpi-accent, #32654d);
   color: #57606a;
 }
 
@@ -127,8 +152,8 @@ body {
 
 /* ===== 代码块外框：语言标签 + 复制按钮 ===== */
 .code-block-container {
-  margin: 0 0 16px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
+  margin: 18px 0;
+  border: 1px solid var(--newpi-border, #e1e5df);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -137,41 +162,59 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 10px;
-  background: rgba(0, 0, 0, 0.04);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  font: -apple-system-caption1;
-  color: #57606a;
+  padding: 6px 12px;
+  background: var(--newpi-surface, #f4f5f1);
+  border-bottom: 1px solid var(--newpi-border, #e1e5df);
+  font: 10px/1.85 -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--newpi-secondary, #56635a);
 }
 
 .code-block-copy {
   border: none;
   background: transparent;
-  color: #57606a;
-  font: -apple-system-caption1;
+  color: var(--newpi-secondary, #56635a);
+  font: 10px/1.85 -apple-system, BlinkMacSystemFont, sans-serif;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 3px 6px;
   border-radius: 4px;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s ease-in-out;
 }
 
-.code-block-container:hover .code-block-copy {
+.code-block-container:hover .code-block-copy,
+.code-block-container:focus-within .code-block-copy {
   opacity: 1;
 }
 
+.code-block-copy:focus-visible {
+  outline: 2px solid var(--newpi-accent, #32654d);
+  outline-offset: 1px;
+}
+
 .code-block-copy:hover {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--newpi-border, #e1e5df);
 }
 
 .code-block-copy.copied {
   opacity: 1;
 }
 
-.code-block-container pre {
+.markdown-body .code-block-container pre {
   margin: 0;
+  padding: 13px 15px;
   border-radius: 0;
 }
+
+/* 确认文字常显在按钮旁；状态不改变正文/代码节点，也不伪造复制成功。 */
+[data-copy-feedback] { position: relative; }
+[data-copy-feedback]::after { content: attr(data-copy-feedback); font-size: 10px; margin-left: 6px; color: var(--newpi-secondary, #56635a); }
+.ti-action[data-copy-feedback]::after { position: absolute; top: 100%; right: 0; white-space: nowrap; padding: 3px 6px; background: var(--newpi-surface); border: 1px solid var(--newpi-border); border-radius: 4px; z-index: 2; }
+.copy-state-icon { display: inline-flex; vertical-align: middle; color: var(--newpi-secondary, #56635a); }
+.copy-state-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.copied .copy-state-icon { color: var(--newpi-accent, #32654d); }
+.copy-failed .copy-state-icon { color: var(--newpi-danger, #b44942); }
+[data-copy-status] > .transcript-icon, .ti-action[data-copy-status] > svg { display: none; }
+.copy-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* 尊重系统「减弱动态效果」偏好：关闭流光/脉冲动画与过渡，光标由 JS 计时移除 */
 @media (prefers-reduced-motion: reduce) {

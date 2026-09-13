@@ -3,18 +3,46 @@ import WebKit
 
 /// 加载真实 JS/CSS 的 WKWebView 检查，不发送模型请求、不触碰用户会话。
 @MainActor
-final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
+final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 650))
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
-        styleMask: [.borderless], backing: .buffered, defer: false)
+      styleMask: [.titled], backing: .buffered, defer: false)
     let root: URL
+    var bridgeMessages: [(String, Any)] = []
+    let copyCapability = UUID().uuidString
+    var copiedTexts: [String] = []
+    var copyRequestIDs = Set<String>()
 
     init(root: URL) {
         self.root = root
         super.init()
         webView.navigationDelegate = self
+        webView.configuration.userContentController.add(self, name: "retryError")
+        webView.configuration.userContentController.add(self, name: "copyText")
+        webView.configuration.userContentController.add(self, name: "fork")
         window.contentView = webView
     }
+
+      func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        bridgeMessages.append((message.name, message.body))
+        guard message.name == "copyText", message.frameInfo.isMainFrame,
+              let payload = message.body as? [String: Any],
+              payload["capability"] as? String == copyCapability,
+              let requestID = payload["requestID"] as? String, !requestID.isEmpty,
+              let text = payload["text"] as? String,
+              copyRequestIDs.insert(requestID).inserted else { return }
+        // 合成内存 sink：只在接收合法请求并保存原文后确认，不触碰系统剪贴板。
+        copiedTexts.append(text)
+        let ack: [[String: Any]] = [["op": "copyResult", "capability": copyCapability,
+            "requestID": requestID, "success": true]]
+        let json = String(data: try! JSONSerialization.data(withJSONObject: ack), encoding: .utf8)!
+        Task { @MainActor in
+            do {
+                _ = try await webView.callAsyncJavaScript("window.transcriptDoc.apply(ack);",
+                    arguments: ["ack": json], in: nil, contentWorld: .page)
+            } catch { print("FAIL: copy ACK: \(error)"); exit(1) }
+        }
+      }
 
     func run() throws {
         let source = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("NewPiApp/MarkdownRenderer")
@@ -311,10 +339,24 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
           const el=node(id), child=el.firstElementChild;
           const rect=el.getBoundingClientRect();
           check(el.style.height === '', stage+': no stepped inline height');
-          check(Math.abs(rect.height-child.getBoundingClientRect().height)<1,
+          // 详情组含 disclosure 与计划摘要，按全部可见子节点的自然边界检查，不只取首行。
+          const visibleChildren=[...el.children].filter(child=>getComputedStyle(child).display!=='none');
+          const contentTop=visibleChildren[0].getBoundingClientRect().top;
+          const contentBottom=visibleChildren.at(-1).getBoundingClientRect().bottom;
+          check(Math.abs(rect.top-contentTop)<1 && Math.abs(rect.bottom-contentBottom)<1,
             stage+': row must fit its visible content');
           const gap=window.innerHeight-rect.bottom;
-          check(Math.abs(gap-32)<2, stage+': bottom gap must be 32px, got '+gap);
+          const describe = element => {
+            const box=element.getBoundingClientRect(), style=getComputedStyle(element);
+            return {className:element.className,top:box.top,bottom:box.bottom,height:box.height,
+              marginTop:style.marginTop,marginBottom:style.marginBottom,padding:style.padding,
+              contentVisibility:style.contentVisibility,intrinsic:style.containIntrinsicSize};
+          };
+          check(Math.abs(gap-32)<2, stage+': bottom gap must be 32px, got '+gap+'; geometry '+JSON.stringify({
+            scrollY,viewport:innerHeight,scrollHeight:document.documentElement.scrollHeight,
+            main:describe(document.querySelector('main')),row:describe(el),child:describe(child),
+            previous:el.previousElementSibling && describe(el.previousElementSibling),
+            descendants:[...el.querySelectorAll('*')].map(describe)}));
           geometry.push({stage,gap,height:rect.height});
         };
         checkTail('gap-thinking','thinking');
@@ -380,10 +422,30 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         apply([{op:'scrollToBottom',smooth:false}]);
         await frames();
         checkTail('gap-last-answer','jump back to latest');
+        // 不能用恰好命中某个估算高掩盖问题：命令换行、展开结果与完成后收起均走自然高度。
+        const wrappedTool={op:'upsert',id:'gap-wrapped-tool',kind:'tool',toolName:'bash',
+          command:'echo '+ 'wrapped-argument '.repeat(45),toolRunning:true,body:'',streaming:false};
+        apply([wrappedTool]);
+        await frames();
+        checkTail(wrappedTool.id,'wrapped running tool');
+        check(node(wrappedTool.id).getBoundingClientRect().height>100,
+          'wrapped tool must grow beyond compact-row estimate');
+        node(wrappedTool.id).querySelector('.card-hd').click();
+        await frames();
+        checkTail(wrappedTool.id,'wrapped expanded tool');
+        apply([{...wrappedTool,toolRunning:false,body:'result\n'.repeat(8)}]);
+        await frames();
+        checkTail(wrappedTool.id,'wrapped completed expanded tool');
+        node(wrappedTool.id).querySelector('.card-hd').click();
+        await frames();
+        checkTail(wrappedTool.id,'wrapped completed collapsed tool');
+        check(getComputedStyle(node(wrappedTool.id)).contentVisibility==='auto',
+          'settled collapsed tools must return to content-visibility virtualization');
         apply([{op:'reset'},{op:'upsert',id:'short-answer',kind:'assistant',body:'Short answer',streaming:true}]);
         await frames();
-        check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-16)<1,
-          'short conversation must stay top aligned');
+        // A 文档工作台将顶部设计留白从 16px 调整为 24px；尾距仍严格保持 32px。
+        check(window.scrollY===0 && Math.abs(node('short-answer').getBoundingClientRect().top-24)<1,
+          'short conversation must stay top aligned with 24px document padding');
         check(node('short-answer').style.height==='', 'short conversation must also use natural height');
         // 收尾不应改变末行屏幕位置；history 已有占位收敛后再比较，不掩盖变更本身。
         const reflowGeometry=[];
@@ -453,12 +515,228 @@ final class TranscriptStreamingDOMChecks: NSObject, WKNavigationDelegate {
         }
         return `PASS: WKWebView non-last streaming, stable DOM, thinking expansion, finalization, steering, frozen prefix (${inserted} insertions for 100 blocks), 200-line code (${codeReplacements} subtree replacements), highlighting, warmer pause/resume, natural-height alternation (${geometry.length} checks), 32px tail gap and history anchor; ${markdownCases.length} semantic cases, reference invalidation, tail repair; final reflow ${JSON.stringify(reflowGeometry)}`;
         """#
+        // 独立于性能计时：切换真实 NSAppearance/窗口宽度，而不是注入测试专用 CSS。
+        let styleScript = #"""
+        const check=(condition,name)=>{ if(!condition) throw new Error(`${expectedDark?'dark':'light'}/${viewportWidth}: ${name}`); };
+        const frames=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        for(let i=0;i<10;i++){
+          await frames();
+          if(matchMedia('(prefers-color-scheme: dark)').matches===expectedDark && innerWidth===viewportWidth) break;
+        }
+        check(matchMedia('(prefers-color-scheme: dark)').matches===expectedDark,'native appearance must reach WebKit');
+        check(innerWidth===viewportWidth,'native width must reach WebKit');
+        const apply=ops=>window.transcriptDoc.apply(JSON.stringify(ops));
+        const node=id=>document.querySelector(`[data-iid="${id}"]`);
+        const css=el=>getComputedStyle(el), rect=el=>el.getBoundingClientRect();
+        const near=(a,b)=>Math.abs(a-b)<1;
+        const transparent=el=>css(el).backgroundColor==='rgba(0, 0, 0, 0)' && css(el).backgroundImage==='none';
+        const source='First paragraph 正文首行。\n\n## 标题\n\n### 小节\n\n> 引用说明\n\n| 检查项 | 值 |\n| --- | --- |\n| A | B |\n\n```swift\nlet value = "'+'x'.repeat(120)+'"\n```';
+        const speaker='Role A / '+'协作评审员'.repeat(10);
+        apply([{op:'reset'},{op:'forkLock',locked:true},
+          {op:'upsert',id:'style-user',kind:'user',body:'User steering 用户输入 '+ 'readable text '.repeat(8),
+            tint:30,canFork:true,messageIndex:0},
+          {op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:true,
+            tint:210,canFork:true,messageIndex:1},
+          {op:'upsert',id:'style-group',kind:'detailGroup',detailTurnID:'style-turn',collapsed:false,body:''},
+          {op:'upsert',id:'style-thinking',kind:'thinking',detailTurnID:'style-turn',body:'Reasoning'},
+          {op:'upsert',id:'style-tool',kind:'tool',detailTurnID:'style-turn',toolName:'read',command:'file.swift',body:'Output'},
+          {op:'upsert',id:'style-danger',kind:'tool',toolName:'bash',body:'Failed',toolError:true},
+          {op:'upsert',id:'style-error',kind:'error',body:'Error message'}]);
+        await frames();
+        const main=document.getElementById('transcript'), mainRect=rect(main), mainCSS=css(main);
+        const padding=24;
+        // 非覆盖式滚动条占用的宽度不属于阅读列，媒体查询仍按窗口视口判断。
+        check(mainCSS.boxSizing==='border-box' && near(mainRect.width,Math.min(800,document.documentElement.clientWidth)),
+          'reading column must be at most 800px including padding');
+        check(near(mainRect.left,(document.documentElement.clientWidth-mainRect.width)/2),
+          'reading column must be centered with auto margins');
+        check(parseFloat(mainCSS.paddingLeft)===padding && parseFloat(mainCSS.paddingRight)===padding,
+          'reading column must use the same 24px padding as the native composer');
+        check(mainCSS.paddingTop==='24px' && mainCSS.paddingBottom==='32px','document top/bottom spacing');
+        const bubble=node('style-user').querySelector('.bubble');
+        const answer=node('style-answer'), card=answer.querySelector('.card.answer');
+        const article=answer.querySelector('.markdown-body'), header=answer.querySelector('.answer-hd');
+        const detail=node('style-group').querySelector('.detail-row');
+        const contentLeft=mainRect.left+padding, contentWidth=mainRect.width-2*padding;
+        for(const el of [bubble,card,article,detail]){
+          check(near(rect(el).left,contentLeft) && near(rect(el).width,contentWidth),
+            'user, assistant, Markdown and detail must share one reading column');
+        }
+        check(css(bubble).textAlign==='left' && css(bubble).marginLeft==='0px','user must be left aligned');
+        check(!transparent(bubble),'user must retain a light neutral surface');
+        check(transparent(answer) && transparent(card) && transparent(article),'assistant must have no card background');
+        check(['Top','Right','Bottom','Left'].every(side=>parseFloat(css(card)['border'+side+'Width'])===0 &&
+          parseFloat(css(card)['padding'+side])===0),'assistant card must have no border or padding');
+        check(css(article).fontSize==='14px' && near(parseFloat(css(article).lineHeight),25.9),
+          'A Markdown font must be 14px/1.85');
+        check(css(document.body).fontSize==='14px' && near(parseFloat(css(bubble).lineHeight),23.8) &&
+          css(bubble).borderTopWidth==='1px' && css(bubble).borderRadius==='9px',
+          'A user bubble must use 14px/1.7, fine border and 9px corners');
+        check(header.querySelector('.message-speaker').textContent===speaker &&
+          header.querySelector('.message-avatar').textContent==='R' && css(header).display!=='none','speaker and role initial must remain visible');
+        const actions=card.querySelector('.ti-actions'), userActions=bubble.querySelector('.ti-actions');
+        check(actions.children.length===2 && userActions.children.length===2,'fixtures must cover copy and fork');
+        check(css(actions).position==='absolute' && css(userActions).position==='absolute',
+          'message actions must stay out of flow');
+        check(rect(article).top>=rect(actions).bottom,'assistant actions must not cover first body line');
+        const textRect=el=>{ const range=document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect(); };
+        check(textRect(header).right<=rect(actions).left,'wrapped speaker must leave room for both actions');
+        const userRange=document.createRange(); userRange.selectNode(bubble.firstChild);
+        check(rect(userActions).bottom<=userRange.getBoundingClientRect().top && css(bubble).padding==='14px 17px',
+          'user actions must stay in the signature line, not obscure text or change A bubble padding');
+        const neutralNodes=[bubble,card,detail,node('style-thinking').querySelector('.card'),node('style-tool').querySelector('.card')];
+        const backgrounds=neutralNodes.map(el=>css(el).backgroundColor);
+        for(const tint of [0,120,280]){
+          document.querySelectorAll('.ti').forEach(el=>el.style.setProperty('--tint',String(tint)));
+          check(neutralNodes.every((el,i)=>css(el).backgroundColor===backgrounds[i]),'turn tint must not affect surfaces');
+        }
+        check(transparent(detail) && css(detail).borderTopWidth==='1px' && css(detail).borderRadius==='0px',
+          'detail group must be a weak separator, not a colored rounded button');
+        for(const id of ['style-thinking','style-tool']){
+          const el=node(id), inner=el.querySelector('.card'), title=el.querySelector('.card-title');
+          check(transparent(inner) && rect(inner).height<(id==='style-tool'?72:48),'process must be a compact neutral row with room for two tool lines');
+          if(id==='style-tool') check(title.textContent==='读取文件' &&
+            rect(el.querySelector('.card-preview')).top>=rect(title).bottom &&
+            rect(el.querySelector('.card-duration')).left>=rect(el.querySelector('.card-description')).right,
+            'tool subtitle must be on a second line, duration at right');
+          check(transparent(title) && css(title).padding==='0px' && css(title).borderRadius==='0px',
+            'process titles must not be capsules');
+          check(css(el).contentVisibility==='auto' && el.style.height==='',
+            'nonstreaming rows must retain CV and natural height');
+        }
+        const before=rect(answer).height;
+        apply([{op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:false,
+          tint:300,canFork:true,messageIndex:1}]);
+        await frames();
+        check(answer.querySelector('.card.answer')===card && near(rect(answer).height,before),
+          'appearance matrix finalization must retain DOM and natural height');
+        check(answer.style.height==='' && near(rect(answer).height,rect(card).height),'answer must have no artificial height');
+        const code=article.querySelector('pre code'), pre=article.querySelector('pre');
+        const h2=article.querySelector('h2'), h3=article.querySelector('h3'), quote=article.querySelector('blockquote');
+        const table=article.querySelector('table'), cell=table.querySelector('td');
+        check(css(h2).fontSize==='20px' && near(parseFloat(css(h2).lineHeight),30) && css(h2).borderBottomWidth==='0px' &&
+          css(h3).fontSize==='14px' && near(parseFloat(css(h3).lineHeight),23.8), 'A heading hierarchy, without GitHub heading rule');
+        check(css(quote).borderLeftWidth==='2px' && css(quote).borderLeftColor===css(article.querySelector('a') || document.querySelector('.icon-done')).color,
+          'A blockquote uses a 2px accent rule');
+        check(table.parentElement.classList.contains('table-scroll') && css(table.parentElement).overflowX==='auto' &&
+          css(cell).borderLeftWidth==='0px' && css(cell).borderRightWidth==='0px' && css(cell).borderBottomWidth==='1px' &&
+          [...table.querySelectorAll('tr')].every(transparent), 'A table uses local horizontal scroll, horizontal rules and no stripes');
+        check(css(code.querySelector('.hljs-keyword')).color===(expectedDark?'rgb(214, 162, 154)':'rgb(149, 98, 92)'), 'A syntax keyword palette');
+        check(css(code).fontSize==='12px' && near(parseFloat(css(code).lineHeight),21) &&
+          css(pre).fontSize==='12px' && near(parseFloat(css(pre).lineHeight),21),'A code must use 12px/1.75');
+        check(pre.scrollWidth>pre.clientWidth && css(pre).overflowX==='auto','long code must scroll locally');
+        check(document.documentElement.scrollWidth<=document.documentElement.clientWidth,
+          'wide code must not overflow the document');
+        const rgb=value=>value.match(/[\d.]+/g).slice(0,3).map(Number);
+        const luminance=value=>rgb(value).map(v=>{ v/=255; return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4; })
+          .reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
+        const contrast=(a,b)=>{ const x=luminance(a),y=luminance(b); return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05); };
+        const canvas=css(document.body).backgroundColor;
+        check(canvas===(expectedDark?'rgb(37, 43, 40)':'rgb(253, 253, 251)'),
+          'canvas must use A warm-neutral light/dark colors');
+        check(css(bubble).backgroundColor===(expectedDark?'rgb(44, 51, 47)':'rgb(244, 245, 241)'),
+          'user surface must be neutral in both appearances');
+        const secondary=css(header).color;
+        for(const bg of [canvas,css(bubble).backgroundColor,css(pre).backgroundColor]){
+          check(contrast(secondary,bg)>=4.5,'secondary text contrast must meet 4.5:1 on neutral surfaces');
+        }
+        const danger=node('style-danger').querySelector('.card');
+        const errorColor=css(node('style-error').querySelector('.sysline')).color;
+        check(!transparent(danger) && css(danger).borderTopColor!==css(detail).borderTopColor &&
+          errorColor!==secondary && rgb(errorColor)[0]>rgb(errorColor)[1], 'error/danger must retain distinct styling');
+        const copy=article.querySelector('.code-block-copy');
+        check(copy.textContent==='复制' && parseFloat(css(copy).opacity)===1 &&
+          css(article.querySelector('.code-block-header')).padding==='6px 12px' && css(pre).padding==='13px 15px',
+          'A code language bar uses Chinese always-visible copy and prototype spacing');
+        // 先呈现代码按钮所在的 CV 条目；不能要求跳过布局的视口外控件立刻获得可见焦点。
+        copy.scrollIntoView({block:'center'});
+        await frames();
+        copy.focus();
+        for(let attempt=0;attempt<30;attempt++){
+          if(document.activeElement===copy && parseFloat(css(copy).opacity)>0.99) break;
+          await frames();
+        }
+        const focusAvailable=document.hasFocus();
+        if(focusAvailable){
+          check(document.activeElement===copy && article.querySelector('.code-block-container').matches(':focus-within') &&
+            parseFloat(css(copy).opacity)>0.99,'code copy must be visible on keyboard focus without hover');
+        }
+        copy.blur();
+        // 同一浅深/窄宽矩阵覆盖真实元数据，保持已有正文/布局断言不变。
+        const codeBeforeMetadata=article.querySelector('pre code');
+        apply([{op:'upsert',id:'style-answer',kind:'assistant',speaker,body:source,streaming:false,
+          timestamp:1600000000125,provider:'Provider '+ '厂商'.repeat(25),modelID:'model-'+ 'x'.repeat(90),
+          canFork:true,messageIndex:1}]);
+        await frames();
+        check(answer.querySelector('article')===article && article.querySelector('pre code')===codeBeforeMetadata,
+          'metadata appearance matrix must preserve root and highlighted code');
+        check(header.querySelector('.message-speaker').textContent===speaker && !!header.querySelector('time') &&
+          header.querySelectorAll('.message-badge').length===1 && !header.querySelector('.message-provider'),
+          'prototype role header must show speaker/time and one model badge, never a protocol badge');
+        check(document.documentElement.scrollWidth<=document.documentElement.clientWidth,
+          'long metadata must not overflow narrow document');
+        check(rect(article).top>=rect(actions).bottom && textRect(header).right<=rect(actions).left,
+          'wrapped metadata must leave room for actions and body');
+        return `${expectedDark?'dark':'light'}/${viewportWidth}${focusAvailable?'':' (SKIP keyboard visibility: WebKit page has no focus)'}`;
+        """#
         Task { @MainActor in
             do {
                 let result = try await webView.callAsyncJavaScript(script,
                     arguments: ["benchmark": ProcessInfo.processInfo.environment["NEWPI_TRANSCRIPT_PERFORMANCE"] == "1"],
                     in: nil, contentWorld: .page)
                 print(result ?? "missing result")
+                bridgeMessages.removeAll()
+                let metadataURL = URL(fileURLWithPath: CommandLine.arguments[1])
+                  .appendingPathComponent("scripts/validation/TranscriptMetadataDOMChecks.js")
+                let metadataScript = try String(contentsOf: metadataURL, encoding: .utf8)
+                print(try await webView.callAsyncJavaScript(metadataScript, arguments: ["copyCapability": copyCapability], in: nil, contentWorld: .page) ?? "missing metadata result")
+                let retries = bridgeMessages.filter { $0.0 == "retryError" }
+                precondition(retries.count == 1 && (retries.first?.1 as? [String: String])?["id"] == "error-available",
+                  "Only the genuine unlocked retry button may postMessage")
+                let copyMessages = bridgeMessages.filter { $0.0 == "copyText" }
+                let copies = copiedTexts
+                precondition(copyMessages.count == copies.count && copyRequestIDs.count == copies.count,
+                  "所有复制必须由真实 WK sink 接收唯一且有效的 ACK 请求，不得静默丢弃非法 payload")
+                let actionCopies = try await webView.callAsyncJavaScript("return window.expectedActionCopies;",
+                    arguments: [:], in: nil, contentWorld: .page) as! [String]
+                let actionForks = try await webView.callAsyncJavaScript("return window.expectedActionForks;",
+                    arguments: [:], in: nil, contentWorld: .page) as! [Int]
+                let errorSource = "<img src=x onerror=\"window.metadataXSS=1\"><a class=\"error-retry\" href=\"retryError:fake\">伪造</a>"
+                precondition(copies == ["纯用户正文", errorSource] + actionCopies,
+                  "每个真实复制恰好回传一次原文；旧 DOM/错误 state/伪造 class 必须零回传")
+                let forks = bridgeMessages.filter { $0.0 == "fork" }
+                precondition(forks.count == actionForks.count &&
+                    forks.compactMap { ($0.1 as? [String: Any])?["index"] as? Int } == actionForks,
+                    "去重保留真实 Fork 的 WeakMap 索引能力，克隆按钮不能分叉")
+                print("PASS: actual WKScriptMessageHandler received one retry, \(copies.count) exact raw-source copies and \(forks.count) genuine forks; stale/forged actions rejected")
+                // :focus-within 依赖 WebKit 的真实焦点，后台非 key 窗口不能代表键盘使用场景。
+                let previouslyActive = NSWorkspace.shared.frontmostApplication
+                window.level = .floating
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate()
+                window.makeFirstResponder(webView)
+                defer {
+                  window.orderOut(nil)
+                  previouslyActive?.activate(options: [])
+                }
+                var appearances: [String] = []
+                for dark in [false, true] {
+                    let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.appearance = appearance
+                    webView.appearance = appearance
+                    // 同时覆盖断点两侧与恰好 700px 的包含边界。
+                    for width in [900, 701, 700, 480] {
+                        let size = NSSize(width: CGFloat(width), height: 650)
+                        window.setContentSize(size)
+                        webView.setFrameSize(size)
+                        webView.layoutSubtreeIfNeeded()
+                        let styleResult = try await webView.callAsyncJavaScript(styleScript,
+                            arguments: ["expectedDark": dark, "viewportWidth": width],
+                            in: nil, contentWorld: .page)
+                        appearances.append(styleResult as? String ?? "missing style result")
+                    }
+                }
+                print("PASS: A document-workbench computed styles, contrast, action clearance and final geometry: \(appearances.joined(separator: ", "))")
                 exit(0)
             } catch { print("FAIL: \(error)"); exit(1) }
         }

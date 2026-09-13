@@ -31,6 +31,7 @@ PY
 xcrun swiftc -O -swift-version 6 -parse-as-library -I "$BIN/Modules" \
   "$TMP/TranscriptTypes.swift" "$TMP/Signature.swift" \
   "$ROOT/NewPiApp/NewPiChatRoomTranscriptAdapter.swift" \
+  "$ROOT/NewPiApp/NewPiComposerDraft.swift" "$ROOT/NewPiApp/ImageAttachmentProcessor.swift" \
   "$CONTROLLER" \
   "$ROOT/scripts/validation/ChatRoomPerformanceChecks.swift" \
   "$BIN"/NewPiCore.build/*.o -o "$TMP/check"

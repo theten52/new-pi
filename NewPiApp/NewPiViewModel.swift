@@ -48,6 +48,20 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
     let speaker: String?
     /// 聊天室显式声明正文流式状态；nil 保持 Session 的既有末条消息判定。
     let streamingOverride: Bool?
+    let timestamp: Date?
+    let provider: String?
+    let modelID: String?
+    let errorTitle: String?
+    let retryState: String?
+    let fileChanges: [ToolFileChange]?
+    let durationSeconds: Double?
+    /// final / intermediate / incomplete；nil 不推测历史完成状态。
+    let answerState: String?
+    /// 聊天室按发言身份聚合，不能依赖可能交错的 DOM 邻接关系。
+    let resultScopeID: String?
+    /// 结构化自报计划与已读取的测试报告；缺失不推测为零或成功。
+    let progressReport: ProgressReport?
+    let testReport: TestReport?
 
     init(
         id: UUID = UUID(),
@@ -59,7 +73,18 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         detailTurnID: String? = nil,
         attachments: [MessageAttachment] = [],
         speaker: String? = nil,
-        streamingOverride: Bool? = nil
+        streamingOverride: Bool? = nil,
+        timestamp: Date? = nil,
+        provider: String? = nil,
+        modelID: String? = nil,
+        errorTitle: String? = nil,
+        retryState: String? = nil,
+        fileChanges: [ToolFileChange]? = nil,
+        durationSeconds: Double? = nil,
+        answerState: String? = nil,
+        resultScopeID: String? = nil,
+        progressReport: ProgressReport? = nil,
+        testReport: TestReport? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -71,6 +96,33 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         self.attachments = attachments
         self.speaker = speaker
         self.streamingOverride = streamingOverride
+        self.timestamp = timestamp
+        self.provider = provider
+        self.modelID = modelID
+        self.errorTitle = errorTitle
+        self.retryState = retryState
+        self.fileChanges = fileChanges
+        self.durationSeconds = durationSeconds
+        self.answerState = answerState
+        self.resultScopeID = resultScopeID
+        self.progressReport = progressReport
+        self.testReport = testReport
+    }
+
+    /// 拷贝时默认保留全部元数据；双层可选允许显式清空索引/分组。
+    func copying(kind: NewPiTranscriptItemKind? = nil, body: String? = nil,
+                 messageIndex: Int?? = nil, detailTurnID: String?? = nil,
+                 retryState: String?? = nil, timestamp: Date?? = nil,
+                 provider: String?? = nil, modelID: String?? = nil,
+                 answerState: String?? = nil) -> Self {
+        Self(id: id, kind: kind ?? self.kind, body: body ?? self.body, toolCommand: toolCommand,
+             messageIndex: messageIndex ?? self.messageIndex, sessionEntryID: sessionEntryID,
+             detailTurnID: detailTurnID ?? self.detailTurnID, attachments: attachments,
+             speaker: speaker, streamingOverride: streamingOverride, timestamp: timestamp ?? self.timestamp,
+             provider: provider ?? self.provider, modelID: modelID ?? self.modelID, errorTitle: errorTitle,
+             retryState: retryState ?? self.retryState, fileChanges: fileChanges,
+             durationSeconds: durationSeconds, answerState: answerState ?? self.answerState,
+             resultScopeID: resultScopeID, progressReport: progressReport, testReport: testReport)
     }
 
     /// 显示用标题：从 kind 派生（保持既有显示/导出/日志文案不变）。
@@ -81,7 +133,7 @@ struct NewPiTranscriptItem: Identifiable, Sendable {
         case .assistant: "NewPi"
         case .summary: "Summary"
         case .system: "System"
-        case .error: "Error"
+        case .error: errorTitle ?? "Error"
         case .thinking: "Thinking"
         case .tool(_, .running): "Tool"
         case .tool(let name, .completed): "Tool \(name)"
@@ -187,6 +239,9 @@ struct TokenRateTracker {
 /// runtime 会被映射到 ViewModel 的 @Published 属性上。
 @MainActor
 final class SessionRuntime: ObservableObject {
+    let approvalRuntimeID = UUID()
+    /// 独立观察的易失草稿；详情视图切到聊天室再重建时继续复用。
+    let composerDraft = NewPiComposerDraft()
     var latencyTrace: RequestLatencyTrace?
     var latencyFirstTextItemID: UUID?
     let session: AgentSession
@@ -212,6 +267,41 @@ final class SessionRuntime: ObservableObject {
     /// 不等排在收尾事件之后的 agentEnd（实测晚 2-6s，BACKLOG-STATUS-READY-LAG）。
     /// 保守原则：仅影响状态展示；isStreaming（Stop 按钮 / composer 禁用 / 钉底判定）不变。
     @Published var finalAnswerComplete = false
+    /// 运行结果独立于活动阶段，agentEnd 不得把失败改成完成。
+    @Published var turnOutcome: String?
+    var retryingErrorID: UUID?
+    var requestModel: ModelConfig?
+
+    var turnStatusText: String {
+        if isStreaming {
+            if pendingToolApproval != nil { return "等待审批" }
+            if retryingErrorID != nil { return "正在重试" }
+            switch agentActivity {
+            case .idle: return "正在处理"
+            case .thinking: return "正在思考"
+            case .writing: return "正在生成"
+            case .runningTool(let name): return "正在执行 \(name)"
+            }
+        }
+        return turnOutcome ?? "等待输入"
+    }
+
+    /// 仅统计本用户轮次已有工具结果，不推测计划总步数或测试通过数。
+    var turnSummaryText: String? {
+        let items = liveTranscript ?? transcript
+        guard let start = items.lastIndex(where: { $0.kind == .user }) else { return nil }
+        var completed = 0, failed = 0, running = 0
+        for item in items[start...] {
+            switch item.kind {
+            case .tool(_, .running): running += 1
+            case .tool(_, .completed(let isError)):
+                if isError { failed += 1 } else { completed += 1 }
+            default: break
+            }
+        }
+        return completed + failed + running > 0
+            ? "工具：已完成 \(completed) · 失败 \(failed) · 运行中 \(running)" : nil
+    }
     /// 进行/已完成工具调用的命令摘要（toolCallID → 摘要）：start 时提取，end 时回填入条目，
     /// 覆盖「end 找不到 running 条目」的兜底分支。
     var toolCommands: [String: String] = [:]
@@ -268,6 +358,7 @@ private struct BuiltSessionPayload: Sendable {
     /// 从历史消息重建的累计 / 最近一轮 token 用量（新建会话为零值）。
     let totalUsage: UsageStats
     let lastTurnUsage: UsageStats
+    let turnOutcome: String?
 }
 
 /// 从历史消息累计 token 用量（纯函数，供后台线程调用）。
@@ -309,7 +400,8 @@ private func isDetailGroupItem(_ assistant: AssistantMessage) -> Bool {
 /// 无需保留既有条目的 id）。
 private func makeTranscriptItems(
     from messages: [AgentMessage],
-    entryIDs: [String]
+    entryIDs: [String],
+    errors: [AnchoredSessionTranscriptError] = []
 ) -> [NewPiTranscriptItem] {
     var items: [NewPiTranscriptItem] = []
     items.reserveCapacity(messages.count)
@@ -348,7 +440,8 @@ private func makeTranscriptItems(
                 body: user.content,
                 messageIndex: index,
                 sessionEntryID: entryID,
-                attachments: user.attachments
+                attachments: user.attachments,
+                timestamp: user.timestamp
             ))
             // marker 在 user 之后、组内条目之前插入（恢复默认收起）；无组内条目的 turn 不插。
             if turnHasGroupItems {
@@ -363,7 +456,8 @@ private func makeTranscriptItems(
                 items.append(NewPiTranscriptItem(
                     kind: .thinking(isStreaming: false),
                     body: assistant.reasoningContent,
-                    detailTurnID: currentTurnID
+                    detailTurnID: currentTurnID,
+                    timestamp: assistant.timestamp, provider: assistant.provider, modelID: assistant.modelID
                 ))
             }
             // 组内 / 组外判定：有 toolCalls → 中间 assistant（组内）；否则最终答复（组外）。
@@ -375,7 +469,9 @@ private func makeTranscriptItems(
                 body: assistant.text,
                 messageIndex: index,
                 sessionEntryID: entryID,
-                detailTurnID: assistantIsGroup ? currentTurnID : nil
+                detailTurnID: assistantIsGroup ? currentTurnID : nil,
+                timestamp: assistant.timestamp, provider: assistant.provider, modelID: assistant.modelID,
+                answerState: assistantIsGroup ? "intermediate" : assistant.stopReason == .stop ? "final" : "incomplete"
             ))
         case let .toolResult(result):
             let command = lastToolCalls[result.toolCallID]
@@ -386,13 +482,72 @@ private func makeTranscriptItems(
                 toolCommand: command,
                 messageIndex: index,
                 sessionEntryID: entryID,
-                detailTurnID: currentTurnID
+                detailTurnID: currentTurnID,
+                timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                progressReport: result.progressReport, testReport: result.testReport
             ))
         case let .compactionSummary(summary):
             items.append(NewPiTranscriptItem(kind: .summary, body: summary, messageIndex: index, sessionEntryID: entryID))
         }
     }
-    return items
+    return mergingPersistedTranscriptErrors(errors, into: items)
+}
+
+/// 冷恢复时将错误放到所属用户轮次末尾，不注入模型消息。
+/// 压缩已隐藏原用户条目时，将其错误留在摘要前，避免丢失或错挂到新轮次。
+private func mergingPersistedTranscriptErrors(
+    _ errors: [AnchoredSessionTranscriptError], into items: [NewPiTranscriptItem]
+) -> [NewPiTranscriptItem] {
+    guard !errors.isEmpty else { return items }
+    let visibleAnchors = Set(items.compactMap { item in
+        item.kind == .user || item.kind == .summary ? item.sessionEntryID : nil
+    })
+    var byAnchor: [String: [NewPiTranscriptItem]] = [:]
+    var compacted: [NewPiTranscriptItem] = []
+    var seen = Set(items.map(\.id))
+    for record in errors where seen.insert(record.error.id).inserted {
+        let item = transcriptErrorItem(record.error)
+        if visibleAnchors.contains(record.entryID) {
+            byAnchor[record.entryID, default: []].append(item)
+        } else if items.contains(where: { $0.kind == .summary }) {
+            compacted.append(item)
+        }
+    }
+    var result = compacted
+    var anchor: String?
+    for item in items {
+        if item.kind == .user || item.kind == .summary {
+            if let anchor { result.append(contentsOf: byAnchor.removeValue(forKey: anchor) ?? []) }
+            anchor = item.sessionEntryID
+        }
+        result.append(item)
+    }
+    if let anchor { result.append(contentsOf: byAnchor.removeValue(forKey: anchor) ?? []) }
+    return result
+}
+
+private func transcriptErrorItem(_ error: SessionTranscriptError) -> NewPiTranscriptItem {
+    NewPiTranscriptItem(id: error.id, kind: .error, body: error.message,
+                        timestamp: error.timestamp, provider: error.provider, modelID: error.modelID,
+                        errorTitle: error.errorTitle, retryState: error.retryState)
+}
+
+/// 冷恢复/结束快照共用真实消息与错误状态，不根据当前选择模型补写历史。
+private func restoredTurnOutcome(messages: [AgentMessage], errors: [AnchoredSessionTranscriptError], entryIDs: [String]) -> String? {
+    guard let start = messages.lastIndex(where: { if case .user = $0 { return true }; return false }) else { return nil }
+    if start < entryIDs.count, let error = errors.last(where: { $0.entryID == entryIDs[start] })?.error {
+        if error.retryState == "recovered" { return "已恢复" }
+        return error.errorTitle == "已停止" ? "已停止" : "失败"
+    }
+    if case let .assistant(assistant) = messages.last {
+        switch assistant.stopReason {
+        case .aborted: return "已停止"
+        case .error: return "失败"
+        case .stop: return "已完成"
+        default: return "已停止（未完成）"
+        }
+    }
+    return "已停止（未完成）"
 }
 
 /// 判定某条消息是否属于「组内条目」（用于预计算 turn 是否有组内条目）。
@@ -473,6 +628,8 @@ final class NewPiViewModel: ObservableObject {
     /// 会话切换序号：同项目内连续切换时，只有「最后发起的那次」才算数（GLM review 意见2 竞态防护）。
     /// 防止"冷 A 慢构建 → 热 B 先切 → A 就绪后覆盖 B"把用户拽回未选择的会话。复用分支同样取号。
     private var sessionSwitchGeneration = 0
+    /// 空态显式发送的创建流程用它核对导航身份，不暴露可写切换状态。
+    var composerSessionGeneration: Int { sessionSwitchGeneration }
     private var providerStateGeneration = 0
 
     private var runtimes: [String: SessionRuntime] = [:]
@@ -490,10 +647,16 @@ final class NewPiViewModel: ObservableObject {
     private var mcpToolsLoadTask: Task<[MCPAgentTool], Never>?
 
     var agentStatusPresentation: NewPiAgentStatusPresentation {
+        if let runtime = activeRuntime {
+            return NewPiAgentStatusPresentation(
+                systemImage: runtime.isStreaming ? "sparkles" : (runtime.turnOutcome == "失败" ? "exclamationmark.circle" : "checkmark.circle"),
+                label: runtime.turnStatusText, isActive: runtime.isStreaming
+            )
+        }
         if pendingToolApproval != nil {
             return NewPiAgentStatusPresentation(
                 systemImage: "hand.raised.circle",
-                label: "NewPi is waiting for approval…",
+                label: "等待审批",
                 isActive: true
             )
         }
@@ -502,25 +665,25 @@ final class NewPiViewModel: ObservableObject {
             case .idle:
                 return NewPiAgentStatusPresentation(
                     systemImage: "sparkles",
-                    label: "NewPi is working…",
+                    label: "正在处理",
                     isActive: true
                 )
             case .thinking:
                 return NewPiAgentStatusPresentation(
                     systemImage: "brain.head.profile",
-                    label: "NewPi is thinking…",
+                    label: "正在思考",
                     isActive: true
                 )
             case .writing:
                 return NewPiAgentStatusPresentation(
                     systemImage: "text.append",
-                    label: "NewPi is writing…",
+                    label: "正在生成",
                     isActive: true
                 )
             case let .runningTool(name):
                 return NewPiAgentStatusPresentation(
                     systemImage: NewPiAgentStatusPresentation.toolIcon(for: name),
-                    label: "NewPi is running \(name)…",
+                    label: "正在执行 \(name)",
                     isActive: true
                 )
             }
@@ -528,13 +691,13 @@ final class NewPiViewModel: ObservableObject {
         if projectURL == nil {
             return NewPiAgentStatusPresentation(
                 systemImage: "folder",
-                label: "NewPi is ready — open a project",
+                label: "等待打开项目",
                 isActive: false
             )
         }
         return NewPiAgentStatusPresentation(
             systemImage: "checkmark.circle",
-            label: "NewPi is ready",
+            label: "等待输入",
             isActive: false
         )
     }
@@ -1002,6 +1165,20 @@ final class NewPiViewModel: ObservableObject {
         await beginSession(restoredContext: nil, fileURL: nil)
     }
 
+    /// 用户主动点击空态建议才创建会话；不请求模型，异步创建被导航取代时不回填。
+    func fillSuggestedDraft(_ prompt: String) async {
+        guard let project = projectURL, !isSwitchingSession else { return }
+        if let runtime = activeRuntime {
+            runtime.composerDraft.fillSuggestion(prompt)
+            return
+        }
+        let expectedGeneration = sessionSwitchGeneration + 1
+        await startNewSession()
+        guard projectURL == project, sessionSwitchGeneration == expectedGeneration,
+              let runtime = activeRuntime, runtime.transcript.isEmpty else { return }
+        runtime.composerDraft.fillSuggestion(prompt)
+    }
+
     func resumeSession(_ summary: SessionSummary) async {
         guard let projectURL else { return }
         sessionSwitchGeneration += 1
@@ -1305,18 +1482,20 @@ final class NewPiViewModel: ObservableObject {
 
                 let messages = await session.context.messages
                 let entryIDs = await session.branchEntryIDs()
+                let errors = await session.transcriptErrors()
                 let branchPointCount = await session.branchPointCount()
                 let usage = accumulateUsage(from: messages)
                 return BuiltSessionPayload(
                     session: session,
                     header: header,
                     fileURL: sessionFileURL,
-                    transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs),
+                    transcriptItems: makeTranscriptItems(from: messages, entryIDs: entryIDs, errors: errors),
                     branchPointCount: branchPointCount,
                     isForkedBranch: branchPointCount > 0,
                     liveMessageCount: messages.count,
                     totalUsage: usage.total,
-                    lastTurnUsage: usage.lastTurn
+                    lastTurnUsage: usage.lastTurn,
+                    turnOutcome: restoredTurnOutcome(messages: messages, errors: errors, entryIDs: entryIDs)
                 )
             }.value
 
@@ -1353,6 +1532,7 @@ final class NewPiViewModel: ObservableObject {
             runtime.liveMessageCount = payload.liveMessageCount
             runtime.totalUsage = payload.totalUsage
             runtime.lastTurnUsage = payload.lastTurnUsage
+            runtime.turnOutcome = payload.turnOutcome
             runtime.lastUsedAt = Date()
 
             // 竞态防护（下层 :744 只防跨项目换项目；这里再防同项目内「冷 A 慢构建 → 热 B 先切 → A 覆盖 B」——
@@ -1490,6 +1670,8 @@ final class NewPiViewModel: ObservableObject {
         }
 
         // 新 turn 开始（BACKLOG-DETAIL-GROUP）：重置当前 turn 状态，marker 留待首条组内条目懒创建。
+        let userMessage = UserMessage(content: text, attachments: attachments)
+        let message = AgentMessage.user(userMessage)
         let liveTurnID = "live-\(UUID().uuidString)"
         runtime.detailTurnID = liveTurnID
         runtime.detailGroupMarkerID = nil
@@ -1502,19 +1684,23 @@ final class NewPiViewModel: ObservableObject {
             body: text,
             messageIndex: runtime.liveMessageCount,
             attachments: attachments,
+            timestamp: userMessage.timestamp,
             on: runtime
         )
         runtime.detailLiveTurnIDByUser[userItemID] = liveTurnID
         runtime.isStreaming = true
+        runtime.turnOutcome = nil
+        runtime.retryingErrorID = nil
+        runtime.requestModel = activeProfile.map { effectiveModelConfig(for: $0) }
+        runtime.transcript = runtime.transcript.map {
+            $0.retryState == "available" ? $0.copying(retryState: .some("unavailable")) : $0
+        }
         runtime.agentActivity = .thinking
         runtime.latencyTrace = latency
         runtime.latencyFirstTextItemID = nil
         runtime.docController?.beginLatencyTrace(latency, firstTextItemID: nil)
         reflectActive()
         NewPiLogger.info(category: "app", message: "User message sent", details: NewPiLogFormat.truncate(text, maxLength: 1000))
-        let message = attachments.isEmpty
-            ? AgentMessage.user(text)
-            : AgentMessage.user(text, attachments: attachments)
         Task {
             await RequestLatencyContext.$current.withValue(latency) {
                 await runtime.session.prompt(message)
@@ -1523,6 +1709,39 @@ final class NewPiViewModel: ObservableObject {
         accepted = true
         latency.mark(.sendAccepted)
         return true
+    }
+
+    /// UI 必须传所属 runtime；主线程同步领取锁，双击不能启动两个请求。
+    func retryError(id: UUID, on runtime: SessionRuntime) {
+        guard runtime === activeRuntime, !runtime.isStreaming,
+              let latest = runtime.transcript.last(where: { $0.kind == .error }),
+              latest.id == id, latest.retryState == "available" else { return }
+        runtime.isStreaming = true
+        runtime.turnOutcome = nil
+        runtime.retryingErrorID = id
+        runtime.finalAnswerComplete = false
+        runtime.streamingBubbleComplete = false
+        runtime.agentActivity = .idle
+        runtime.requestModel = activeProfile.map { effectiveModelConfig(for: $0) }
+        runtime.transcript = runtime.transcript.map { $0.id == id ? $0.copying(retryState: .some("retrying")) : $0 }
+        if let user = runtime.transcript.last(where: { $0.kind == .user }) {
+            runtime.detailTurnID = runtime.detailLiveTurnIDByUser[user.id]
+                ?? detailTurnID(userMessageIndex: user.messageIndex ?? 0, entryID: user.sessionEntryID)
+            runtime.detailGroupMarkerID = runtime.detailTurnID.flatMap { runtime.detailMarkerIDs[$0] }
+        }
+        reflectActive()
+        Task {
+            do {
+                try await runtime.session.retry(errorID: id)
+            } catch {
+                runtime.isStreaming = false
+                runtime.retryingErrorID = nil
+                runtime.turnOutcome = "失败"
+                runtime.transcript = runtime.transcript.map { $0.id == id ? $0.copying(retryState: .some("unavailable")) : $0 }
+                appendTranscript(kind: .system, body: error.localizedDescription, on: runtime)
+                if runtime === activeRuntime { reflectActive() }
+            }
+        }
     }
 
     /// MIME 类型 → 文件扩展名。
@@ -1552,6 +1771,21 @@ final class NewPiViewModel: ObservableObject {
         }
     }
 
+    /// 正文按钮只领取所属运行实例的最新请求，不能借当前全局镜像批准另一条调用。
+    @discardableResult
+    func respondToTranscriptApproval(requestID: String, decision: ApprovalDecision, on runtime: SessionRuntime) -> Bool {
+        guard runtime === activeRuntime, let request = runtime.pendingToolApproval,
+              request.id == requestID,
+              !decision.approved || request.dangerLevel != .high || decision.scope == .once else { return false }
+        runtime.pendingToolApproval = nil
+        reflectActive()
+        Task {
+            await runtime.session.respondToToolApproval(requestID: requestID,
+                approved: decision.approved, scope: decision.scope)
+        }
+        return true
+    }
+
     func denyPendingTool() {
         guard let request = pendingToolApproval, let runtime = activeRuntime else {
             NewPiLogger.error(category: "app", message: "Deny tapped with no pending request")
@@ -1576,11 +1810,10 @@ final class NewPiViewModel: ObservableObject {
         commitLiveTranscript(on: runtime)
         runtime.pendingToolApproval = nil
         runtime.agentActivity = .idle
+        runtime.turnOutcome = "已停止"
         reflectActive()
         Task {
             await runtime.session.abort()
-            runtime.isStreaming = false
-            reflectActive()
         }
     }
 
@@ -1648,18 +1881,7 @@ final class NewPiViewModel: ObservableObject {
                     }
                     // 边界事件逐条 hop MainActor：hop 滞后即主线程不可用时长（卡顿探针）。
                     let enqueuedAt = Date()
-                    await MainActor.run { [weak self] in
-                        guard let self else { return }
-                        let hopLag = Date().timeIntervalSince(enqueuedAt)
-                        if hopLag > 0.5 {
-                            NewPiLogger.info(
-                                category: "app",
-                                message: "UI event loop stall",
-                                details: "hopLag=\(String(format: "%.2f", hopLag))s event=\(event.diagnosticName)（边界事件等 MainActor 调度的时长）"
-                            )
-                        }
-                        handle(event, on: runtime)
-                    }
+                    await self?.handle(event, on: runtime, enqueuedAt: enqueuedAt)
                 }
             }
         }
@@ -1718,10 +1940,15 @@ final class NewPiViewModel: ObservableObject {
         return String(format: "%.0f tok/s", rate)
     }
 
-    private func handle(_ event: AgentEvent, on runtime: SessionRuntime) {
+    private func handle(_ event: AgentEvent, on runtime: SessionRuntime, enqueuedAt: Date = Date()) async {
+        let hopLag = Date().timeIntervalSince(enqueuedAt)
+        if hopLag > 0.5 {
+            NewPiLogger.info(category: "app", message: "UI event loop stall",
+                             details: "hopLag=\(hopLag)s event=\(event.diagnosticName)")
+        }
         // 非文本事件是状态边界：先把未合并的流式增量冲刷掉，保证内容顺序一致且不丢失。
         switch event {
-        case .messageStart, .messageEnd, .toolExecutionStart, .toolExecutionEnd, .agentEnd, .error:
+        case .messageStart, .messageEnd, .toolApprovalRequired, .toolExecutionStart, .toolExecutionEnd, .agentEnd, .error:
             flushStreamingDelta(on: runtime)
         default:
             break
@@ -1731,6 +1958,7 @@ final class NewPiViewModel: ObservableObject {
         switch event {
         case .agentStart:
             runtime.isStreaming = true
+            runtime.requestModel = await runtime.session.config.model
             runtime.agentActivity = .thinking
             runtime.streamingBubbleComplete = false
             runtime.finalAnswerComplete = false
@@ -1751,8 +1979,7 @@ final class NewPiViewModel: ObservableObject {
             }
         case let .messageEnd(message):
             // token 用量累计：assistant 消息落定即累加，状态栏实时反映（BACKLOG-TOKEN-BAR）。
-            if case let .assistant(assistant) = message,
-               assistant.usage.inputTokens > 0 || assistant.usage.outputTokens > 0 {
+                if case let .assistant(assistant) = message {
                 runtime.totalUsage.add(assistant.usage)
                 runtime.lastTurnUsage = assistant.usage
             }
@@ -1764,6 +1991,18 @@ final class NewPiViewModel: ObservableObject {
             if case let .assistant(assistant) = message {
                 runtime.streamingBubbleComplete = true
                 freezeStreamingThinking(on: runtime)
+                if let index = runtime.transcript.lastIndex(where: { $0.kind == .assistant && $0.messageIndex == nil }) {
+                    runtime.transcript[index] = runtime.transcript[index].copying(
+                        timestamp: .some(assistant.timestamp), provider: .some(assistant.provider), modelID: .some(assistant.modelID),
+                        answerState: .some(!assistant.toolCalls.isEmpty ? "intermediate" : assistant.stopReason == .stop ? "final" : "incomplete"))
+                }
+                if !assistant.reasoningContent.isEmpty,
+                   let index = runtime.transcript.lastIndex(where: {
+                       if case .thinking = $0.kind { return $0.body == assistant.reasoningContent }; return false
+                   }) {
+                    runtime.transcript[index] = runtime.transcript[index].copying(
+                        timestamp: .some(assistant.timestamp), provider: .some(assistant.provider), modelID: .some(assistant.modelID))
+                }
                 // 状态栏提前翻 ready（BACKLOG-STATUS-READY-LAG）：仅当这是最终答复
                 //（无工具调用 → 不会再来新一轮）；有工具调用则后面还有 turn，不翻。
                 if assistant.toolCalls.isEmpty {
@@ -1789,10 +2028,11 @@ final class NewPiViewModel: ObservableObject {
             enqueueThinkingDelta(delta, on: runtime)
             hasVisibleStateChange = false
         case let .toolApprovalRequired(request):
+            commitLiveTranscript(on: runtime)
             runtime.pendingToolApproval = request
             NewPiLogger.info(
                 category: "app",
-                message: "UI: showing tool approval sheet",
+                message: "UI: showing transcript tool approval",
                 details: """
                 requestID=\(request.id)
                 tool=\(request.toolName)
@@ -1817,6 +2057,7 @@ final class NewPiViewModel: ObservableObject {
             )
         case let .toolExecutionEnd(id, name, result):
             // isError 入 kind（结构化），body 只存原始输出，不再拼接 "Error: " 前缀。
+            commitLiveTranscript(on: runtime)
             let command = runtime.toolCommands.removeValue(forKey: id)
             if let lastIndex = runtime.transcript.indices.last,
                case .tool(_, .running) = runtime.transcript[lastIndex].kind {
@@ -1828,7 +2069,14 @@ final class NewPiViewModel: ObservableObject {
                     toolCommand: command ?? running.toolCommand,
                     messageIndex: running.messageIndex,
                     sessionEntryID: running.sessionEntryID,
-                    detailTurnID: running.detailTurnID
+                    detailTurnID: running.detailTurnID,
+                    attachments: running.attachments, speaker: running.speaker,
+                    streamingOverride: running.streamingOverride, timestamp: running.timestamp,
+                    provider: running.provider, modelID: running.modelID,
+                    errorTitle: running.errorTitle, retryState: running.retryState,
+                    fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    answerState: running.answerState, resultScopeID: running.resultScopeID,
+                    progressReport: result.progressReport, testReport: result.testReport
                 )
             } else {
                 ensureDetailGroupMarker(on: runtime)
@@ -1837,6 +2085,8 @@ final class NewPiViewModel: ObservableObject {
                     body: result.content,
                     toolCommand: command,
                     detailTurnID: runtime.detailTurnID,
+                    fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport, testReport: result.testReport,
                     on: runtime
                 )
             }
@@ -1847,7 +2097,6 @@ final class NewPiViewModel: ObservableObject {
             )
             runtime.agentActivity = .thinking
         case .agentEnd:
-            runtime.isStreaming = false
             runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
@@ -1857,16 +2106,30 @@ final class NewPiViewModel: ObservableObject {
                 tokenRateText = nil
             }
             NewPiLogger.info(category: "app", message: "UI: agent finished")
+            // 同一消费循环内 await，保持发送锁直到重建完成，旧收尾不会覆盖新轮次。
+            await appendTruncatedOutputNoticeIfNeeded(on: runtime)
+            await syncTranscriptMessageIndices(on: runtime)
+            runtime.isStreaming = false
+            runtime.retryingErrorID = nil
             Task {
-                await appendTruncatedOutputNoticeIfNeeded(on: runtime)
-                await syncTranscriptMessageIndices(on: runtime)
                 await autoLabelCurrentSessionIfNeeded(on: runtime)
                 await refreshSessionList()
             }
         case let .error(error):
             runtime.latencyTrace?.mark(.failed)
-            appendTranscript(kind: .error, body: error.localizedDescription, on: runtime)
-            runtime.isStreaming = false
+            freezeStreamingThinking(on: runtime)
+            let records = await runtime.session.transcriptErrors()
+            if let record = records.last, record.error.message == error.localizedDescription,
+               !runtime.transcript.contains(where: { $0.id == record.error.id }) {
+                runtime.transcript.append(transcriptErrorItem(record.error))
+            } else {
+                // 校验/持久化前错误没有已接受用户锚点，不能提供假重试。
+                runtime.transcript.append(NewPiTranscriptItem(kind: .error, body: error.localizedDescription,
+                    timestamp: Date(), provider: runtime.requestModel?.provider, modelID: runtime.requestModel?.modelID,
+                    errorTitle: error.transcriptTitle, retryState: "unavailable"))
+            }
+            runtime.turnOutcome = error == .aborted ? "已停止" : "失败"
+            runtime.finalAnswerComplete = false
             runtime.latencyTrace?.mark(.uiUnlocked)
             runtime.agentActivity = .idle
             runtime.pendingToolApproval = nil
@@ -1952,10 +2215,8 @@ final class NewPiViewModel: ObservableObject {
             return false
         })
 
-        // error 条目是 UI 层临时条目，不在 context.messages 里。若 rebuild 直接 removeAll，
-        // 紧随 agentEnd 的全量重建会把刚 append 的 error 抹掉，导致错误信息一闪而过。
-        // 因此在重建前把 error 条目抢救出来，重建后追加回 transcript 末尾。
-        let preservedErrors = runtime.transcript.filter { $0.kind == .error }
+        // error 不在 context.messages 中；保存原轮次顺序，不能统一追加到新一轮末尾。
+        let previousTranscript = runtime.transcript
 
         // 方案 A：保留前缀（被压缩的完整旧历史）时，撤掉 removeAll，改为截断到前缀末尾。
         if preservedPrefixCount > 0 {
@@ -1964,15 +2225,7 @@ final class NewPiViewModel: ObservableObject {
             // 旧 index 要么越界抛错，要么静默 fork 到错误位置。压缩历史语义上不可回 fork，
             // 因此把保留前缀的 messageIndex 统一置 nil（canFork 即 false，按钮不显示）。
             for i in 0..<preservedPrefixCount {
-                runtime.transcript[i] = NewPiTranscriptItem(
-                    id: runtime.transcript[i].id,
-                    kind: runtime.transcript[i].kind,
-                    body: runtime.transcript[i].body,
-                    toolCommand: runtime.transcript[i].toolCommand,
-                    messageIndex: nil,
-                    sessionEntryID: runtime.transcript[i].sessionEntryID,
-                    detailTurnID: runtime.transcript[i].detailTurnID
-                )
+                runtime.transcript[i] = runtime.transcript[i].copying(messageIndex: .some(nil))
             }
             runtime.transcript.removeSubrange(preservedPrefixCount...)
         } else {
@@ -2029,7 +2282,8 @@ final class NewPiViewModel: ObservableObject {
                     // 附件必须随 rebuild 保留（BACKLOG-IMAGE-INPUT）：agentEnd 后的
                     // rebuild 重建全部条目，漏传会使用户气泡缩略图在回复结束后消失
                     //（与加载路径 257 行保持一致）。
-                    attachments: user.attachments
+                    attachments: user.attachments,
+                    timestamp: user.timestamp
                 ))
                 // marker 在 user 之后、组内条目之前插入（恢复默认收起）；marker id 从缓存复用防闪烁。
                 if turnHasGroupItems, let turnID = currentTurnID {
@@ -2050,7 +2304,8 @@ final class NewPiViewModel: ObservableObject {
                     runtime.transcript.append(NewPiTranscriptItem(
                         kind: .thinking(isStreaming: false),
                         body: assistant.reasoningContent,
-                        detailTurnID: currentTurnID
+                        detailTurnID: currentTurnID,
+                        timestamp: assistant.timestamp, provider: assistant.provider, modelID: assistant.modelID
                     ))
                 }
                 let assistantIsGroup = assistantBelongsToGroup(assistant)
@@ -2060,7 +2315,9 @@ final class NewPiViewModel: ObservableObject {
                     body: assistant.text,
                     messageIndex: index,
                     sessionEntryID: entryID,
-                    detailTurnID: assistantIsGroup ? currentTurnID : nil
+                    detailTurnID: assistantIsGroup ? currentTurnID : nil,
+                    timestamp: assistant.timestamp, provider: assistant.provider, modelID: assistant.modelID,
+                    answerState: assistantIsGroup ? "intermediate" : assistant.stopReason == .stop ? "final" : "incomplete"
                 ))
             case let .toolResult(result):
                 let command = lastToolCalls[result.toolCallID]
@@ -2072,7 +2329,9 @@ final class NewPiViewModel: ObservableObject {
                     toolCommand: command,
                     messageIndex: index,
                     sessionEntryID: entryID,
-                    detailTurnID: currentTurnID
+                    detailTurnID: currentTurnID,
+                    timestamp: result.timestamp, fileChanges: result.fileChanges, durationSeconds: result.durationSeconds,
+                    progressReport: result.progressReport, testReport: result.testReport
                 ))
             case let .compactionSummary(summary):
                 runtime.transcript.append(NewPiTranscriptItem(
@@ -2085,8 +2344,7 @@ final class NewPiViewModel: ObservableObject {
             }
         }
         runtime.liveMessageCount = messages.count
-        // 把抢救出来的 error 条目追加回末尾（保持错误信息可见，不被 rebuild 吞掉）。
-        runtime.transcript.append(contentsOf: preservedErrors)
+        runtime.transcript = restoringErrors(from: previousTranscript, into: runtime.transcript)
         if runtime === activeRuntime {
             transcript = runtime.transcript
         }
@@ -2113,6 +2371,36 @@ final class NewPiViewModel: ObservableObject {
             return streamingAssistantID
         }
         return UUID()
+    }
+
+    /// 将易失错误放回所属轮次末尾，而非整份文档末尾。用户/摘要 ID 由重建路径保留，
+    /// 即使取消时的临时 assistant 被快照替换，错误也不会跟着下一轮移动。
+    /// 压缩前缀可能已经含错误：先过滤再统一恢复，避免相同 ID 被重复追加。
+    /// 分支截去的轮次不再存在时，不把其错误嫁接到保留下来的其他轮次。
+    private func restoringErrors(
+        from previous: [NewPiTranscriptItem], into rebuilt: [NewPiTranscriptItem]
+    ) -> [NewPiTranscriptItem] {
+        var errorsByAnchor: [UUID?: [NewPiTranscriptItem]] = [:]
+        var anchor: UUID?
+        var seenErrors = Set<UUID>()
+        for item in previous {
+            if item.kind == .user || item.kind == .summary { anchor = item.id }
+            if item.kind == .error, seenErrors.insert(item.id).inserted {
+                errorsByAnchor[anchor, default: []].append(item)
+            }
+        }
+        var result: [NewPiTranscriptItem] = []
+        result.reserveCapacity(rebuilt.count + seenErrors.count)
+        anchor = nil
+        for item in rebuilt where item.kind != .error {
+            if item.kind == .user || item.kind == .summary {
+                result.append(contentsOf: errorsByAnchor.removeValue(forKey: anchor) ?? [])
+                anchor = item.id
+            }
+            result.append(item)
+        }
+        result.append(contentsOf: errorsByAnchor.removeValue(forKey: anchor) ?? [])
+        return result
     }
 
     private func cleanupEmptySessions() async {
@@ -2210,11 +2498,19 @@ final class NewPiViewModel: ObservableObject {
     private func syncTranscriptMessageIndices(on runtime: SessionRuntime) async {
         let messages = await runtime.session.context.messages
         let entryIDs = await runtime.session.branchEntryIDs()
+        let errors = await runtime.session.transcriptErrors()
         // 方案 A：agentEnd 后不再全量 rebuild（那会 removeAll 后用截断的 context.messages
         // 覆盖完整 transcript，compaction 被压缩的历史就此丢失）。改为就地校准：保留
         // runtime.transcript 完整内容，只把刚结束的 streaming assistant 补上 messageIndex /
         // sessionEntryID（fork 锚点 + id 稳定所需），并校准 liveMessageCount。
         calibrateTranscriptAfterAgentEnd(from: messages, entryIDs: entryIDs, on: runtime)
+        let ids = Set(errors.map { $0.error.id })
+        runtime.transcript = mergingPersistedTranscriptErrors(errors, into: runtime.transcript.filter { !ids.contains($0.id) })
+        // 无已接受用户的校验错误保留当前失败；真实快照优先。
+          if runtime.turnOutcome != "失败", runtime.turnOutcome != "已停止",
+              let outcome = restoredTurnOutcome(messages: messages, errors: errors, entryIDs: entryIDs) {
+            runtime.turnOutcome = outcome
+        }
         runtime.branchPointCount = await runtime.session.branchPointCount()
         runtime.isForkedBranch = runtime.branchPointCount > 0
         if runtime === activeRuntime {
@@ -2271,8 +2567,8 @@ final class NewPiViewModel: ObservableObject {
         )
     }
 
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil) {
-        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID)
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, progressReport: ProgressReport? = nil, testReport: TestReport? = nil) {
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, progressReport: progressReport, testReport: testReport)
         if let r = activeRuntime {
             r.transcript.append(item)
             transcript = r.transcript
@@ -2283,10 +2579,10 @@ final class NewPiViewModel: ObservableObject {
 
     /// 追加到指定 runtime（一般是后台 session 的事件循环），只在它是当前显示时同步到 published。
     @discardableResult
-    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], on runtime: SessionRuntime) -> UUID {
+    private func appendTranscript(kind: NewPiTranscriptItemKind, body: String, toolCommand: String? = nil, messageIndex: Int? = nil, sessionEntryID: String? = nil, detailTurnID: String? = nil, attachments: [MessageAttachment] = [], timestamp: Date? = nil, fileChanges: [ToolFileChange]? = nil, durationSeconds: Double? = nil, progressReport: ProgressReport? = nil, testReport: TestReport? = nil, on runtime: SessionRuntime) -> UUID {
         // 边界路径前置提交（STREAMING-LAYOUT-ISOLATION）：追加前先并影子。
         commitLiveTranscript(on: runtime)
-        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments)
+        let item = NewPiTranscriptItem(kind: kind, body: body, toolCommand: toolCommand, messageIndex: messageIndex, sessionEntryID: sessionEntryID, detailTurnID: detailTurnID, attachments: attachments, timestamp: timestamp, fileChanges: fileChanges, durationSeconds: durationSeconds, progressReport: progressReport, testReport: testReport)
         runtime.transcript.append(item)
         if runtime === activeRuntime {
             transcript = runtime.transcript
@@ -2457,20 +2753,15 @@ final class NewPiViewModel: ObservableObject {
         freezeStreamingThinking(into: &items)
         if let last = items.last, last.kind == .assistant {
             let index = items.count - 1
-            items[index] = NewPiTranscriptItem(
-                id: last.id,
-                kind: .assistant,
-                body: last.body + delta,
-                messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID,
-                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
-            )
+            items[index] = last.copying(body: last.body + delta,
+                detailTurnID: .some(last.detailTurnID ?? runtime.detailTurnID))
         } else {
             ensureDetailGroupMarker(into: &items, on: runtime)
             items.append(NewPiTranscriptItem(
                 kind: .assistant,
                 body: delta,
-                detailTurnID: runtime.detailTurnID
+                detailTurnID: runtime.detailTurnID,
+                provider: runtime.requestModel?.provider, modelID: runtime.requestModel?.modelID
             ))
         }
         // 流式 flush 不再镜像到 viewModel.transcript：面板观察的是 runtime.transcript，
@@ -2481,20 +2772,15 @@ final class NewPiViewModel: ObservableObject {
     private func appendOrUpdateThinking(_ delta: String, into items: inout [NewPiTranscriptItem], on runtime: SessionRuntime) {
         if let last = items.last, case .thinking(true) = last.kind {
             let index = items.count - 1
-            items[index] = NewPiTranscriptItem(
-                id: last.id,
-                kind: .thinking(isStreaming: true),
-                body: last.body + delta,
-                messageIndex: last.messageIndex,
-                sessionEntryID: last.sessionEntryID,
-                detailTurnID: last.detailTurnID ?? runtime.detailTurnID
-            )
+            items[index] = last.copying(body: last.body + delta,
+                detailTurnID: .some(last.detailTurnID ?? runtime.detailTurnID))
         } else {
             ensureDetailGroupMarker(into: &items, on: runtime)
             items.append(NewPiTranscriptItem(
                 kind: .thinking(isStreaming: true),
                 body: delta,
-                detailTurnID: runtime.detailTurnID
+                detailTurnID: runtime.detailTurnID,
+                provider: runtime.requestModel?.provider, modelID: runtime.requestModel?.modelID
             ))
         }
     }
@@ -2511,14 +2797,7 @@ final class NewPiViewModel: ObservableObject {
     private func freezeStreamingThinking(into items: inout [NewPiTranscriptItem]) {
         guard let last = items.last, case .thinking(true) = last.kind else { return }
         let index = items.count - 1
-        items[index] = NewPiTranscriptItem(
-            id: last.id,
-            kind: .thinking(isStreaming: false),
-            body: last.body,
-            messageIndex: last.messageIndex,
-            sessionEntryID: last.sessionEntryID,
-            detailTurnID: last.detailTurnID
-        )
+        items[index] = last.copying(kind: .thinking(isStreaming: false))
     }
 
     /// marker 懒创建（BACKLOG-DETAIL-GROUP）：当前 turn 尚未创建 disclosure 行时，
@@ -2563,15 +2842,7 @@ final class NewPiViewModel: ObservableObject {
         // a. 找到最后一个 detailTurnID == 当前 turn 的 assistant 条目，置 nil 移出组。
         if let lastIndex = runtime.transcript.lastIndex(where: { $0.kind == .assistant && $0.detailTurnID == turnID }) {
             let item = runtime.transcript[lastIndex]
-            runtime.transcript[lastIndex] = NewPiTranscriptItem(
-                id: item.id,
-                kind: item.kind,
-                body: item.body,
-                toolCommand: item.toolCommand,
-                messageIndex: item.messageIndex,
-                sessionEntryID: item.sessionEntryID,
-                detailTurnID: nil
-            )
+            runtime.transcript[lastIndex] = item.copying(detailTurnID: .some(nil))
         }
         // b. marker：最终答复已移出组后，若组内已无剩余条目，说明这是无中间过程的
         //    纯最终答复 turn——移除 marker（否则留下一个点开后空无一物的「处理详情」行，
@@ -2584,12 +2855,7 @@ final class NewPiViewModel: ObservableObject {
                 $0.id != markerID && $0.detailTurnID == turnID
             }
             if turnHasRemainingGroupItems {
-                runtime.transcript[markerIndex] = NewPiTranscriptItem(
-                    id: marker.id,
-                    kind: .detailGroup(collapsed: true),
-                    body: marker.body,
-                    detailTurnID: marker.detailTurnID
-                )
+                runtime.transcript[markerIndex] = marker.copying(kind: .detailGroup(collapsed: true))
             } else {
                 runtime.transcript.remove(at: markerIndex)
             }

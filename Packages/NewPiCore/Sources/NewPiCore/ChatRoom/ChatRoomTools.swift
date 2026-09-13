@@ -83,7 +83,7 @@ public enum ChatRoomTools {
 
     /// 获取所有工具定义
     public static func allDefinitions() -> [ToolDefinition] {
-        [readFile, writeFile, listDirectory, searchFiles]
+        [readFile, writeFile, listDirectory, searchFiles, UpdatePlanTool().definition, ReadTestReportTool().definition]
     }
 }
 
@@ -122,15 +122,38 @@ public actor ChatRoomToolExecutor {
 
     /// 执行工具调用
     public func execute(toolCall: ToolCallContent) async throws -> ChatRoomToolResult {
+        let startedAt = ContinuousClock.now
+        var result: ChatRoomToolResult
         switch toolCall.name {
         case "read_file":
-            return await executeReadFile(toolCallID: toolCall.id, arguments: toolCall.arguments)
+            result = await executeReadFile(toolCallID: toolCall.id, arguments: toolCall.arguments)
         case "write_file":
+            // 写入自行计时，排除等待用户审批的时间。
             return await executeWriteFile(toolCallID: toolCall.id, arguments: toolCall.arguments)
         case "list_directory":
-            return await executeListDirectory(toolCallID: toolCall.id, arguments: toolCall.arguments)
+            result = await executeListDirectory(toolCallID: toolCall.id, arguments: toolCall.arguments)
         case "search_files":
-            return await executeSearchFiles(toolCallID: toolCall.id, arguments: toolCall.arguments)
+            result = await executeSearchFiles(toolCallID: toolCall.id, arguments: toolCall.arguments)
+        case "update_plan", "read_test_report":
+            // 兼容路径也走现有风险评估/审批，不能直接调用而绕过 gate。
+            let approval = await approvalManager.requestApproval(toolCall: toolCall,
+                roleID: currentRoleID, roleName: currentRoleName)
+            if case let .rejected(reason) = approval {
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: reason, isError: true)
+            }
+            try Task.checkCancellation()
+            let started = ContinuousClock.now
+            do {
+                let tool: any AgentTool = toolCall.name == "update_plan" ? UpdatePlanTool() : ReadTestReportTool()
+                let report = try await tool.execute(id: toolCall.id, arguments: toolCall.arguments,
+                    context: ToolContext(workingDirectory: URL(fileURLWithPath: projectPath)), onUpdate: nil)
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: report.content, isError: report.isError,
+                    durationSeconds: ToolExecutionTiming.seconds(since: started),
+                    progressReport: report.progressReport, testReport: report.testReport)
+            } catch {
+                return ChatRoomToolResult(toolCallID: toolCall.id, output: error.localizedDescription, isError: true,
+                    durationSeconds: ToolExecutionTiming.seconds(since: started))
+            }
         default:
             return ChatRoomToolResult(
                 toolCallID: toolCall.id,
@@ -138,6 +161,8 @@ public actor ChatRoomToolExecutor {
                 isError: true
             )
         }
+        result.durationSeconds = ToolExecutionTiming.seconds(since: startedAt)
+        return result
     }
 
     /// 读取文件
@@ -239,7 +264,16 @@ public actor ChatRoomToolExecutor {
 
         let directory = fileURL.deletingLastPathComponent()
 
+        let startedAt = ContinuousClock.now
         do {
+            // 审批之后重新校验，拒绝等待期间新增的根外符号链接。
+            guard validatePath(path) != nil else { return pathValidationError(toolCallID: toolCallID) }
+            let recordedURL = fileURL.standardizedFileURL.resolvingSymlinksInPath()
+            let before = try ToolWriteCapture.read(fileURL, replacement: content)
+            if before.matches {
+                return ChatRoomToolResult(toolCallID: toolCallID, output: "文件内容未变化: \(path)",
+                    fileChanges: [], durationSeconds: ToolExecutionTiming.seconds(since: startedAt))
+            }
             // 确保目录存在
             if !FileManager.default.fileExists(atPath: directory.path) {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -248,13 +282,18 @@ public actor ChatRoomToolExecutor {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             return ChatRoomToolResult(
                 toolCallID: toolCallID,
-                output: "文件已写入: \(path)"
+                output: "文件已写入: \(path)",
+                fileChanges: before.changes(path: recordedURL.path, after: content,
+                    patchPath: ToolFileChange.patchPath(for: recordedURL, in: URL(fileURLWithPath: projectPath))),
+                durationSeconds: ToolExecutionTiming.seconds(since: startedAt)
             )
         } catch {
             return ChatRoomToolResult(
                 toolCallID: toolCallID,
                 output: "写入文件失败: \(error.localizedDescription)",
-                isError: true
+                isError: true,
+                fileChanges: [],
+                durationSeconds: ToolExecutionTiming.seconds(since: startedAt)
             )
         }
     }

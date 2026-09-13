@@ -3,6 +3,19 @@ import NewPiCore
 import SwiftUI
 import WebKit
 
+/// 易失展示态；不落盘、不进入模型上下文。DOM UUID 由 Coordinator 按运行身份与请求映射。
+struct NewPiTranscriptApproval: Sendable, Equatable {
+    let runtimeIdentity: String
+    let request: ToolApprovalRequest
+    let workingDirectory: URL
+    var role: String? = nil
+    var isRoom = false
+
+    var scopes: [ApprovalScope] {
+        request.dangerLevel == .high ? [.once] : isRoom ? [.once, .session] : [.once, .session, .forever]
+    }
+}
+
 /// 单文档 transcript 的原生侧控制器（BACKLOG-SINGLE-DOC，Phase 2）。
 /// 原生只发意图（jumpTo / scrollToBottom / restoreAnchor），滚动位置与布局完全由文档自持；
 /// isNearBottom / 滚动锚点 / turn offsets 均由 JS 侧上报（原生不计算任何滚动几何）。
@@ -93,8 +106,20 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     var tintHues: [UUID: Int] = [:]
     /// 冷启动/切回时要恢复的滚动锚点（nil = 落底）。仅首个内容批次应用一次。
     var restoreEntry: ScrollPositionStore.Entry?
+    /// 可选展示上下文；不从目录/模型正文推断项目或轮次。
+    var projectName: String? = nil
+    var dateContext: String? = nil
     /// 分叉意图回传（点击某条消息的 Fork 按钮时触发，参数为 messageIndex）。
     var onFork: ((Int) -> Void)?
+    /// 仅表达重试意图；运行时负责重试与草稿隔离。
+    var onRetry: ((UUID) -> Void)? = nil
+    var approval: NewPiTranscriptApproval? = nil
+    var onApproval: ((String, ApprovalDecision) -> Void)? = nil
+    /// 返回 true 仅表示当前 runtime 已领取此决策，不表示工具执行成功。
+    /// 新接线优先于旧 void 回调；旧回调继续可用，但不能生成“已允许/已拒绝”回执。
+    var onApprovalAccepted: ((String, ApprovalDecision) -> Bool)? = nil
+    /// 每次领取时重新读取真实 runtime，不能只信 SwiftUI 的上一帧。
+    var approvalIsCurrent: (() -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller)
@@ -106,6 +131,8 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(context.coordinator, name: "copyText")
         configuration.userContentController.add(context.coordinator, name: "fork")
+        configuration.userContentController.add(context.coordinator, name: "retryError")
+        configuration.userContentController.add(context.coordinator, name: "transcriptApproval")
         configuration.userContentController.add(context.coordinator, name: "rendererError")
         configuration.userContentController.add(context.coordinator, name: "scrollState")
         configuration.userContentController.add(context.coordinator, name: "turnOffsets")
@@ -123,6 +150,12 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         context.coordinator.sessionID = storeKey
         context.coordinator.pendingRestoreEntry = restoreEntry
         context.coordinator.onFork = onFork
+        context.coordinator.onRetry = onRetry
+        context.coordinator.onApproval = onApproval
+        context.coordinator.onApprovalAccepted = onApprovalAccepted
+        context.coordinator.approvalIsCurrent = approvalIsCurrent
+        context.coordinator.updateContext(projectName: projectName, dateContext: dateContext)
+        context.coordinator.updateApproval(approval, after: transcript.last?.id)
         context.coordinator.attach(webView)
         context.coordinator.setVisible(isVisible)
         context.coordinator.loadShell()
@@ -131,18 +164,28 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onFork = onFork
+        context.coordinator.onRetry = onRetry
+        context.coordinator.onApproval = onApproval
+        context.coordinator.onApprovalAccepted = onApprovalAccepted
+        context.coordinator.approvalIsCurrent = approvalIsCurrent
+        context.coordinator.updateContext(projectName: projectName, dateContext: dateContext)
+        // 不受 liveDriven 内容独占影响；隐藏时仍立即撤销旧权限。
         context.coordinator.setVisible(isVisible)
+        context.coordinator.updateApproval(approval, after: transcript.last?.id, flushImmediately: false)
         context.coordinator.apply(
             transcript: transcript,
             isStreaming: isStreaming,
             streamingBubbleComplete: streamingBubbleComplete,
             tintHues: tintHues
         )
+        context.coordinator.flushPresentation()
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "copyText")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "fork")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "retryError")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "transcriptApproval")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "rendererError")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "scrollState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "turnOffsets")
@@ -171,12 +214,112 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         /// 上一次已应用的条目签名（id → 签名）与顺序，用于增量 diff。
         private var lastSignatures: [UUID: Signature] = [:]
         private var lastOrder: [UUID] = []
+        /// 已观察到结束但无结果的调用；仅页面宿主内存，下一轮运行不能让旧步骤复活。
+        private var interruptedToolIDs: Set<UUID> = []
         /// 会话标识（供控制器持久化滚动锚点）。
         var sessionID: UUID?
         /// 待恢复的滚动锚点：首个内容批次应用后随批下发一次（nil = 落底）。
         var pendingRestoreEntry: ScrollPositionStore.Entry?
         /// 分叉意图回传（由视图在 make/update 时注入）。
         var onFork: ((Int) -> Void)?
+        var onRetry: ((UUID) -> Void)?
+        var onApproval: ((String, ApprovalDecision) -> Void)?
+        var onApprovalAccepted: ((String, ApprovalDecision) -> Bool)?
+        var approvalIsCurrent: (() -> Bool)?
+        /// 默认真正写入系统剪贴板；隔离探针可替换 sink，不绕过能力校验或确认路径。
+        var writeClipboard: (String) -> Bool = { text in
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            return pasteboard.setString(text, forType: .string)
+        }
+        private var latestApproval: NewPiTranscriptApproval?
+        private struct ApprovalIdentity: Hashable {
+            let runtime: String
+            let request: String
+        }
+        private var approvalIDs: [ApprovalIdentity: UUID] = [:]
+        private var approvalID = UUID()
+        private var approvalNonce = UUID()
+        private var approvalAfter: UUID?
+        private var approvalDirty = false
+        private var approvalClaimed = false
+        private var claimedApprovalIdentities: Set<ApprovalIdentity> = []
+        private var pendingPresentationEvents: [[String: Any]] = []
+        private var copyCapability = UUID()
+        private var copyCapabilityDirty = true
+        private var projectName: String?
+        private var dateContext: String?
+        private var contextDirty = true
+
+        func updateContext(projectName: String?, dateContext: String?) {
+            guard self.projectName != projectName || self.dateContext != dateContext else { return }
+            self.projectName = projectName
+            self.dateContext = dateContext
+            contextDirty = true
+        }
+
+        private func receiptOp(outcome: String, message: String) -> [String: Any] {
+            ["op": "approvalReceipt", "id": approvalID.uuidString, "nonce": approvalNonce.uuidString,
+             "outcome": outcome, "message": message]
+        }
+
+        private func takePresentationOps() -> [[String: Any]] {
+            var ops: [[String: Any]] = []
+            if copyCapabilityDirty {
+                copyCapabilityDirty = false
+                ops.append(["op": "copyCapability", "capability": copyCapability.uuidString])
+            }
+            if contextDirty {
+                contextDirty = false
+                ops.append(["op": "context", "projectName": projectName ?? "", "dateContext": dateContext ?? ""])
+            }
+            ops.append(contentsOf: pendingPresentationEvents)
+            pendingPresentationEvents.removeAll()
+            if approvalDirty {
+                approvalDirty = false
+                ops.append(approvalOp())
+            }
+            return ops
+        }
+
+        func updateApproval(_ approval: NewPiTranscriptApproval?, after: UUID?, flushImmediately: Bool = true) {
+            guard latestApproval != approval else { return }
+            let sameRequest = latestApproval?.runtimeIdentity == approval?.runtimeIdentity
+                && latestApproval?.request.id == approval?.request.id
+            if latestApproval != nil, !sameRequest, !approvalClaimed {
+                pendingPresentationEvents.append(receiptOp(outcome: "cancelled", message: "审批已取消或撤销；未收到允许/拒绝决策。"))
+            }
+            latestApproval = approval
+            if let approval {
+                let identity = ApprovalIdentity(runtime: approval.runtimeIdentity, request: approval.request.id)
+                let id = approvalIDs[identity] ?? UUID()
+                approvalIDs[identity] = id
+                approvalID = id
+            }
+            approvalNonce = UUID()
+            // 固定在请求出现时的正文位置，插话不会把审批搬到新的 user 后面。
+            if !sameRequest { approvalAfter = liveDriven ? latestSnapshot?.items.last?.id ?? after : after }
+            approvalClaimed = approval.map {
+                claimedApprovalIdentities.contains(ApprovalIdentity(runtime: $0.runtimeIdentity, request: $0.request.id))
+            } ?? false
+            approvalDirty = true
+            if flushImmediately { flushPending() }
+        }
+
+        func flushPresentation() { flushPending() }
+
+        private func approvalOp() -> [String: Any] {
+            guard let approval = latestApproval, !approvalClaimed else { return ["op": "approval"] }
+            var op: [String: Any] = ["op": "approval", "id": approvalID.uuidString,
+                "nonce": approvalNonce.uuidString, "requestID": approval.request.id,
+                "toolName": approval.request.toolName, "summary": approval.request.summary,
+                "risk": approval.request.dangerLevel.displayName,
+                "reason": approval.request.dangerReason ?? "", "role": approval.role ?? "",
+                "directory": approval.workingDirectory.path,
+                "scopes": approval.scopes.map(\.rawValue), "isRoom": approval.isRoom]
+            if let approvalAfter { op["afterID"] = approvalAfter.uuidString }
+            return op
+        }
         private var didApplyRestore = false
         /// PIN-PROBE：最近一次上报的 JS 滚动意图（变化才记日志）。
         private var lastReportedIntent: String?
@@ -231,6 +374,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
         func detach() {
             cancelFrameProbe()
+            approvalNonce = UUID()
             pageGeneration += 1
             isPageLoaded = false
             isSending = false
@@ -293,6 +437,16 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             streamingBubbleComplete: Bool,
             tintHues: [UUID: Int]
         ) {
+            let currentIDs = Set(transcript.map(\.id))
+            interruptedToolIDs.formIntersection(currentIDs)
+            for item in transcript {
+                if case .tool(_, .running) = item.kind {
+                    if !isStreaming { interruptedToolIDs.insert(item.id) }
+                } else {
+                    // 真实成功/失败结果优先于先前的中断展示。
+                    interruptedToolIDs.remove(item.id)
+                }
+            }
             let snapshot = TranscriptSnapshot(
                 items: transcript,
                 isStreaming: isStreaming,
@@ -309,6 +463,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             if let snapshot = pendingSnapshot {
                 pendingSnapshot = nil
                 applyLoaded(snapshot)
+            } else if approvalDirty || copyCapabilityDirty || contextDirty || !pendingPresentationEvents.isEmpty {
+                let ops: [[String: Any]] = (needsReset ? [["op": "reset"]] : []) + takePresentationOps()
+                needsReset = false
+                send(ops: ops)
             } else if let intent = pendingScrollIntent {
                 pendingScrollIntent = nil
                 send(ops: [intent])
@@ -329,10 +487,13 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             for item in snapshot.items {
                 newOrder.append(item.id)
                 let streaming = isStreamingItem(item, snapshot: snapshot, lastItemID: lastItemID)
-                let signature = Self.signature(of: item, streaming: streaming, tint: snapshot.tintHues[item.id])
+                let interrupted: Bool
+                if case .tool(_, .running) = item.kind { interrupted = !snapshot.isStreaming || interruptedToolIDs.contains(item.id) }
+                else { interrupted = false }
+                let signature = Self.signature(of: item, streaming: streaming, tint: snapshot.tintHues[item.id], interrupted: interrupted)
                 newSignatures[item.id] = signature
                 guard lastSignatures[item.id] != signature else { continue }
-                ops.append(Self.upsertOp(for: item, streaming: streaming, tint: snapshot.tintHues[item.id]))
+                ops.append(Self.upsertOp(for: item, streaming: streaming, tint: snapshot.tintHues[item.id], interrupted: interrupted))
             }
 
             // 删除已不存在的条目（fork 回退等）
@@ -350,6 +511,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
             lastSignatures = newSignatures
             lastOrder = newOrder
+            ops.append(contentsOf: takePresentationOps())
 
             // 全局 fork 锁：会话正在流式时，forkFromMessage 有 guard !isStreaming 会静默丢弃，
             // 历史条目的 Fork 按钮应在流式期间一并禁用，避免点了无反馈（FORK-LOCK-GLOBAL）。
@@ -385,7 +547,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 pendingScrollIntent = nil
                 ops.append(intent)
             }
-            guard !ops.isEmpty else { return }
+            guard !ops.isEmpty else { flushPending(); return }
             send(ops: ops)
         }
 
@@ -403,34 +565,73 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         struct Signature: Equatable {
             let kind: NewPiTranscriptItemKind
             let streaming: Bool
+            let interrupted: Bool
             let tint: Int?
             let detailTurnID: String?
             let forkIndex: Int?
             let speaker: String?
             let command: String?
+            let timestamp: Date?
+            let provider: String?
+            let modelID: String?
+            let errorTitle: String?
+            let retryState: String?
+            let fileChanges: [ToolFileChange]?
+            let durationSeconds: Double?
+            let answerState: String?
+            let resultScopeID: String?
+            let progressReport: ProgressReport?
+            let testReport: TestReport?
             let attachments: [MessageAttachment]
             let body: String
         }
 
-        private static func signature(of item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> Signature {
-            Signature(kind: item.kind, streaming: streaming, tint: tint,
+        private static func signature(of item: NewPiTranscriptItem, streaming: Bool, tint: Int?, interrupted: Bool) -> Signature {
+            Signature(kind: item.kind, streaming: streaming, interrupted: interrupted, tint: tint,
                 detailTurnID: item.detailTurnID, forkIndex: item.canFork ? item.messageIndex : nil,
                 speaker: item.speaker, command: item.toolCommand,
+                timestamp: item.timestamp, provider: item.provider, modelID: item.modelID,
+                errorTitle: item.errorTitle, retryState: item.retryState,
+                fileChanges: item.fileChanges, durationSeconds: item.durationSeconds,
+                answerState: item.answerState, resultScopeID: item.resultScopeID,
+                progressReport: item.progressReport, testReport: item.testReport,
                 attachments: item.attachments, body: item.body)
         }
 
-        private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?) -> [String: Any] {
+        private static func upsertOp(for item: NewPiTranscriptItem, streaming: Bool, tint: Int?, interrupted: Bool) -> [String: Any] {
             var op: [String: Any] = [
                 "op": "upsert",
                 "id": item.id.uuidString,
                 "body": item.body,
                 "streaming": streaming,
+                "interrupted": interrupted,
             ]
             if let tint { op["tint"] = tint }
             if let command = item.toolCommand { op["command"] = command }
             if let turnID = item.detailTurnID { op["detailTurnID"] = turnID }
             // 发言者名字（CHATROOM-FLAT-MD Phase 2）：聊天室角色发言专用，session 路径不下发。
             if let speaker = item.speaker { op["speaker"] = speaker }
+            // 毫秒 epoch 保留真实时间精度；缺失不填当前时间，JS 按文档固定时区展示。
+            if let timestamp = item.timestamp { op["timestamp"] = timestamp.timeIntervalSince1970 * 1000 }
+            if let provider = item.provider { op["provider"] = provider }
+            if let modelID = item.modelID { op["modelID"] = modelID }
+            if let errorTitle = item.errorTitle { op["errorTitle"] = errorTitle }
+            if let retryState = item.retryState { op["retryState"] = retryState }
+            if let changes = item.fileChanges { op["fileChanges"] = Self.changePayload(changes) }
+            if let seconds = item.durationSeconds, seconds.isFinite, seconds >= 0 { op["durationSeconds"] = seconds }
+            if let state = item.answerState { op["answerState"] = state }
+            if let scope = item.resultScopeID { op["resultScopeID"] = scope }
+            if let report = item.progressReport {
+                op["progressReport"] = ["source": report.source.rawValue, "steps": report.steps.map {
+                    ["id": $0.id, "title": $0.title, "status": $0.status.rawValue]
+                }] as [String: Any]
+            }
+            if let report = item.testReport {
+                op["testReport"] = ["source": report.source.rawValue, "path": report.path,
+                    "passed": report.passed, "failed": report.failed, "skipped": report.skipped,
+                    "total": report.total] as [String: Any]
+            }
+            op["coverageNotice"] = ToolFileChange.coverageNotice
             // 可 fork 条目的分叉能力元数据（JS 侧据此显示 Fork 按钮）。
             if item.canFork, let messageIndex = item.messageIndex {
                 op["canFork"] = true
@@ -451,7 +652,10 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 }
             case .assistant: op["kind"] = "assistant"
             case .summary: op["kind"] = "summary"
-            case .system: op["kind"] = "system"
+            case .system:
+                op["kind"] = "system"
+                // 仅适配器的显式元数据可以产生阶段线，正文碰巧含“阶段”不构成信号。
+                if item.resultScopeID == "newpi:chatroom-phase" { op["phaseDivider"] = true }
             case .error: op["kind"] = "error"
             case .thinking: op["kind"] = "thinking"
             case .tool(let name, let state):
@@ -469,6 +673,56 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         }
 
         // MARK: - JS 通道
+
+        private static func changePayload(_ changes: [ToolFileChange]) -> Any {
+            guard let data = try? JSONEncoder().encode(changes),
+                  let value = try? JSONSerialization.jsonObject(with: data) else { return [] as [String] }
+            return value
+        }
+
+        /// 只接收原生下发能力；模型 HTML/class/dataset 都不是授权来源。
+        private func receiveApproval(_ body: [String: Any]) {
+            guard let approval = latestApproval, !approvalClaimed,
+                  approvalIsCurrent?() == true,
+                  body["id"] as? String == approvalID.uuidString,
+                  body["nonce"] as? String == approvalNonce.uuidString,
+                  body["requestID"] as? String == approval.request.id,
+                  let action = body["action"] as? String else { return }
+            let decision: ApprovalDecision
+            if action == "deny" { decision = .deny }
+            else if action == "approve", let raw = body["scope"] as? String,
+                    let scope = ApprovalScope(rawValue: raw), approval.scopes.contains(scope) {
+                decision = ApprovalDecision(approved: true, scope: scope)
+            } else { return }
+            guard onApprovalAccepted != nil || onApproval != nil else { return }
+            let identity = ApprovalIdentity(runtime: approval.runtimeIdentity, request: approval.request.id)
+            guard !claimedApprovalIdentities.contains(identity) else { return }
+            approvalClaimed = true
+            claimedApprovalIdentities.insert(identity)
+            approvalDirty = true
+            // 保存领取时的能力；回调允许同步清空/替换当前审批，但回执仍只属于旧请求。
+            let acceptedReceipt = receiptOp(outcome: decision.approved ? "approved" : "denied", message:
+                decision.approved ? (decision.scope == .once ? "已允许一次 · 仅授权本次操作，执行结果见工具步骤。" :
+                    decision.scope == .session ? "已允许 · 本\(approval.isRoom ? "聊天室" : "对话")内该类工具的非高危调用；高危仍需单次确认。" :
+                    "已允许 · 记忆该类工具的非高危授权；高危仍需单次确认。") :
+                    "已拒绝本次操作 · 未授予执行权限。")
+            let unconfirmedReceipt = receiptOp(outcome: "cancelled", message: "审批请求已结束；未收到可确认的接受结果，不代表已允许或已拒绝。")
+            if let onApprovalAccepted {
+                // 防止同步回调中 updateApproval(nil) 抢先下发清除，再丢失回执锚点。
+                let wasSending = isSending
+                isSending = true
+                let accepted = onApprovalAccepted(approval.request.id, decision)
+                pendingPresentationEvents.append(accepted ? acceptedReceipt : unconfirmedReceipt)
+                isSending = wasSending
+            } else {
+                let wasSending = isSending
+                isSending = true
+                onApproval?(approval.request.id, decision)
+                pendingPresentationEvents.append(unconfirmedReceipt)
+                isSending = wasSending
+            }
+            flushPending()
+        }
 
         private func send(ops: [[String: Any]]) {
             guard let webView, isPageLoaded else { return }
@@ -549,6 +803,12 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             lastOrder = []
             lastForkLocked = nil
             pendingSnapshot = latestSnapshot
+            approvalDirty = true
+            approvalNonce = UUID()
+            pendingPresentationEvents.removeAll()
+            copyCapability = UUID()
+            copyCapabilityDirty = true
+            contextDirty = true
         }
 
         // MARK: - WKNavigationDelegate
@@ -595,15 +855,50 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
+            case "transcriptApproval":
+                guard message.frameInfo.isMainFrame, isVisible, isPageLoaded,
+                      let webView, message.webView === webView,
+                      let body = message.body as? [String: Any] else { return }
+                receiveApproval(body)
             case "copyText":
-                guard let text = message.body as? String else { return }
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(text, forType: .string)
+                guard message.frameInfo.isMainFrame, isVisible, isPageLoaded,
+                      let webView, message.webView === webView else { return }
+                let text: String
+                var reply: [String: Any]?
+                if let legacy = message.body as? String {
+                    text = legacy
+                } else if let body = message.body as? [String: Any],
+                          let source = body["text"] as? String,
+                          let requestID = body["requestID"] as? String, !requestID.isEmpty, requestID.count <= 128,
+                          body["capability"] as? String == copyCapability.uuidString {
+                    text = source
+                    reply = ["op": "copyResult", "requestID": requestID, "capability": copyCapability.uuidString]
+                } else { return }
+                let success = writeClipboard(text)
+                if var reply {
+                    reply["success"] = success
+                    pendingPresentationEvents.append(reply)
+                    flushPending()
+                }
             case "fork":
-                guard let body = message.body as? [String: Any],
-                      let index = (body["index"] as? NSNumber)?.intValue else { return }
+                guard message.frameInfo.isMainFrame, isVisible, let webView, message.webView === webView,
+                    let body = message.body as? [String: Any],
+                    let index = (body["index"] as? NSNumber)?.intValue,
+                    let snapshot = latestSnapshot, !snapshot.isStreaming,
+                    snapshot.items.contains(where: { $0.canFork && $0.messageIndex == index }) else { return }
                 onFork?(index)
+            case "retryError":
+                // 不信任 HTML 链接、DOM dataset 或已派发但过时的页面状态。
+                // 隐藏/待投递期间也以最新运行时快照判断，而不是 lastSignatures。
+                    guard message.frameInfo.isMainFrame, isVisible, let webView,
+                      message.webView === webView,
+                      let body = message.body as? [String: Any],
+                      let rawID = body["id"] as? String, let id = UUID(uuidString: rawID),
+                      let snapshot = latestSnapshot, !snapshot.isStreaming,
+                      snapshot.items.contains(where: {
+                          $0.id == id && $0.kind == .error && $0.retryState == "available"
+                      }), let onRetry else { return }
+                onRetry(id)
             case "rendererError":
                 NewPiLogger.error(
                     category: "app",

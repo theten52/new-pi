@@ -9,9 +9,10 @@ import NewPiCore
 /// 与「讨论是长期运行的流程」语义冲突。平铺化后它们的生命周期上提到本控制器：
 /// UI 切换（选走再选回）不再销毁运行时，讨论流程持续进行（对齐 session 后台事件循环语义）。
 ///
-/// view 只观察本控制器一个对象：runtime / approvalManager 的变更在这里转发。
+/// runtime / approvalManager 的变更在这里转发；输入草稿由 view 独立观察，不广播到列表。
 @MainActor
 final class ChatRoomFlowController: ObservableObject {
+    let composerDraft = NewPiComposerDraft()
     let runtime: ChatRoomRuntime
     let approvalManager: ChatRoomApprovalManager
     private let loop: ChatRoomLoop
@@ -186,8 +187,16 @@ final class ChatRoomFlowController: ObservableObject {
         transcriptAdapter.adapt(messages: runtime.messages, roles: runtime.chatroom.roles, liveSpeech: runtime.liveSpeech)
     }
 
-    func userSpeak(content: String) {
-        do { try loop.userSpeak(content: content, runtime: runtime) } catch { flowError = error.localizedDescription }
+    /// 返回消息是否已落盘并被接受；UI 只有在 true 时才清稿和落底。
+    @discardableResult
+    func userSpeak(content: String) -> Bool {
+        do {
+            try loop.userSpeak(content: content, runtime: runtime)
+            return true
+        } catch {
+            flowError = error.localizedDescription
+            return false
+        }
     }
 
     func userVote(optionID: String) {

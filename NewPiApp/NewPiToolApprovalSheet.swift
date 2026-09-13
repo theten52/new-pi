@@ -25,6 +25,7 @@ struct NewPiApprovalContent: View {
 
     let request: ToolApprovalRequest
     var chatroom: ChatRoomContext? = nil
+    var isInline = false
     let onDecision: (ApprovalDecision) -> Void
     @State private var responded = false
 
@@ -43,6 +44,8 @@ struct NewPiApprovalContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
             if let chatroom {
                 VStack(alignment: .leading, spacing: 6) {
                     LabeledContent("聊天室", value: chatroom.name)
@@ -68,11 +71,19 @@ struct NewPiApprovalContent: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: isInline ? 130 : 320)
             Divider()
             actionRow
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(isInline ? 12 : 20)
+        .frame(maxWidth: isInline ? .infinity : 520)
+        .background(isInline ? dangerColor.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(isInline ? dangerColor.opacity(0.5) : .clear) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("待审批操作，" + request.dangerLevel.displayName)
     }
 
     // MARK: - 头部：图标 + 标题 + 工具/风险徽章
@@ -120,14 +131,11 @@ struct NewPiApprovalContent: View {
     // MARK: - 内容块：等宽命令/摘要
 
     private var contentBlock: some View {
-        ScrollView {
             Text(request.summary)
                 .font(.callout.monospaced())
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
                 .padding(12)
-        }
-        .frame(maxHeight: 180)
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
@@ -160,7 +168,6 @@ struct NewPiApprovalContent: View {
             Button("拒绝") {
                 respond(.deny)
             }
-            .keyboardShortcut(.cancelAction)
 
             Spacer()
 
@@ -186,7 +193,7 @@ struct NewPiApprovalContent: View {
             Button("允许一次") {
                 respond(.allowOnce)
             }
-            .keyboardShortcut(.defaultAction)
+            // 内联审批不可用 Return/Escape，避免编辑草稿时意外授权/拒绝。
             .buttonStyle(.borderedProminent)
         }
         .disabled(responded)
