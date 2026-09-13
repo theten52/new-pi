@@ -1,9 +1,8 @@
 import Foundation
-import Darwin
 import Testing
 @testable import NewPiCore
 
-@Suite("文件编辑记录与审批预览")
+@Suite("文件编辑记录")
 struct ToolFileChangeTests {
     private func project() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("file-change-\(UUID().uuidString)")
@@ -15,14 +14,6 @@ struct ToolFileChangeTests {
         try await WriteTool().execute(id: "write", arguments: .object([
             "path": .string(path), "content": .string(text)
         ]), context: ToolContext(workingDirectory: root), onUpdate: nil)
-    }
-
-    private func request(_ path: String, tool: String = "write", content: String = "new\n",
-                         old: String = "old") -> ToolApprovalRequest {
-        ToolApprovalRequest(id: "preview", toolName: tool, arguments: .object([
-            "path": .string(path), "content": .string(content),
-            "old_string": .string(old), "new_string": .string(content)
-        ]), summary: "测试预览")
     }
 
     /// 不调用 shell：重建 unified hunk 的旧/新字节并校验声明行数，包含无 LF 标记。
@@ -181,70 +172,4 @@ struct ToolFileChangeTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == "text")
     }
 
-    @Test("预览只读且 stale 后执行以新文件为准，复用 edit 唯一匹配规则")
-    func stalePreview() async throws {
-        let root = try project()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("file.txt")
-        try "old\n".write(to: file, atomically: true, encoding: .utf8)
-        let req = request("file.txt", tool: "edit", content: "new")
-        let preview = await ToolChangePreview.make(request: req, workingDirectory: root)
-        let planned = try #require(preview.fileChanges.first)
-        #expect(planned.after == "new\n" && preview.message.contains("可能"))
-        #expect(try String(contentsOf: file, encoding: .utf8) == "old\n")
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".new-pi").path))
-        try "old\nexternal\n".write(to: file, atomically: true, encoding: .utf8)
-        let actual = try await EditTool(snapshotStore: .forProject(root)).execute(id: "edit", arguments: req.arguments,
-            context: ToolContext(workingDirectory: root), onUpdate: nil)
-        #expect(actual.fileChanges.first?.before == "old\nexternal\n")
-        #expect(actual.fileChanges.first?.after == "new\nexternal\n")
-        #expect(planned.before == "old\n" && planned.after == "new\n")
-        try "old old".write(to: file, atomically: true, encoding: .utf8)
-        let ambiguous = await ToolChangePreview.make(request: req, workingDirectory: root)
-        #expect(ambiguous.fileChanges.isEmpty && ambiguous.message.contains("exactly once"))
-        let missing = await ToolChangePreview.make(request: request("missing", tool: "edit"), workingDirectory: root)
-        #expect(missing.fileChanges.isEmpty && !missing.message.isEmpty)
-    }
-
-    @Test("预览允许根内绝对路径、新目录和参数别名，不创建文件")
-    func supportedPreview() async throws {
-        let root = try project()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let req = ToolApprovalRequest(id: "alias", toolName: "write", arguments: .object([
-            "file_path": .string(root.appendingPathComponent("new/sub/file").path), "content": .string("text")
-        ]), summary: "")
-        let preview = await ToolChangePreview.make(request: req, workingDirectory: root)
-        #expect(preview.fileChanges.first?.beforeExists == false)
-        #expect(preview.fileChanges.first?.after == "text")
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("new").path))
-        let same = try await write("new\n", in: root)
-        #expect(same.fileChanges.count == 1)
-        let unchanged = await ToolChangePreview.make(request: request("file.txt"), workingDirectory: root)
-        #expect(unchanged.fileChanges.isEmpty && unchanged.message.contains("相同"))
-    }
-
-    @Test("预览拒绝根外、父级/叶子符号链接、二进制、FIFO 和超预算")
-    func unsafePreviews() async throws {
-        let root = try project(), outside = try project()
-        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: outside) }
-        let secret = outside.appendingPathComponent("secret")
-        try "DO_NOT_READ_OUTSIDE".write(to: secret, atomically: true, encoding: .utf8)
-        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("parent"), withDestinationURL: outside)
-        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("leaf"), withDestinationURL: secret)
-        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("dangling"),
-            withDestinationURL: outside.appendingPathComponent("missing"))
-        try Data([0, 255]).write(to: root.appendingPathComponent("binary"))
-        try Data(repeating: 97, count: ToolChangePreview.maxReadBytes + 1).write(to: root.appendingPathComponent("large"))
-        #expect(mkfifo(root.appendingPathComponent("fifo").path, 0o600) == 0)
-        for path in [secret.path, "../secret", "parent/secret", "leaf", "dangling", "binary", "large", "fifo", "nul\0path"] {
-            let preview = await ToolChangePreview.make(request: request(path), workingDirectory: root)
-            #expect(preview.fileChanges.isEmpty, "拒绝 \(path)")
-            #expect(!preview.message.isEmpty && !preview.message.contains("DO_NOT_READ_OUTSIDE"))
-        }
-        let unsupported = await ToolChangePreview.make(request: request("file", tool: "bash"), workingDirectory: root)
-        #expect(unsupported.fileChanges.isEmpty && unsupported.message.contains("不支持"))
-        let oversized = await ToolChangePreview.make(request: request("new", content: String(repeating: "x", count: 70_000)), workingDirectory: root)
-        #expect(oversized.fileChanges.isEmpty && oversized.message.contains("预算"))
-        #expect(try String(contentsOf: secret, encoding: .utf8) == "DO_NOT_READ_OUTSIDE")
-    }
 }

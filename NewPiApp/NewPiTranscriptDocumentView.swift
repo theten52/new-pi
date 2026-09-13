@@ -118,7 +118,7 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
     /// 返回 true 仅表示当前 runtime 已领取此决策，不表示工具执行成功。
     /// 新接线优先于旧 void 回调；旧回调继续可用，但不能生成“已允许/已拒绝”回执。
     var onApprovalAccepted: ((String, ApprovalDecision) -> Bool)? = nil
-    /// 每次领取及异步预览返回时重新读取真实 runtime，不能只信 SwiftUI 的上一帧。
+    /// 每次领取时重新读取真实 runtime，不能只信 SwiftUI 的上一帧。
     var approvalIsCurrent: (() -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator {
@@ -243,8 +243,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         private var approvalAfter: UUID?
         private var approvalDirty = false
         private var approvalClaimed = false
-        private var previewTask: Task<Void, Never>?
-        private var pendingPreview: [String: Any]?
         private var claimedApprovalIdentities: Set<ApprovalIdentity> = []
         private var pendingPresentationEvents: [[String: Any]] = []
         private var copyCapability = UUID()
@@ -304,9 +302,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             approvalClaimed = approval.map {
                 claimedApprovalIdentities.contains(ApprovalIdentity(runtime: $0.runtimeIdentity, request: $0.request.id))
             } ?? false
-            previewTask?.cancel()
-            previewTask = nil
-            pendingPreview = nil
             approvalDirty = true
             if flushImmediately { flushPending() }
         }
@@ -374,17 +369,11 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
         func setVisible(_ visible: Bool) {
             guard isVisible != visible else { return }
             isVisible = visible
-            if !visible {
-                previewTask?.cancel()
-                previewTask = nil
-                pendingPreview = nil
-            }
             if visible { flushPending() }
         }
 
         func detach() {
             cancelFrameProbe()
-            previewTask?.cancel()
             approvalNonce = UUID()
             pageGeneration += 1
             isPageLoaded = false
@@ -478,9 +467,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                 let ops: [[String: Any]] = (needsReset ? [["op": "reset"]] : []) + takePresentationOps()
                 needsReset = false
                 send(ops: ops)
-            } else if let preview = pendingPreview {
-                pendingPreview = nil
-                if approvalIsCurrent?() == true, !approvalClaimed { send(ops: [preview]) }
             } else if let intent = pendingScrollIntent {
                 pendingScrollIntent = nil
                 send(ops: [intent])
@@ -702,27 +688,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
                   body["nonce"] as? String == approvalNonce.uuidString,
                   body["requestID"] as? String == approval.request.id,
                   let action = body["action"] as? String else { return }
-            if action == "preview" {
-                guard previewTask == nil else { return }
-                let nonce = approvalNonce
-                let generation = pageGeneration
-                previewTask = Task { [weak self] in
-                    let result = await Task.detached(priority: .userInitiated) {
-                        await ToolChangePreview.make(request: approval.request, workingDirectory: approval.workingDirectory)
-                    }.value
-                      guard let self, !Task.isCancelled, self.pageGeneration == generation,
-                          self.approvalNonce == nonce else { return }
-                      self.previewTask = nil
-                      guard
-                          self.latestApproval == approval, self.approvalNonce == nonce,
-                          !self.approvalClaimed, self.isVisible, self.approvalIsCurrent?() == true else { return }
-                    self.pendingPreview = ["op": "approvalPreview", "id": self.approvalID.uuidString,
-                        "nonce": nonce.uuidString, "message": result.message,
-                        "fileChanges": Self.changePayload(result.fileChanges)]
-                    self.flushPending()
-                }
-                return
-            }
             let decision: ApprovalDecision
             if action == "deny" { decision = .deny }
             else if action == "approve", let raw = body["scope"] as? String,
@@ -734,9 +699,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             guard !claimedApprovalIdentities.contains(identity) else { return }
             approvalClaimed = true
             claimedApprovalIdentities.insert(identity)
-            previewTask?.cancel()
-            previewTask = nil
-            pendingPreview = nil
             approvalDirty = true
             // 保存领取时的能力；回调允许同步清空/替换当前审批，但回执仍只属于旧请求。
             let acceptedReceipt = receiptOp(outcome: decision.approved ? "approved" : "denied", message:
@@ -843,9 +805,6 @@ struct NewPiTranscriptDocumentView: NSViewRepresentable {
             pendingSnapshot = latestSnapshot
             approvalDirty = true
             approvalNonce = UUID()
-            previewTask?.cancel()
-            previewTask = nil
-            pendingPreview = nil
             pendingPresentationEvents.removeAll()
             copyCapability = UUID()
             copyCapabilityDirty = true

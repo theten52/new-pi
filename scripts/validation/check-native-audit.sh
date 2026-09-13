@@ -26,6 +26,5 @@ xcrun swiftc -swift-version 6 -parse-as-library -target "$(uname -m)-apple-macos
 xcrun swiftc -swift-version 6 -parse-as-library -target "$(uname -m)-apple-macosx15.0" \
     -I "$BIN/Modules" "$TMP/Composer.swift" "$TMP/Status.swift" \
     "$ROOT/NewPiApp/NewPiComposerDraft.swift" "$ROOT/NewPiApp/ImageAttachmentProcessor.swift" \
-    "$ROOT/NewPiApp/NewPiChangesView.swift" \
     "$ROOT/scripts/validation/NativeAuditChecks.swift" "$BIN"/NewPiCore.build/*.o -o "$TMP/native"
 "$TMP/native"

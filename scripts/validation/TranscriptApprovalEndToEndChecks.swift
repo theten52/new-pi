@@ -232,7 +232,7 @@ private final class ApprovalE2EScenario {
             request: request, workingDirectory: root), after: rows.last?.id)
         page.load(rows, hues: [:], restore: nil)
         try await wait("ColdPage 加载真实 Coordinator 外壳") { self.page.loaded && self.page.applyCount > 0 }
-        try await waitDOM("document.querySelector('.ti-approval .approval-preview')")
+        try await waitDOM("document.querySelector('.ti-approval .approval-approve')")
         try await checkDOM("""
             const card=document.querySelector('.ti-approval');
             return card.parentElement===document.querySelector('main') &&
@@ -242,25 +242,14 @@ private final class ApprovalE2EScenario {
               document.querySelectorAll('.ti-user').length===1 && !document.querySelector('.answer-footer');
             """, "文档必须显示 Core 原始审批，只有一个用户条目且无提前完成 footer", ["summary": request.summary, "root": root.path])
 
-        try await click(".ti-approval .approval-preview")
-        try await waitDOM("document.querySelector('dialog[open] .change-diff')")
-        try await checkDOM("""
-            const d=document.querySelector('dialog[open]');
-            return d.textContent.includes('尚未执行') && d.textContent.includes('新建文件') &&
-              d.querySelector('.change-diff').textContent.includes('+actual-after-from-write');
-            """, "目标不存在时必须显示只读拟执行的新建 diff")
         try approvalE2ERequire(!FileManager.default.fileExists(atPath: target.path)
             && !FileManager.default.fileExists(atPath: target.appendingPathExtension("new-pi.tmp").path)
             && decisions.isEmpty && started.isEmpty && ended.isEmpty && !finished && provider.recordedRequests.count == 1,
-            "preview 不得创建文件、领取审批、执行工具或推进 AgentLoop")
-        try approvalE2ERequire(page.approvalMessages.count == 1
-            && page.approvalMessages.first?["action"] as? String == "preview"
-            && page.approvalMessages.first?["requestID"] as? String == request.id,
-            "只读预览必须经真实按钮的 WK bridge 回传原请求")
-        try await click("dialog[open] .changes-close")
-        try await waitDOM("!document.querySelector('dialog[open]')")
+            "待审批不得创建文件、领取审批、执行工具或推进 AgentLoop")
+        try approvalE2ERequire(page.approvalMessages.isEmpty, "用户决策前不得发送审批消息")
+        try await checkRemovedActions()
 
-        // 模拟审批等待时外部编辑：真实执行 before 必须不同于刚才的“新建”预览。
+        // 模拟审批等待时外部编辑：记录必须捕获实际执行时的文件内容。
         if approved { try before.write(to: target, atomically: true, encoding: .utf8) }
         try await click(approved ? ".ti-approval .approval-approve" : ".ti-approval .approval-deny",
             text: approved ? "允许一次" : "拒绝")
@@ -271,10 +260,10 @@ private final class ApprovalE2EScenario {
         try approvalE2ERequire(failure == nil && requests.count == 1 && decisions.count == 1
             && decisions.first?.0 == request.id && decisions.first?.1 == (approved ? .allowOnce : .deny),
             "审批必须只领取一次并完成真实 Session 响应：\(failure ?? "无 Core 错误")")
-        try approvalE2ERequire(page.approvalMessages.count == 2 && page.approvalSubframeCount == 0
+        try approvalE2ERequire(page.approvalMessages.count == 1 && page.approvalSubframeCount == 0
             && page.approvalMessages.last?["action"] as? String == (approved ? "approve" : "deny")
             && page.approvalMessages.last?["requestID"] as? String == request.id,
-            "只能有 preview 和一次主 frame DOM 决策消息")
+            "只能有一次主 frame DOM 决策消息")
         if approved {
             try approvalE2ERequire(page.approvalMessages.last?["scope"] as? String == "once", "DOM 允许一次不能扩大 scope")
         }
@@ -322,8 +311,14 @@ private final class ApprovalE2EScenario {
                 && URL(fileURLWithPath: change.path).resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
                 && change.diff?.contains("-actual-before-at-execution") == true
                 && change.diff?.contains("+actual-after-from-write") == true && duration.isFinite && duration > 0,
-                "必须捕获执行时实际 before/after、真实路径和正数执行耗时，不能复用审批预览")
+                "必须捕获执行时实际 before/after、真实路径和正数执行耗时")
             try external.write(to: target, atomically: true, encoding: .utf8)
+            let history = SessionManager.messages(from: try JSONLSessionStore().load(from: sessionFile))
+            let historicalChanges = history.compactMap { message -> [ToolFileChange]? in
+                if case let .toolResult(value) = message { return value.fileChanges }; return nil
+            }
+            try approvalE2ERequire(historicalChanges == [result.fileChanges ?? []],
+                "外部编辑不能改变已落盘的历史文件记录及 patch")
         } else {
             try approvalE2ERequire(!FileManager.default.fileExists(atPath: target.path)
                 && (result.fileChanges ?? []).isEmpty && result.durationSeconds == nil && eventResult.fileChanges.isEmpty,
@@ -333,7 +328,7 @@ private final class ApprovalE2EScenario {
         // 此前只显示待审批快照；现在首次把磁盘工具 metadata 投影并发给生产 Coordinator。
         page.coordinator.updateApproval(nil, after: nil)
         page.coordinator.apply(transcript: project(messages), isStreaming: false, streamingBubbleComplete: true, tintHues: [:])
-        try await waitDOM("document.querySelector('.answer-footer .answer-changes') && !document.querySelector('.ti-approval')")
+        try await waitDOM("document.querySelector('.answer-footer .answer-copy') && !document.querySelector('.ti-approval')")
         try await checkDOM("return document.querySelectorAll('.ti-approval-receipt').length===1 && document.querySelector('.ti-approval-receipt').previousElementSibling.dataset.iid===anchor;",
             "工具结果和最终回答到达后，内存回执仍保持原审批锚点", ["anchor": rows.last?.id.uuidString ?? ""])
         try await checkDOM("""
@@ -347,18 +342,10 @@ private final class ApprovalE2EScenario {
             try await checkDOM("return document.querySelector('.result-strip').textContent.includes(seconds+' 秒') && document.querySelector('.result-strip').textContent.includes('1 次 / 1 个路径');",
                 "footer 必须显示真实 metadata 耗时与一次文件编辑", ["seconds": String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), duration)])
         }
-        try await click(".answer-footer .answer-changes")
-        try await waitDOM("document.querySelector('dialog[open]')")
-        if approved {
-            try await checkDOM("""
-                const d=document.querySelector('dialog[open]'), diff=d.querySelector('.change-diff');
-                return d.querySelectorAll('.change-file').length===1 && diff.textContent.includes('-actual-before-at-execution') &&
-                  diff.textContent.includes('+actual-after-from-write') && !d.textContent.includes(external) &&
-                  !d.textContent.includes('新建文件') && !d.textContent.includes('尚未执行');
-                """, "查看改动必须显示执行时的历史 diff，不能显示旧预览或当前文件", ["external": external.trimmingCharacters(in: .newlines)])
-        } else {
-            try await checkDOM("return document.querySelector('dialog[open] .changes-empty')?.textContent.includes('本轮未记录文件编辑快照') && !document.querySelector('dialog[open] .change-file') && !document.querySelector('.result-strip').textContent.includes('已记录工具耗时');",
-                "拒绝后的查看改动必须为空，不得虚构快照或执行耗时")
+        try await checkRemovedActions()
+        if !approved {
+            try await checkDOM("const text=document.querySelector('.result-strip').textContent; return !text.includes('文件编辑') && !text.includes('快照') && !text.includes('已记录工具耗时');",
+                "拒绝后不得虚构文件记录或执行耗时")
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -366,6 +353,11 @@ private final class ApprovalE2EScenario {
         try approvalE2ERequire(audit.count == 1 && audit.first?.callID == request.id && audit.first?.authorization == .prompted
             && audit.first?.decisionApproved == approved && audit.first?.decisionScope == .once,
             "临时审计必须证明 Core 走 prompted gate，未自动放行或扩大授权")
+    }
+
+    private func checkRemovedActions() async throws {
+        try await checkDOM("return !document.querySelector('.answer-changes, .approval-preview, .changes-dialog, .icon-diff') && ![...document.querySelectorAll('button, [role=button]')].some(el=>['改动','查看改动','查看差异'].includes(el.textContent.trim()));",
+            "审批和最终回答都不能恢复已删除动作")
     }
 
     private var storedIdentity: String { sessionFile.path }

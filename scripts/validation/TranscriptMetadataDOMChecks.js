@@ -175,7 +175,10 @@ const copyShape = (id, footer, fork = true) => {
   check(top.children.length === (footer ? 0 : 1) + (fork ? 1 : 0) &&
     top.querySelectorAll('.ti-action-fork').length === (fork ? 1 : 0), id+' 顶部保留独立 Fork');
   if (footer) check(row.querySelector('.answer-copy').textContent === '复制回答' &&
-    row.querySelector('.answer-changes').textContent === '查看改动', id+' 保留底部两个动作');
+    row.querySelectorAll('.answer-actions button').length === 1, id+' 底部仅保留复制回答');
+  check(!document.querySelector('.answer-changes, .approval-preview, .changes-dialog, .icon-diff') &&
+    ![...document.querySelectorAll('button, [role="button"]')].some(el => ['改动','查看改动','查看差异'].includes(el.textContent.trim())),
+    id+' 重建及状态切换后不恢复已删除动作');
 };
 const copyRaw = (id, source) => {
   window.expectedActionCopies.push(source);
@@ -303,6 +306,7 @@ const junitReport = (path, passed, failed, skipped) => ({source:'JUnit', path, p
 const planSummary = id => node(id).querySelector('.plan-summary').textContent;
 const testSummary = id => node(id).querySelector('.result-test-summary')?.textContent;
 const reportText = id => node(id).querySelector('.result-strip').textContent;
+const noReport = id => !node(id).querySelector('.result-test-summary, .result-test-source, .result-test-notice');
 const declaredPlan = planReport([planStep('read','completed'),planStep('fix','inProgress'),planStep('verify','pending')]);
 const planTool = up('plan-tool','tool',{toolName:'update_plan',detailTurnID:'report-turn',body:'计划原文',toolError:false,progressReport:declaredPlan});
 const reportTool = up('report-tool','tool',{toolName:'read_test_report',detailTurnID:'report-turn',body:'报告原文',toolError:false,
@@ -312,7 +316,7 @@ const reportGroup = up('report-group','detailGroup',{detailTurnID:'report-turn',
 apply([{op:'reset'},up('report-user','user'),reportGroup,
   up('prose-tool','tool',{toolName:'bash',body:'999 tests passed; all tasks completed',detailTurnID:'report-turn'}),reportAnswer]);
 check(planSummary('report-group').includes('未提供计划') && !planSummary('report-group').includes('0/0'), '没有计划是未知，不借工具计数伪造进度');
-check(reportText('report-answer').includes('未提供测试报告') && !testSummary('report-answer') && !reportText('report-answer').includes('999'), '未提供测试报告，不把 stdout 成功当测试零失败');
+check(noReport('report-answer') && !reportText('report-answer').includes('999'), '无报告不显示占位提示，不把 stdout 成功当测试零失败');
 apply([planTool,reportTool,{op:'order',ids:['report-user','report-group','prose-tool','plan-tool','report-tool','report-answer']}]);
 check(planSummary('report-group')==='Agent计划（自报） · 1/3', '计划分子来自 completed，不来自三个成功工具');
 check([...node('report-group').querySelectorAll('.plan-row')].map(el=>el.dataset.status).join(',')==='completed,inProgress,pending', '逐行保留三种真实输入状态');
@@ -351,7 +355,7 @@ apply([up('next-user','user'),up('next-group','detailGroup',{detailTurnID:'next-
 check(node('report-group').querySelector('.plan-steps')===savedPlanRows && planSummary('next-group').includes('未提供计划'), '新一轮不复活旧计划，也不继承其计划');
 apply([{op:'forkLock',locked:false},up('next-tool','tool',{toolName:'bash',interrupted:true,toolRunning:true,detailTurnID:'next-turn'}),
   up('next-answer','assistant',{body:'下一轮',answerState:'final'})]);
-check(reportText('next-answer').includes('未提供测试报告') && !testSummary('next-answer'), '同路径报告也不能跨用户轮次继承');
+check(noReport('next-answer'), '同路径报告也不能跨用户轮次继承');
 
 // 同 scope 同路径只取最新读取，不累加重复 testcase；其他路径累加。
 const repeatReport = up('report-repeat','tool',{toolName:'read_test_report',detailTurnID:'report-turn',testReport:junitReport('results.xml',6,0,1)});
@@ -362,7 +366,7 @@ check(testSummary('report-answer')==='JUnit 报告汇总：通过 8 · 失败 1 
 apply([{...repeatReport,testReport:undefined},{...otherReport,testReport:undefined}]);
 check(testSummary('report-answer')==='JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2', '元数据撤回重算，回退该路径已有报告');
 apply([{...reportTool,testReport:undefined}]);
-check(reportText('report-answer').includes('未提供测试报告') && !testSummary('report-answer'), '撤回全部报告不能残留假计数');
+check(noReport('report-answer'), '撤回全部报告不能残留计数、来源或空提示');
 apply([{...reportTool,testReport:junitReport('empty.xml',0,0,0)}]);
 check(testSummary('report-answer')==='JUnit 报告汇总：通过 0 · 失败 0 · 跳过 0' && reportText('report-answer').includes('JUnit · empty.xml'), '真实空报告的零与未提供区分，不称全部通过');
 apply([{...reportTool,testReport:{...junitReport('invalid.xml',0,0,0),passed:-1}}]);
@@ -394,7 +398,7 @@ apply([{op:'reset'},up('room-ga','detailGroup',{detailTurnID:'speech-a',collapse
   up('room-interruption','user',{body:'用户插话'}),roomAnswer('room-ab','role-b:speech-b'),roomAnswer('room-aa','role-a:speech-a'),
   roomAnswer('room-aa2','role-a:speech-a2')]);
 check(testSummary('room-aa').includes('通过 3') && testSummary('room-ab').includes('通过 7') &&
-  !testSummary('room-aa2') && reportText('room-aa2').includes('未提供测试报告'), '同路径报告按 role+speech 隔离，插话不重置旧发言');
+  noReport('room-aa2'), '同路径报告按 role+speech 隔离，插话不重置旧发言');
 check(node('room-ga').querySelector('.plan-title').textContent==='A计划' && node('room-gb').querySelector('.plan-title').textContent==='B计划', '交错计划按 detailTurnID 隔离');
 apply([roomReport('room-ta','speech-a','role-a:speech-a',9)]);
 check(testSummary('room-aa').includes('通过 9') && testSummary('room-ab').includes('通过 7'), '聊天室报告元数据单独更新不污染另一角色');

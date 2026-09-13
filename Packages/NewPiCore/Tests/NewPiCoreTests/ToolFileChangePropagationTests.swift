@@ -230,8 +230,6 @@ struct ChatRoomFileChangePropagationTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         let approval = try #require(manager.pendingApprovals.first)
-        let preview = await ToolChangePreview.make(request: approval.request, workingDirectory: root)
-        #expect(preview.fileChanges.first?.before == "before-preview")
         try await Task.sleep(for: .milliseconds(50))
         try "changed-during-approval".write(to: file, atomically: true, encoding: .utf8)
         manager.approve(id: approval.id, scope: .session)

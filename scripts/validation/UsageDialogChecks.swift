@@ -77,6 +77,7 @@ private struct UsageBarFixture: View {
     struct Unavailable: Error, CustomStringConvertible { let description: String }
     private static var unavailable: [String] = []
     private static var passes = 0
+    private static let skipCapture = ProcessInfo.processInfo.environment["NEWPI_USAGE_SKIP_CAPTURE"] == "1"
     private static let output = URL(fileURLWithPath: "/private/tmp/newpi-ui", isDirectory: true)
 
     static func main() {
@@ -150,7 +151,8 @@ private struct UsageBarFixture: View {
         window.makeKeyAndOrderFront(nil)
         // 独立 CLI 不一定继承终端的前台资格；只激活本探针，不操作任何用户 App。
         let activationAccepted = NSRunningApplication.current.activate(options: [])
-        NSApp.activate()
+        // 独立 CLI 探针没有继承终端的前台资格；只激活本测试进程，不投递全局事件。
+        NSApp.activate(ignoringOtherApps: true)
         try await pause()
         window.makeKeyAndOrderFront(nil)
         print("FOCUS: fixture accepted=\(activationAccepted) launched=\(NSRunningApplication.current.isFinishedLaunching) active=\(NSApp.isActive) key=\(window.isKeyWindow) visible=\(window.isVisible) canKey=\(window.canBecomeKey)")
@@ -168,7 +170,7 @@ private struct UsageBarFixture: View {
         defer { ticker.cancel() }
 
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        for name in ["usage-dialog-new.png", "usage-dialog-900-dark.png", "usage-dialog-620-light.png", "usage-dialog-620-dark.png"] {
+        for name in skipCapture ? [] : ["usage-dialog-new.png", "usage-dialog-900-dark.png", "usage-dialog-620-light.png", "usage-dialog-620-dark.png"] {
             let path = output.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
         }
@@ -193,6 +195,8 @@ private struct UsageBarFixture: View {
                     let selection = content.editor.selectedRange()
                     let text = content.editor.string
                     let draft = model.draft
+                    let input = InputSnapshot(content)
+                    logInput("after marked immediate", content: content, expected: input)
                     logFrames("after marked immediate", content: content, window: window)
                     try await pause()
                     // NSTextView 默认纵向自适应，组合文本会延后触发 sizeToFit。
@@ -201,13 +205,16 @@ private struct UsageBarFixture: View {
                         !content.needsLayout && !content.editor.needsLayout && opener.presentation.panel == nil
                     }
                     logFrames("after marked idle WITHOUT panel", content: content, window: window)
+                    logInput("after marked idle WITHOUT panel", content: content, expected: input)
                     let frames = [content.prose.frame, content.editor.frame, content.status.frame]
                     let originalSubviews = content.subviews
                     let originalNotifications = (content.postsFrameChangedNotifications, content.postsBoundsChangedNotifications)
                     try require(content.editor.hasMarkedText(), "测试前存在真实 marked text")
                     // 另一窗口为 key 时仍只能绑定按钮实际所属窗口，不使用全局 keyWindow。
                     if closing == "close" { decoy.makeKeyAndOrderFront(nil) }
+                    logInput("after decoy key BEFORE open", content: content, expected: input)
                     try await click(opener)
+                    logInput("after opener click", content: content, expected: input)
                     try await eventually("真实鼠标打开用量对话框") { opener.presentation.panel?.isVisible == true }
                     guard let panel = opener.presentation.panel,
                           let backdrop = panel.contentView as? NewPiUsageBackdrop else { throw Failure(description: "无面板内容") }
@@ -233,8 +240,12 @@ private struct UsageBarFixture: View {
                     if closing == "close" {
                         let name = width == 900 && !dark ? "usage-dialog-new.png"
                             : "usage-dialog-\(width)-\(dark ? "dark" : "light").png"
-                        do { try await capture(panel, name: name) }
-                        catch let error as Unavailable { unavailable.append(error.description) }
+                        if skipCapture {
+                            unavailable.append("显式跳过截图与像素验证：\(name)；未调用录屏接口")
+                        } else {
+                            do { try await capture(panel, name: name) }
+                            catch let error as Unavailable { unavailable.append(error.description) }
+                        }
                     }
                     let ticks = model.ticks
                     try await key(0, text: "a", window: panel)
@@ -248,6 +259,7 @@ private struct UsageBarFixture: View {
                     try require(model.ticks > ticks && model.sends == 0 && model.stops == 0 && model.switches == 0,
                         "后台计数推进；底层鼠标/快捷键不发送、不停止、不切会话")
                     try require(panel.firstResponder === backdrop.closeButton, "Tab / Shift-Tab 焦点不逃逸")
+                    logInput("after blocked mouse/keyboard", content: content, expected: input)
 
                     model.data.lastTurnOutputTokens = 1201
                     model.data.tokenRateText = "42 tok/s"
@@ -264,6 +276,7 @@ private struct UsageBarFixture: View {
                     try require(!allFields(in: backdrop).contains { $0.stringValue == initial.usageText }, "empty 不残留累计")
                     try require([content.prose.frame, content.editor.frame, content.status.frame] == frames,
                         "动态数据与空值更新仍不改变父内容 frame")
+                    logInput("after dynamic data BEFORE close", content: content, expected: input)
                     try preserved(content, text: text, draft: draft, marked: marked, selection: selection)
                     switch closing {
                     case "close": try await click(backdrop.closeButton)
@@ -273,6 +286,7 @@ private struct UsageBarFixture: View {
                     try await eventually("\(closing) 关闭且恢复原输入焦点") {
                         opener.presentation.panel == nil && window.isKeyWindow && window.firstResponder === content.editor
                     }
+                    logInput("after close", content: content, expected: input)
                     try preserved(content, text: text, draft: draft, marked: marked, selection: selection)
                     try require(!content.isAccessibilityHidden() && !(window.accessibilityChildren() ?? []).contains {
                         ($0 as? NSWindow) === panel
@@ -435,9 +449,41 @@ private struct UsageBarFixture: View {
 
     private static func preserved(_ content: UsageFixtureContent, text: String, draft: String,
                                   marked: NSRange, selection: NSRange) throws {
+        print("PRESERVED: text=\(content.editor.string == text) draft=\(content.model.draft == draft) hasMarkedText=\(content.editor.hasMarkedText()) marked=\(content.editor.markedRange() == marked) selection=\(content.editor.selectedRange() == selection)")
         try require(content.editor.string == text && content.model.draft == draft
             && content.editor.hasMarkedText() && content.editor.markedRange() == marked
             && content.editor.selectedRange() == selection, "同一 textview/draft/marked text/选区完整保留")
+    }
+
+    // 仅打印本探针合成文本；逐字段定位首次变化，不能把打开前的输入状态变化归因于面板。
+    private struct InputSnapshot: Equatable, CustomStringConvertible {
+        let editor: ObjectIdentifier
+        let text: String
+        let draft: String
+        let hasMarkedText: Bool
+        let marked: NSRange
+        let selection: NSRange
+
+        @MainActor
+        init(_ content: UsageFixtureContent) {
+            editor = ObjectIdentifier(content.editor)
+            text = content.editor.string
+            draft = content.model.draft
+            hasMarkedText = content.editor.hasMarkedText()
+            marked = content.editor.markedRange()
+            selection = content.editor.selectedRange()
+        }
+
+        var description: String {
+            "editor=\(editor) text=\(String(reflecting: text)) draft=\(String(reflecting: draft)) hasMarkedText=\(hasMarkedText) marked=\(marked) selection=\(selection)"
+        }
+    }
+
+    private static func logInput(_ stage: String, content: UsageFixtureContent, expected: InputSnapshot) {
+        let actual = InputSnapshot(content)
+        print("INPUT \(stage): equal=\(actual == expected) active=\(NSApp.isActive) parentKey=\(content.window?.isKeyWindow == true) editorResponder=\(content.window?.firstResponder === content.editor)")
+        print("INPUT expected: \(expected)")
+        print("INPUT actual:   \(actual)")
     }
 
     private static func axIsolation(window: NSWindow, panel: NSPanel, content: UsageFixtureContent) throws {

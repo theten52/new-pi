@@ -36,7 +36,6 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     var forkSubframeCount = 0
     var approvalMessages: [[String: Any]] = []
     var approvalSubframeCount = 0
-    var captureOnlyApprovalMessages = false
     var copiedTexts: [String] = []
 
     override init() {
@@ -100,7 +99,6 @@ final class ColdPage: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         if message.name == "transcriptApproval" {
             if let body = message.body as? [String: Any] { approvalMessages.append(body) }
             if !message.frameInfo.isMainFrame { approvalSubframeCount += 1 }
-            if captureOnlyApprovalMessages { return }
         }
         if message.name == "retryError" {
             retryMessageCount += 1

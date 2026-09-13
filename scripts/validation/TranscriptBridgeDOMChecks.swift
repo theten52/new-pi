@@ -125,10 +125,10 @@ extension TranscriptColdLoadChecks {
         apply(reportRows(nil, nil))
         try await settle()
         for (nextPlan, nextReport, expectedPlan, expectedReport) in [
-            (plan as ProgressReport?, nil as TestReport?, "Agent计划（自报） · 1/2", "未提供测试报告"),
+            (plan as ProgressReport?, nil as TestReport?, "Agent计划（自报） · 1/2", ""),
             (plan, report, "Agent计划（自报） · 1/2", "JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2"),
             (nil, report, "Agent计划（自报） · 未提供计划", "JUnit 报告汇总：通过 4 · 失败 1 · 跳过 2"),
-            (nil, nil, "Agent计划（自报） · 未提供计划", "未提供测试报告")
+            (nil, nil, "Agent计划（自报） · 未提供计划", "")
         ] {
             let batches = page.applyCount
             apply(reportRows(nextPlan, nextReport))
@@ -136,7 +136,8 @@ extension TranscriptColdLoadChecks {
             precondition(page.applyCount == batches + 1, "每次只改一个报告字段也必须触发一批真实 JSON 更新")
             let valid = try await js("""
                 return document.querySelector('.plan-summary').textContent===plan &&
-                  (document.querySelector('.result-test-summary') || document.querySelector('.result-test-notice')).textContent===report &&
+                  (document.querySelector('.result-test-summary')?.textContent || '')===report &&
+                  (report!=='' || !document.querySelector('.result-test-summary, .result-test-notice, .result-test-source')) &&
                   bridgeArticle===document.querySelector('article') && bridgeCode===document.querySelector('code');
                 """, arguments: ["plan": expectedPlan, "report": expectedReport]) as? Bool
             precondition(valid == true, "计划/报告新增与撤回必须更新 DOM，保留正文与代码节点")

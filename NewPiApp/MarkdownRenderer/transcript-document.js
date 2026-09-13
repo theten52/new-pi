@@ -28,7 +28,6 @@
   let approvalState = null;
   const approvalReceipts = new Map();
   let dateContext = "";
-  let changesDialog = null;
   let footersDirty = false;
 
   // 图形仅取本地常量，任何模型/工具文本都不进入 SVG/HTML。
@@ -39,12 +38,10 @@
     stopped: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     error: '<path d="m12 3 10 18H2zM12 9v5M12 17h.01"/>',
     copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
-    diff: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 15h8M12 12v6"/>',
     shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/>',
     file: '<path d="M5 3h9l5 5v13H5zM14 3v6h5M9 13h6M9 17h6"/>',
     retry: '<path d="M3 11a9 9 0 1 1 3 8M3 4v7h7"/>',
-    chevron: '<path d="m9 5 7 7-7 7"/>',
-    close: '<path d="m6 6 12 12M6 18 18 6"/>'
+    chevron: '<path d="m9 5 7 7-7 7"/>'
   };
   function icon(name) {
     const span = textElement("span", "transcript-icon icon-" + name, "");
@@ -88,7 +85,7 @@
     for (const tool of tools) {
       if (tool.testReport) latest.set(tool.testReport.path, tool.testReport);
     }
-    if (!latest.size) return [{ icon: "file", className: "result-test-notice", text: "未提供测试报告" }];
+    if (!latest.size) return [];
     const reports = [...latest.values()];
     const totals = reports.reduce((sum, report) => ({
       passed: sum.passed + report.passed, failed: sum.failed + report.failed, skipped: sum.skipped + report.skipped
@@ -101,68 +98,6 @@
         text: `${report.source} · ${report.path}：${countText(report)}` })),
       { icon: "file", className: "result-test-notice", text: "仅为已读取的测试报告，不保证报告新鲜度或对应当前代码。" }
     ];
-  }
-
-  function closeChanges() {
-    if (changesDialog) {
-      changesDialog.restoreFocus = false;
-      changesDialog.close();
-      changesDialog.remove();
-      changesDialog = null;
-    }
-  }
-
-  // 只展示执行快照/明确请求的预览；路径、patch 永不进入 HTML 或命令执行入口。
-  function showChanges(title, changes, message, opener, approvalNonce) {
-    closeChanges();
-    const dialog = textElement("dialog", "changes-dialog", "");
-    changesDialog = dialog;
-    dialog.approvalNonce = approvalNonce;
-    const heading = textElement("h2", "changes-title", title);
-    heading.id = "changes-dialog-title";
-    dialog.setAttribute("aria-labelledby", heading.id);
-    const dialogHeader = textElement("div", "changes-header", "");
-    dialogHeader.appendChild(heading);
-    const close = textElement("button", "changes-close", "关闭");
-    close.type = "button";
-    close.prepend(icon("close"));
-    close.addEventListener("click", () => dialog.close());
-    dialogHeader.appendChild(close);
-    dialog.appendChild(dialogHeader);
-    dialog.appendChild(textElement("p", "changes-notice", message || ""));
-    if (!changes.length) dialog.appendChild(textElement("p", "changes-empty", "本轮未记录文件编辑快照"));
-    changes.forEach(change => {
-      const section = textElement("section", "change-file", "");
-      section.appendChild(textElement("h3", "change-path", change.path || "未知路径"));
-      if (change.beforeExists === false) section.appendChild(textElement("p", "change-note", "新建文件"));
-      if (change.note) section.appendChild(textElement("p", "change-note", change.note));
-      if (change.isTruncated) section.appendChild(textElement("p", "change-note", "记录不完整；不能据此推算全部增删行。"));
-      const patch = textElement("pre", "change-diff", "");
-      if (typeof change.diff === "string" && change.diff.length) {
-        const bounded = change.diff.slice(0, 65536);
-        for (const line of bounded.split("\n")) {
-          patch.appendChild(textElement("span", line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-remove" : "diff-context", line + "\n"));
-        }
-        if (bounded.length !== change.diff.length) section.appendChild(textElement("p", "change-note", "展示已截断；不是完整 patch。"));
-      } else {
-        patch.textContent = change.diff === "" ? "记录的文本内容相同。" : "没有可用的完整 unified diff；不读取当前文件补齐历史。";
-      }
-      section.appendChild(patch);
-      dialog.appendChild(section);
-    });
-    dialog.addEventListener("cancel", event => { event.preventDefault(); dialog.close(); });
-    dialog.addEventListener("click", event => {
-      const rect = dialog.getBoundingClientRect();
-      if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
-    });
-    dialog.addEventListener("close", () => {
-      dialog.remove();
-      if (changesDialog === dialog) changesDialog = null;
-      if (dialog.restoreFocus !== false && opener?.isConnected) opener.focus({ preventScroll: true });
-    }, { once: true });
-    document.body.appendChild(dialog);
-    dialog.showModal();
-    close.focus({ preventScroll: true });
   }
 
   function positionApproval() {
@@ -179,7 +114,6 @@
     const state = approvalState;
     if (!state || state.id !== op.id || state.nonce !== op.nonce ||
         !["approved", "denied", "cancelled"].includes(op.outcome)) return;
-    if (changesDialog?.approvalNonce) closeChanges();
     state.el.textContent = "";
     state.el.className = "ti ti-approval-receipt";
     state.el.setAttribute("aria-label", "审批结果");
@@ -194,7 +128,6 @@
 
   function applyApproval(op) {
     if (approvalState && approvalState.id === op.id && approvalState.nonce === op.nonce) return;
-    if (changesDialog?.approvalNonce) closeChanges();
     if (approvalState) {
       approvalState.el.remove();
       Warmer.warmed.delete(approvalState.id);
@@ -214,7 +147,7 @@
     if (op.role) el.appendChild(textElement("p", "approval-role", "角色：" + op.role));
     el.appendChild(textElement("p", "approval-directory", "工作目录：" + op.directory));
     el.appendChild(textElement("pre", "approval-summary", op.summary || ""));
-    el.appendChild(textElement("p", "approval-notice", "拟执行操作，尚未执行。查看差异只读预览；文件可能在执行前变化。"));
+    el.appendChild(textElement("p", "approval-notice", "拟执行操作，尚未执行；文件可能在执行前变化。"));
     const actions = textElement("div", "approval-actions", "");
     function button(label, action, scope) {
       const btn = textElement("button", "approval-action approval-" + action, label);
@@ -225,15 +158,12 @@
         if (approvalState !== state || state.claimed || !btn.isConnected || btn.disabled) return;
         const handler = window.webkit?.messageHandlers?.transcriptApproval;
         if (!handler) return;
-        if (action !== "preview") {
-          state.claimed = true;
-          actions.querySelectorAll("button").forEach(b => { b.disabled = true; });
-        } else { state.previewButton = btn; }
+        state.claimed = true;
+        actions.querySelectorAll("button").forEach(b => { b.disabled = true; });
         handler.postMessage({ id: op.id, nonce: op.nonce, requestID: op.requestID, action, scope });
       });
       actions.appendChild(btn);
     }
-    button("查看差异", "preview");
     button("拒绝", "deny");
     for (const scope of op.scopes || []) {
       const label = scope === "once" ? "允许一次" : scope === "session" ? (op.isRoom ? "本聊天室内允许 " : "本对话内允许 ") + op.toolName : "一直允许 " + op.toolName;
@@ -273,9 +203,8 @@
       const segments = [{ icon: failed ? "error" : stopped ? "stopped" : running ? "running" : "done",
         text: tools.length ? `工具成功 ${completed.length} · 失败 ${failed} · 未完成 ${running + stopped}` + (stopped ? `（已停止 ${stopped}）` : "") : "本轮未调用工具" }];
       if (timed.length) segments.push({ icon: "running", text: `已记录工具耗时 ${seconds.toFixed(2)} 秒` + (timed.length < tools.length ? "（部分）" : "") });
-      segments.push({ icon: "file", text: changes.length ? `文件编辑记录 ${changes.length} 次 / ${paths.size} 个路径` : "本轮未记录文件编辑快照" });
-      wanted.set(state, { segments, changes, reportTools: turn.tools,
-        notice: state.coverageNotice || "仅展示已记录文件快照，不代表工作区全部改动或测试结果。" });
+      if (changes.length) segments.push({ icon: "file", text: `文件编辑记录 ${changes.length} 次 / ${paths.size} 个路径` });
+      wanted.set(state, { segments, reportTools: turn.tools });
     }
     // 报告在全作用域扫描后归并；交错/迟到的读取也属于其显式发言，不能被 final 的 DOM 位置截断。
     for (const result of wanted.values()) {
@@ -306,14 +235,7 @@
         if (!valid()) return;
         requestCopy(copy, state.source || "", "复制回答", valid);
       });
-      const view = textElement("button", "answer-changes", "查看改动");
-      view.type = "button";
-      view.prepend(icon("diff"));
-      view.addEventListener("click", () => {
-        if (state.footer !== footer || !footer.isConnected) return;
-        showChanges("本轮文件编辑快照", result.changes, result.notice, view);
-      });
-      actions.append(copy, view);
+      actions.append(copy);
       const strip = textElement("div", "result-strip", "");
       result.segments.forEach(segment => {
         const cell = textElement("span", "result-segment" + (segment.className ? " " + segment.className : ""), segment.text);
@@ -1599,7 +1521,6 @@
     state.resultScopeID = op.resultScopeID;
     state.progressReport = progressReport(op.progressReport);
     state.testReport = testReport(op.testReport);
-    state.coverageNotice = op.coverageNotice;
     if (state.timestamp !== op.timestamp) {
       state.date = messageDate(op.timestamp);
       state.day = state.date ? dayKey(state.date) : null;
@@ -1646,7 +1567,6 @@
     for (const op of ops) {
       if (op.op === "reset") {
         footersDirty = true;
-        closeChanges();
         approvalState = null;
         approvalReceipts.clear();
         dateContext = "";
@@ -1703,10 +1623,6 @@
         applyApprovalReceipt(op);
       } else if (op.op === "approval") {
         applyApproval(op);
-      } else if (op.op === "approvalPreview") {
-        if (approvalState && !approvalState.claimed && approvalState.id === op.id && approvalState.nonce === op.nonce) {
-          showChanges("拟执行差异 · 尚未执行", op.fileChanges || [], op.message, approvalState.previewButton, op.nonce);
-        }
       } else if (op.op === "upsert") {
         touchedEls.push(upsert(op));
       } else if (op.op === "remove") {

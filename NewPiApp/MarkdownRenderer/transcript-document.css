@@ -304,7 +304,7 @@ html, body {
 .approval-summary { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 .approval-notice, .approval-scope, .approval-directory { color: var(--newpi-secondary); }
 .approval-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.approval-action, .answer-footer button, .changes-close {
+.approval-action, .answer-footer button {
   padding: 5px 10px;
   border: 1px solid var(--newpi-border);
   border-radius: 6px;
@@ -317,7 +317,7 @@ html, body {
 .approval-action.approval-primary { background: var(--newpi-accent); color: var(--newpi-accent-ink); border-color: var(--newpi-accent); font-weight: 600; order: 1; }
 .ti-approval-receipt { display: flex; align-items: flex-start; gap: 8px; padding: 12px; background: var(--newpi-surface); border: 1px solid var(--newpi-border); border-radius: 8px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; contain-intrinsic-size: auto 56px; }
 .ti-approval-receipt > .transcript-icon { margin-top: 3px; color: var(--newpi-accent); }
-.approval-action:focus-visible, .answer-footer button:focus-visible, .changes-close:focus-visible {
+.approval-action:focus-visible, .answer-footer button:focus-visible {
   outline: 2px solid var(--newpi-accent); outline-offset: 2px;
 }
 .answer-footer { margin-top: 16px; font-size: 11px; }
@@ -332,28 +332,6 @@ html, body {
 .result-test-source > .transcript-icon { margin-top: 3px; }
 .result-test-summary .icon-error svg { color: var(--newpi-danger); }
 .result-test-notice svg, .result-test-source svg, .result-test-summary .icon-file svg { color: var(--newpi-secondary); }
-.changes-dialog {
-  box-sizing: border-box;
-  width: min(600px, calc(100vw - 32px));
-  max-height: 80vh;
-  padding: 0 24px 26px;
-  overflow: auto;
-  border: 1px solid var(--newpi-border);
-  border-radius: 12px;
-  background: var(--newpi-canvas);
-  color: var(--newpi-text);
-}
-.changes-dialog::backdrop { background: #17221d66; -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
-.changes-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 -24px 18px; padding: 16px 22px; border-bottom: 1px solid var(--newpi-border); background: var(--newpi-canvas); }
-.changes-title { margin: 0; font-size: 15px; font-weight: 600; }
-.changes-close { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; margin-left: auto; }
-.changes-notice, .change-note { color: var(--newpi-secondary); font-size: 12px; }
-.change-path { font: 600 13px ui-monospace, monospace; overflow-wrap: anywhere; }
-.change-diff { overflow: auto; font: 12px/1.6 ui-monospace, monospace; white-space: pre; }
-.change-diff span { display: block; min-height: 1.6em; }
-.diff-add { background: color-mix(in srgb, var(--newpi-accent) 12%, transparent); }
-.diff-remove { background: var(--newpi-danger-surface); color: var(--newpi-danger); }
-
 /* ===== 思考 / 工具折叠卡 ===== */
 
 .ti-thinking .card,

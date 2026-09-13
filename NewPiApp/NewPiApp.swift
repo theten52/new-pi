@@ -593,10 +593,6 @@ struct NewPiRootView: View {
 
     private var headerActions: some View {
         HStack(spacing: 14) {
-            NewPiChangesButton(
-                directory: selectedChatroom.map { URL(fileURLWithPath: $0.projectPath, isDirectory: true) } ?? viewModel.projectURL,
-                refreshToken: viewModel.isStreaming ? 1 : viewModel.transcript.count
-            )
             if let chatroom = selectedChatroom {
                 Menu {
                     Button("导出 Markdown…") {

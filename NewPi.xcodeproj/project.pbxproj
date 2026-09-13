@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AACE002E0000000000000001 /* NewPiChangesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBCE002E0000000000000001 /* NewPiChangesView.swift */; };
 		AA00002D0000000000000001 /* NewPiComposerDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00002D0000000000000001 /* NewPiComposerDraft.swift */; };
 		AA0000010000000000000001 /* NewPiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000010000000000000001 /* NewPiApp.swift */; };
 		AA00000F0000000000000001 /* NewPiLastProjectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000110000000000000001 /* NewPiLastProjectStore.swift */; };
@@ -43,7 +42,6 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		BBCE002E0000000000000001 /* NewPiChangesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChangesView.swift; sourceTree = "<group>"; };
 		BB00002D0000000000000001 /* NewPiComposerDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiComposerDraft.swift; sourceTree = "<group>"; };
 		BB0000010000000000000001 /* NewPiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiApp.swift; sourceTree = "<group>"; };
 		BB0000260000000000000001 /* NewPiChatRoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewPiChatRoomStore.swift; sourceTree = "<group>"; };
@@ -103,7 +101,6 @@
 		EE0000020000000000000001 /* NewPiApp */ = {
 			isa = PBXGroup;
 			children = (
-				BBCE002E0000000000000001 /* NewPiChangesView.swift */,
 				BB0000010000000000000001 /* NewPiApp.swift */,
 				BB0000140000000000000001 /* NewPiChatView.swift */,
 				BB00002D0000000000000001 /* NewPiComposerDraft.swift */,
@@ -226,7 +223,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AACE002E0000000000000001 /* NewPiChangesView.swift in Sources */,
 				AA0000010000000000000001 /* NewPiApp.swift in Sources */,
 				AA0000140000000000000001 /* NewPiChatView.swift in Sources */,
 				AA00002D0000000000000001 /* NewPiComposerDraft.swift in Sources */,

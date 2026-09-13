@@ -870,25 +870,8 @@ final class NewPiUsagePresentation: NSObject {
     private var contentPostedFrameChanges = false
     private var contentPostedBoundsChanges = false
     private(set) var panel: NewPiUsagePanel?
-    var onDismiss: (() -> Void)?
 
     func present(from button: NSButton, data: NewPiUsageDialogData, restoring responder: NSResponder?) {
-        let backdrop = NewPiUsageBackdrop(data: data)
-        backdrop.owner = self
-        present(from: button, restoring: responder, title: "用量明细", backdrop: backdrop,
-            dialogContent: backdrop.dialog, closeButton: backdrop.closeButton)
-    }
-
-    func present<Content: View>(from button: NSButton, title: String, restoring responder: NSResponder?,
-                               @ViewBuilder content: () -> Content) {
-        let backdrop = NewPiUsageHostedBackdrop(title: title, content: AnyView(content()))
-        backdrop.owner = self
-        present(from: button, restoring: responder, title: title, backdrop: backdrop,
-            dialogContent: backdrop.dialog, closeButton: backdrop.closeButton)
-    }
-
-    private func present(from button: NSButton, restoring responder: NSResponder?, title: String,
-                         backdrop: NSView, dialogContent: NSView, closeButton: NSButton) {
         guard panel == nil, let window = button.window, window.isVisible, window.alphaValue > 0,
               !button.isHiddenOrHasHiddenAncestor, !button.visibleRect.isEmpty,
               let content = window.contentView else { return }
@@ -898,6 +881,8 @@ final class NewPiUsagePresentation: NSObject {
             existing.makeKey()
             return
         }
+        let backdrop = NewPiUsageBackdrop(data: data)
+        backdrop.owner = self
         parent = window
         opener = button
         previousResponder = responder
@@ -934,21 +919,21 @@ final class NewPiUsagePresentation: NSObject {
         dialog.appearanceSource = window
         dialog.tabbingMode = .disallowed
         dialog.collectionBehavior = [.fullScreenAuxiliary]
-        dialog.setAccessibilityLabel(title)
+        dialog.setAccessibilityLabel("用量明细")
         dialog.setAccessibilitySubrole(.dialog)
         dialog.setAccessibilityModal(true)
         dialog.contentView = backdrop
-        dialog.setAccessibilityChildren([dialogContent])
-        dialog.setAccessibilityCloseButton(closeButton)
+        dialog.setAccessibilityChildren([backdrop.dialog])
+        dialog.setAccessibilityCloseButton(backdrop.closeButton)
         panel = dialog
         synchronize()
         content.setAccessibilityHidden(true)
         window.setAccessibilityChildren([dialog])
         window.addChildWindow(dialog, ordered: .above)
         dialog.makeKeyAndOrderFront(nil)
-        dialog.makeFirstResponder(closeButton)
+        dialog.makeFirstResponder(backdrop.closeButton)
         NSAccessibility.post(element: dialog, notification: .created)
-        NSAccessibility.post(element: closeButton, notification: .focusedUIElementChanged)
+        NSAccessibility.post(element: backdrop.closeButton, notification: .focusedUIElementChanged)
 
         let center = NotificationCenter.default
         for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
@@ -1008,13 +993,6 @@ final class NewPiUsagePresentation: NSObject {
         let belongs = event.window === parent || event.window === panel
             || (event.window == nil && panel.isKeyWindow)
         guard belongs else { return event }
-        if panel.contentView is NewPiUsageHostedBackdrop {
-            // 任意内容必须保留 Tab、方向键、复制与控件 Return；只拦底层窗口和 Escape。
-            if event.type == .keyDown, event.keyCode == 53 { dismiss(); return nil }
-                if event.type == .keyDown, event.modifierFlags.contains(.command),
-                    !["c", "a"].contains(event.charactersIgnoringModifiers?.lowercased() ?? "") { return nil }
-            return event.window === parent ? nil : event
-        }
         switch event.type {
         case .keyDown:
             if event.keyCode == 53 { dismiss(); return nil }
@@ -1057,7 +1035,6 @@ final class NewPiUsagePresentation: NSObject {
         panel = nil
         dialog.owner = nil
         (dialog.contentView as? NewPiUsageBackdrop)?.owner = nil
-        (dialog.contentView as? NewPiUsageHostedBackdrop)?.owner = nil
         window?.removeChildWindow(dialog)
         dialog.orderOut(nil)
         dialog.close()
@@ -1065,7 +1042,6 @@ final class NewPiUsagePresentation: NSObject {
         opener = nil
         previousResponder = nil
         hiddenContent = nil
-        onDismiss?()
         if restoreFocus, wasKey, let window, window.isVisible {
             window.makeKey()
             if let view = restore as? NSView, view.window === window {
@@ -1086,56 +1062,6 @@ final class NewPiUsagePanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { owner?.dismiss() }
     override func accessibilityPerformCancel() -> Bool { owner?.dismiss(); return true }
-}
-
-/// 通用窗口内居中容器：内容本身观察业务 model，不用重新赋 rootView 丢掉选择／滚动状态。
-final class NewPiUsageHostedBackdrop: NSView {
-    weak var owner: NewPiUsagePresentation?
-    let dialog = NewPiUsageRoundedSurface()
-    let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭")!, target: nil, action: nil)
-    let host: NSHostingView<AnyView>
-    private let titleField: NSTextField
-    override var isFlipped: Bool { true }
-
-    init(title: String, content: AnyView) {
-        host = NSHostingView(rootView: content)
-        host.sizingOptions = []
-        titleField = NSTextField(labelWithString: title)
-        super.init(frame: .zero)
-        addSubview(dialog)
-        dialog.radius = 14
-        dialog.addSubview(host)
-        dialog.addSubview(titleField)
-        titleField.font = .systemFont(ofSize: 15, weight: .semibold)
-        dialog.addSubview(closeButton)
-        closeButton.isBordered = false
-        closeButton.target = self
-        closeButton.action = #selector(close)
-        closeButton.toolTip = "关闭（Escape）"
-        closeButton.setAccessibilityLabel("关闭\(title)")
-        closeButton.setAccessibilityIdentifier("newpi.dialog.close")
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func close() { owner?.dismiss() }
-
-    override func layout() {
-        super.layout()
-        let width = max(1, min(920, bounds.width - 40))
-        let height = max(1, min(700, bounds.height * 0.8))
-        dialog.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
-        titleField.frame = NSRect(x: 22, y: 18, width: max(1, width - 90), height: 24)
-        closeButton.frame = NSRect(x: width - 52, y: 14, width: 30, height: 30)
-        host.frame = NSRect(x: 12, y: 56, width: max(1, width - 24), height: max(1, height - 68))
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        guard bounds.contains(local) else { return nil }
-        return dialog.frame.contains(local) ? super.hitTest(point) : self
-    }
-    override func mouseDown(with event: NSEvent) {
-        if !dialog.frame.contains(convert(event.locationInWindow, from: nil)) { owner?.dismiss() }
-    }
 }
 
 /// draw 使用真实原生像素；不依赖会影响布局的 SwiftUI overlay 或隐式动画。

@@ -18,9 +18,13 @@ python3 - "$ROOT" <<'PY' | xcrun swiftc -swift-version 6 -parse-as-library -modu
   -module-cache-path "$TMP/modules" -I "$BIN/Modules" - \
   "$BIN"/NewPiCore.build/*.o -o "$TMP/check"
 from pathlib import Path
-import hashlib, sys
+import hashlib, os, subprocess, sys
 root = Path(sys.argv[1])
-source = (root/'NewPiApp/NewPiAgentStatusView.swift').read_text()
+revision = os.environ.get('NEWPI_USAGE_REVISION')
+# 对照版只通过 git show 送入临时编译，不覆盖工作区生产文件。
+source = subprocess.check_output(['git', 'show', f'{revision}:NewPiApp/NewPiAgentStatusView.swift'],
+  cwd=root, text=True) if revision else (root/'NewPiApp/NewPiAgentStatusView.swift').read_text()
+print('SOURCE: revision=' + (revision or 'worktree'), file=sys.stderr)
 print('SOURCE: NewPiAgentStatusView.swift SHA256=' + hashlib.sha256(source.encode()).hexdigest(), file=sys.stderr)
 assert source.count('#Preview("Ready")') == 1, '生产源码提取锚点变化'
 print(source.split('#Preview("Ready")', 1)[0])

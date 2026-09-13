@@ -63,7 +63,7 @@ import SwiftUI
         let parent = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 650))
         editor.frame = NSRect(x: 20, y: 20, width: 500, height: 100)
         parent.addSubview(editor)
-        let button = NSButton(title: "合成改动", target: nil, action: nil)
+        let button = NSButton(title: "焦点测试", target: nil, action: nil)
         button.frame = NSRect(x: 20, y: 140, width: 100, height: 30)
         parent.addSubview(button)
         let window = NSWindow(contentRect: parent.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -103,69 +103,9 @@ import SwiftUI
         await pause()
         check(editor.selectedRange().location == 1, "已消费焦点token不重置用户选区")
         editor.delegate = nil
-        editor.string = "保留的合成输入"
-        editor.setSelectedRange(NSRange(location: 2, length: 0))
-        let presentation = NewPiUsagePresentation()
-        var closed = 0
-        presentation.onDismiss = { closed += 1 }
-        presentation.present(from: button, title: "合成内容", restoring: editor) {
-            VStack { Text("任意 SwiftUI 内容"); Button("不会发送模型请求") {} }
-        }
-        await pause()
-        guard let panel = presentation.panel, let backdrop = panel.contentView as? NewPiUsageHostedBackdrop else {
-            preconditionFailure("通用居中弹窗未打开")
-        }
-        backdrop.layoutSubtreeIfNeeded()
-        check(window.attachedSheet == nil && panel.parent === window, "居中子面板而非sheet")
-        check(abs(backdrop.dialog.frame.midX - backdrop.bounds.midX) < 1
-              && abs(backdrop.dialog.frame.midY - backdrop.bounds.midY) < 1, "卡片居中")
-        check(parent.subviews.compactMap { $0 as? NSVisualEffectView }.contains { $0.blendingMode == .withinWindow }, "窗口内blur")
-        check(window.firstResponder === editor && editor.selectedRange().location == 2, "打开不改底层选区")
-        for code: UInt16 in [48, 53] {
-            let text = code == 53 ? "\u{1b}" : "\t"
-            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                windowNumber: panel.windowNumber, context: nil, characters: text,
-                charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!
-            NSApp.postEvent(event, atStart: false)
-            await pause()
-        }
-        check(presentation.panel == nil && closed == 1 && window.firstResponder === editor, "本地Escape关闭并恢复焦点")
-        check(editor.string == "保留的合成输入" && editor.selectedRange().location == 2, "关闭后草稿选区不变")
-        // 真实生产改动按钮，directory=nil，因此不会调 Git 或读取任何目录。
-        let changes = NSHostingView(rootView: NewPiChangesButton(directory: nil))
-        changes.sizingOptions = []
-        changes.frame = NSRect(x: 140, y: 140, width: 100, height: 30)
-        parent.addSubview(changes)
-        await pause()
-        guard let opener = views(changes).compactMap({ $0 as? NSButton }).first(where: { $0.title == "改动" }) else {
-            preconditionFailure("真实改动按钮未挂载")
-        }
-        await click(opener)
-        guard let actual = window.childWindows?.compactMap({ $0 as? NewPiUsagePanel }).first,
-              let actualBackdrop = actual.contentView as? NewPiUsageHostedBackdrop else {
-            preconditionFailure("真实改动按钮未打开通用居中面板")
-        }
-        check(window.attachedSheet == nil, "真实改动入口不再使用sheet")
-        await click(actualBackdrop.closeButton)
-        check(window.childWindows?.contains(where: { $0 === actual }) != true,
-            "真实关闭按钮关闭改动面板")
         window.orderOut(nil)
         window.close()
     }
 
     static func pause() async { try? await Task.sleep(for: .milliseconds(120)) }
-
-    static func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
-
-    static func click(_ view: NSView) async {
-        guard let window = view.window else { preconditionFailure("合成鼠标目标无窗口") }
-        let point = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
-        for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
-            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
-                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
-                pressure: type == .leftMouseDown ? 1 : 0)!
-            NSApp.postEvent(event, atStart: false)
-        }
-        await pause()
-    }
 }

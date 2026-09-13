@@ -41,9 +41,21 @@ extension TranscriptColdLoadChecks {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("fixture.txt")
-        try "before\n".write(to: file, atomically: true, encoding: .utf8)
         let page = ColdPage()
         let copyProbe = TranscriptCopyBridgeProbe(page: page)
+        // 只观察原生实际下发的能力，不点击决策按钮，也不改变审批 DOM/领取状态。
+        page.webView.configuration.userContentController.addUserScript(WKUserScript(source: """
+            if (window.transcriptDoc) {
+                const approvalApply = window.transcriptDoc.apply;
+                window.transcriptDoc.apply = json => {
+                    for (const op of JSON.parse(json)) {
+                        if (op.op === 'reset') window.observedApproval = null;
+                        if (op.op === 'approval') window.observedApproval = op.id ? op : null;
+                    }
+                    return approvalApply(json);
+                };
+            }
+            """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         defer { page.close() }
         let previousApplication = NSWorkspace.shared.frontmostApplication
         page.window.styleMask = [.titled, .closable]
@@ -89,14 +101,14 @@ extension TranscriptColdLoadChecks {
             try await settle()
             precondition(decisions.count == count, "原生审批必须核验最新请求/nonce/可见性/一次领取")
         }
-        func capturePreview() async throws -> [String: Any] {
-            page.captureOnlyApprovalMessages = true
-            let count = page.approvalMessages.count
-            _ = try await js("document.querySelector('.approval-preview').click(); return true;")
-            try await settle()
-            precondition(page.approvalMessages.count == count + 1)
-            page.captureOnlyApprovalMessages = false
-            return page.approvalMessages.last!
+        func captureApproval() async throws -> [String: Any] {
+            guard let payload = try await js("const op=window.observedApproval; return op && {id:op.id,nonce:op.nonce,requestID:op.requestID};") as? [String: Any] else {
+                preconditionFailure("缺少原生下发的审批能力")
+            }
+            return payload
+        }
+        func checkRemovedActions() async throws {
+            try await check("return !document.querySelector('.answer-changes, .approval-preview, .changes-dialog, .icon-diff') && ![...document.querySelectorAll('button, [role=button]')].some(el=>['改动','查看改动','查看差异'].includes(el.textContent.trim()));")
         }
         let request = ToolApprovalRequest(id: "request-a", toolName: "write",
             arguments: .object(["path": .string("fixture.txt"), "content": .string("after\n")]),
@@ -139,7 +151,7 @@ extension TranscriptColdLoadChecks {
         page.coordinator.applyLive(transcript: rows, isStreaming: true, streamingBubbleComplete: false, tintHues: [:])
         try await settle()
         try await check("window.savedApproval=document.querySelector('.ti-approval'); window.savedCode=document.querySelector('main').querySelector('code'); return !document.querySelector('.approval-approve').disabled;")
-        let captured = try await capturePreview()
+        let captured = try await captureApproval()
         precondition(captured["nonce"] != nil && captured["id"] != nil)
         try await check("return !document.querySelector('.ti-approval').hasAttribute('data-nonce');")
         // 无真实按钮闭包的模型类名不会发送任何审批/分叉消息。
@@ -165,27 +177,6 @@ extension TranscriptColdLoadChecks {
         page.coordinator.applyLive(transcript: rows, isStreaming: true, streamingBubbleComplete: false, tintHues: [:])
         try await settle()
         try await check("return savedApproval.previousElementSibling.dataset.iid===tail && savedCode===document.querySelector('code');", ["tail": tail.id.uuidString])
-
-        // 真预览只读且异步；返回的是拟执行 diff，不领取审批。
-        try await post(captured, count: 0)
-        try await waitFor("document.querySelector('dialog[open] .diff-add')")
-        try await check("return document.querySelector('dialog').textContent.includes('尚未执行') && document.querySelector('.change-diff').textContent.includes('+after');")
-        let unchanged = try String(contentsOf: file, encoding: .utf8)
-        precondition(unchanged == "before\n" && decisions.isEmpty)
-        _ = try await js("document.querySelector('.changes-close').click(); return true;")
-        try await settle()
-
-        // 让最新 runtime 校验在 helper 返回时失效，验证异步结果不会打开旧请求 diff。
-        var checks = 0
-        page.coordinator.approvalIsCurrent = { checks += 1; return checks == 1 }
-        try await post(captured, count: 0)
-        for _ in 0..<100 {
-            if checks >= 2 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        precondition(checks >= 2)
-        try await check("return !document.querySelector('dialog[open]');")
-        page.coordinator.approvalIsCurrent = { current }
 
         // 最新 runtime 已撤销、但 SwiftUI 尚未投递的窗口也不能获得权限。
         var allow = captured
@@ -240,7 +231,7 @@ extension TranscriptColdLoadChecks {
         approval = NewPiTranscriptApproval(runtimeIdentity: "runtime-b", request: request, workingDirectory: directory, isRoom: true)
         page.coordinator.updateApproval(approval, after: rows.last!.id)
         try await settle()
-        let roomPayload = try await capturePreview()
+        let roomPayload = try await captureApproval()
         try await post(allow, count: 0)
         try await check("return [...document.querySelectorAll('.approval-approve')].length===2 && !document.querySelector('.ti-approval').textContent.includes('一直允许');")
         var invalidScope = roomPayload
@@ -251,7 +242,7 @@ extension TranscriptColdLoadChecks {
         approval = NewPiTranscriptApproval(runtimeIdentity: "runtime-b", request: high, workingDirectory: directory, isRoom: true)
         page.coordinator.updateApproval(approval, after: rows.last!.id)
         try await settle()
-        let highPayload = try await capturePreview()
+        let highPayload = try await captureApproval()
         try await check("return document.querySelectorAll('.approval-approve').length===1 && document.querySelector('.approval-approve').textContent==='允许一次';")
         invalidScope = highPayload; invalidScope["action"] = "approve"; invalidScope["scope"] = "session"
         try await post(invalidScope, count: 0)
@@ -268,8 +259,15 @@ extension TranscriptColdLoadChecks {
         try await check("return !document.querySelector('.ti-approval');")
         page.coordinator.setVisible(true)
         try await waitFor("document.querySelector('.ti-approval')")
-        let recovered = try await capturePreview()
+        let recovered = try await captureApproval()
+        try await checkRemovedActions()
         precondition(recovered["id"] as? String == oldID && recovered["nonce"] as? String != highPayload["nonce"] as? String)
+        // 已删除的 action 即使携带重建后的合法能力，也不能产生 UI 或领取决策。
+        var removedAction = recovered
+        removedAction["action"] = "preview"
+        try await post(removedAction, count: 0)
+        try await checkRemovedActions()
+        try await check("return !!document.querySelector('.ti-approval') && !document.querySelector('.approval-primary').disabled && !document.querySelector('dialog');")
         var oldAllow = highPayload; oldAllow["action"] = "approve"; oldAllow["scope"] = "once"
         try await post(oldAllow, count: 0)
         var freshAllow = recovered; freshAllow["action"] = "approve"; freshAllow["scope"] = "once"
@@ -317,15 +315,17 @@ extension TranscriptColdLoadChecks {
                 try await checkMessageCopies()
         try await check("""
             const a=document.querySelector('[data-iid="'+aID+'"]'), b=document.querySelector('[data-iid="'+bID+'"]');
-            window.answerCopy=a.querySelector('.answer-copy'); window.answerChanges=a.querySelector('.answer-changes');
+            window.answerCopy=a.querySelector('.answer-copy');
             return document.querySelectorAll('.answer-footer').length===2 &&
               a.querySelector('.result-strip').textContent.includes('工具成功 2 · 失败 1') &&
               a.querySelector('.result-strip').textContent.includes('2 次 / 1 个路径') &&
               a.querySelector('.result-strip').textContent.includes('2.50 秒') &&
-              b.querySelector('.result-strip').textContent.includes('本轮未记录文件编辑快照') &&
+              !b.querySelector('.result-strip').textContent.includes('文件编辑') &&
+              !b.querySelector('.result-strip').textContent.includes('快照') &&
               !b.querySelector('.result-strip').textContent.includes('2 次');
             """, ["aID": answerA.id.uuidString, "bID": answerB.id.uuidString])
-        _ = try await js("answerCopy.click(); answerChanges.click(); return true;")
+        try await checkRemovedActions()
+        _ = try await js("answerCopy.click(); return true;")
         try await settle()
         precondition(page.copiedTexts.last == rawAnswer)
         precondition(copyProbe.writes.last == rawAnswer && copyProbe.payloads.last?["requestID"] != nil)
@@ -335,23 +335,6 @@ extension TranscriptColdLoadChecks {
         try await settle()
         try await check("return answerCopy.dataset.copyStatus==='failure' && !answerCopy.classList.contains('copied');")
         copyProbe.succeeds = true
-        try "external current change\n".write(to: file, atomically: true, encoding: .utf8)
-        try await check("return document.querySelector('dialog').textContent.includes('after <script>evil()</script>') && !document.querySelector('dialog script') && !document.querySelector('dialog').textContent.includes('external current change');")
-        // Escape 的 cancel 路由（不派发给审批决策/输入发送）；焦点回原按钮。
-        _ = try await js("document.querySelector('dialog').dispatchEvent(new Event('cancel',{cancelable:true})); return true;")
-        try await settle()
-        try await check("return !document.querySelector('dialog[open]') && document.activeElement===answerChanges;")
-
-        // 真正的 WebKit Escape keyDown，而非只测试 cancel 回调；事件仅投递合成测试窗口。
-        _ = try await js("answerChanges.click(); return true;")
-        try await settle()
-        page.window.makeFirstResponder(page.webView)
-        let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: page.window.windowNumber,
-            context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
-        page.window.sendEvent(escape)
-        try await settle()
-        try await check("return !document.querySelector('dialog[open]') && document.activeElement===answerChanges;")
         precondition(decisions.count == 1 && editor.string == "审批期间草稿")
 
         // 各字段独立变化，正文/UUID 不变；不能靠同时变更 body 掩盖 signature/dirty 漏项。
@@ -403,39 +386,13 @@ extension TranscriptColdLoadChecks {
         try await check("return \(strip).textContent.includes('2 次 / 1 个路径');", ["id": answerA.id.uuidString])
         FileHandle.standardError.write(Data("PASS: metadata-only toolRunning/fileChanges/durationSeconds/answerState/resultScopeID signatures and footer dirty; article/code identity retained\n".utf8))
 
-        // 更新真实 snapshot 才更新 diff；长内容保留 +/- 安全文本、限高，不执行命令。
-        let long = ToolFileChange(path: "<img src=x>", before: nil, after: nil,
-            diff: String(repeating: "+long <>&\n", count: 10000), isTruncated: true, note: "合成长 diff")
-        let longTool = NewPiTranscriptItem(id: toolA.id, kind: toolA.kind, body: toolA.body, fileChanges: [long])
-        page.coordinator.apply(transcript: [userA, longTool, answerA], isStreaming: false, streamingBubbleComplete: true, tintHues: [:])
-        try await settle()
-        _ = try await js("document.querySelector('.answer-changes').click(); return true;")
-        try await settle()
-        try await check("const d=document.querySelector('dialog'); return d.getBoundingClientRect().height<=innerHeight*.8+1 && d.getBoundingClientRect().width<=600 && !d.querySelector('img') && d.textContent.includes('展示已截断');")
-        _ = try await js("document.querySelector('.changes-close').click(); return true;")
-        try await settle()
-
         // 角色隔离：同用户下不同 speechID 不能借用彼此工具结果。
         let roomTool = NewPiTranscriptItem(kind: toolA.kind, body: "ok", fileChanges: [change], resultScopeID: "role-a:speech-a")
         let roomA = NewPiTranscriptItem(kind: .assistant, body: "A", speaker: "A", answerState: "final", resultScopeID: "role-a:speech-a")
         let roomB = NewPiTranscriptItem(kind: .assistant, body: "B", speaker: "B", answerState: "final", resultScopeID: "role-b:speech-b")
         page.coordinator.apply(transcript: [userA, roomTool, userB, roomA, roomB], isStreaming: false, streamingBubbleComplete: true, tintHues: [:])
         try await settle()
-        try await check("const strips=[...document.querySelectorAll('.result-strip')]; return strips.length===2 && strips[0].textContent.includes('1 个路径') && strips[1].textContent.includes('本轮未记录文件编辑快照');")
-
-        var unsupported = request
-        unsupported.id = "preview-bash"
-        unsupported.toolName = "bash"
-        unsupported.arguments = .object(["command": .string("never execute this fixture")])
-        page.coordinator.updateApproval(NewPiTranscriptApproval(runtimeIdentity: "preview-runtime",
-            request: unsupported, workingDirectory: directory), after: roomB.id)
-        try await settle()
-        _ = try await js("document.querySelector('.approval-preview').click(); return true;")
-        try await waitFor("document.querySelector('dialog[open]')")
-        try await check("return document.querySelector('dialog').textContent.includes('不支持文件 diff 预览');")
-        require(decisions.count == 1, "unsupported preview decisions=\(decisions.count), expected 1")
-        _ = try await js("document.querySelector('.changes-close').click(); return true;")
-        try await settle()
+        try await check("const strips=[...document.querySelectorAll('.result-strip')]; return strips.length===2 && strips[0].textContent.includes('1 个路径') && !strips[1].textContent.includes('文件编辑') && !strips[1].textContent.includes('快照');")
 
         // 点击不等于接受；拒收的原生回调和旧 void 回调都不能产生允许/拒绝成功回执。
         var rejectedCalls = 0
@@ -445,7 +402,7 @@ extension TranscriptColdLoadChecks {
         let rejectedApproval = NewPiTranscriptApproval(runtimeIdentity: "rejected-runtime", request: rejectedRequest, workingDirectory: directory)
         page.coordinator.updateApproval(rejectedApproval, after: roomB.id)
         try await settle()
-        let rejectedPayload = try await capturePreview()
+        let rejectedPayload = try await captureApproval()
         _ = try await js("const b=document.querySelector('.approval-primary');b.click();b.click();return true;")
         try await settle()
         require(rejectedCalls == 1, "单个审批真实按钮不能重复提交：rejectedCalls=\(rejectedCalls)")
@@ -467,7 +424,7 @@ extension TranscriptColdLoadChecks {
         legacyRequest.id = "legacy-void"
         page.coordinator.updateApproval(NewPiTranscriptApproval(runtimeIdentity: "legacy-runtime", request: legacyRequest, workingDirectory: directory), after: roomB.id)
         try await settle()
-        let legacyPayload = try await capturePreview()
+        let legacyPayload = try await captureApproval()
         _ = try await js("document.querySelector('.approval-deny').click();return true;")
         try await settle()
         require(legacyCalls == 1, "legacyCalls=\(legacyCalls), expected 1")
@@ -481,7 +438,7 @@ extension TranscriptColdLoadChecks {
         page.coordinator.updateApproval(NewPiTranscriptApproval(runtimeIdentity: "frame-runtime", request: frameRequest,
             workingDirectory: directory), after: roomB.id)
         try await settle()
-        let framePayload = try await capturePreview()
+        let framePayload = try await captureApproval()
         page.loaded = false
         page.webView.loadHTMLString("<!doctype html><html><body>frame fixture</body></html>", baseURL: nil)
         for _ in 0..<300 {
@@ -495,6 +452,6 @@ extension TranscriptColdLoadChecks {
             "approvalSubframeCount=\(page.approvalSubframeCount), decisions=\(decisions.count); both expected 1")
         page.coordinator.detach()
         try await post(frameAllow, count: 1)
-        print("PASS: transcript approval DOM/scroll/editable input/live revocation/runtime identity/scopes/preview/process callback/mainframe/once; raw footer copy/per-turn snapshots/role isolation/escaping/long diff/cancel focus")
+        print("PASS: transcript approval DOM/scroll/editable input/live revocation/runtime identity/scopes/process callback/mainframe/once; raw footer copy/per-turn statistics/role isolation; removed actions absent after rebuild")
     }
 }
