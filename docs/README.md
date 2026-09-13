@@ -10,6 +10,7 @@
 | [项目 README](../README.md) | 产品能力、开发与打包入口 |
 | [架构总览](architecture.md) | 当前模块、事件流、存储与渲染边界 |
 | [UI 架构 ADR](ui-architecture-decision.md) | 当前单文档决策及历史迁移依据；先读状态说明 |
+| [完全 Swift 原生 UI 路线评估](swift-native-route-assessment.md) | 2026-09-14：暂不全面去掉 WebView；收益、迁移成本与重新评估条件 |
 | [TODO](TODO.md) | 未解决问题、待验收/待复核项与已完成条目索引 |
 | [App 运行指南](../NewPiApp/README.md) | Xcode 运行、provider 配置与会话入口 |
 | [构建与校验脚本](../scripts/README.md) | App 打包及原生 UI/WebKit 校验；区别于核心包测试 |
